@@ -43,7 +43,7 @@ A face being recognized does NOT automatically mean attendance is recorded.
 
 ```text
 01. Project structure & environment            ✅ complete
-02. Configuration & constants                  ⬜ not started
+02. Configuration & constants                  ✅ complete
 03. Employee data model                        ⬜
 04. Live camera service                        ⬜
 05. Face detection                             ⬜

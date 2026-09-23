@@ -8,7 +8,7 @@ Updated after every verified step — never ahead of implementation.
 | # | Step | Status | Notes |
 |---|------|--------|-------|
 | 01 | Project structure & environment | ✅ Complete | Verified 2026-09-23 — 17/17 tests pass. Details below. |
-| 02 | Configuration & constants | ⬜ Not started | Will extend the Step 01 logging contract in `src/config.py`. |
+| 02 | Configuration & constants | ✅ Complete | Verified 2026-09-23 — 35/35 tests pass (18 new config tests). Details below. |
 | 03 | Employee data model | ⬜ Not started | |
 | 04 | Live camera service | ⬜ Not started | |
 | 05 | Face detection | ⬜ Not started | Adds `mediapipe` (wheel support verified on 3.14; import to be confirmed). |
@@ -60,3 +60,39 @@ Security/RBAC/audit · Docker/deployment · Advanced liveness + optimization.
 * `notebooks/` is empty — notebooks are created by their roadmap steps.
 * No application functionality yet (per plan): camera, detection,
   recognition, embeddings, enrollment, attendance are all later steps.
+
+## Step 02 — completion record
+
+**Implemented**
+
+* `src/config.py` — centralized configuration in two layers:
+  * frozen application constants: `APP_NAME`, `PROJECT_ROOT` (derived
+    from `__file__` — working-directory independent), `CAMERA`,
+    `FACE_PROCESSING`, `ENROLLMENT` (validated frozen dataclasses)
+  * env-backed `AppSettings` via `load_settings()`: `APP_ENV`, `DEBUG`,
+    `DATA_DIR`, `LOG_DIR` plus derived paths (employees, face_samples,
+    embeddings, models, reports)
+* `ConfigError(ValueError)` fail-fast handling for invalid environment
+  values; invalid constants raise `ValueError` at import
+* `ensure_directories(settings)` — explicit directory creation only;
+  importing the module performs no side effects
+* `.env.example` updated: `APP_ENV` and `DEBUG` added, env-vs-constants
+  split documented
+* `tests/test_config.py` — 18 tests mapped to the six Step 02 requirements
+
+**Verified**
+
+* `python -m pytest` → **35 passed** (17 Step 01 + 18 Step 02)
+* External-cwd run → **35 passed**
+* Foreign-cwd subprocess test proves path resolution is cwd-independent
+* Fresh-interpreter check: importing `src.config` imports no CV/ML stack
+  and creates no directories
+
+**Configuration decisions**
+
+* Environment variables only for environment-specific values (`APP_ENV`,
+  `DEBUG`, `DATA_DIR`, `LOG_DIR`); camera/face/enrollment constants live
+  in `src/config.py` (ARCHITECTURE.md D5)
+* Frozen dataclasses everywhere — no global mutable state
+* Fail-fast validation at import/load time
+* Step 01 logging contract unchanged (`LOG_LEVEL`/`LOG_DIR` still honored)

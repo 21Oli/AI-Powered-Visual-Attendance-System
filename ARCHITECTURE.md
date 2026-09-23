@@ -68,6 +68,31 @@ git-ignored. The repository contains only directory skeletons (`.gitkeep`).
 Model weights under `models/` are likewise ignored (downloaded at runtime
 by the libraries in later steps).
 
+### D5 — Configuration: env-vs-constants split, fail-fast, no import side effects (Step 02)
+
+`src/config.py` is the single source of truth for configuration:
+
+* **Environment variables only for environment-specific values**:
+  `APP_ENV`, `DEBUG`, `DATA_DIR`, `LOG_DIR`. Application constants
+  (camera index/frame size, face-processing thresholds, enrollment
+  sample counts) are frozen dataclass instances in `src/config.py` —
+  they must not migrate into `.env`. `.env.example` documents this split.
+* **Frozen everything**: all configuration objects are frozen
+  dataclasses; there is no global mutable state. Future steps tune
+  thresholds in this one module instead of scattering magic numbers.
+* **Fail fast**: invalid constants raise `ValueError` at import; invalid
+  environment values raise `ConfigError` (a `ValueError` subclass) from
+  `load_settings()`.
+* **Working-directory independence**: `PROJECT_ROOT` derives from
+  `__file__`; relative env paths anchor to `PROJECT_ROOT`. Verified by a
+  subprocess test importing the module from a foreign cwd.
+* **No import side effects**: importing `src.config` creates no
+  directories, opens no devices, and imports no CV/ML stack. Directory
+  creation happens only via explicit `ensure_directories()` at startup.
+* **Logging continuity**: Step 01's `src/logging_setup.py` contract is
+  unchanged; `LOG_LEVEL`/`LOG_DIR` remain the interface between the two
+  modules.
+
 ### D4 — Dependency licensing note
 
 `insightface`'s library code is MIT, but its pretrained model packages
