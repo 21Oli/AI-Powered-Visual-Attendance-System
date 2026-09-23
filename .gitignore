@@ -1,0 +1,51 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- Virtual environments ---
+.venv/
+venv/
+ENV/
+env/
+
+# --- Environment / secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Tool metadata ---
+.freebuff/
+.idea/
+.vscode/
+*.swp
+
+# --- Biometric data: NEVER commit ---
+# Content-based rules so the skeleton .gitkeep files stay tracked.
+data/employees/**
+data/face_samples/**
+data/embeddings/**
+
+# --- Runtime logs ---
+data/logs/**
+*.log
+
+# --- Model weights / packs (downloaded at runtime, large) ---
+models/**
+
+# --- Keep directory skeletons in git ---
+!**/.gitkeep
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Test / coverage artifacts ---
+.pytest_cache/
+.coverage
+htmlcov/

@@ -1,0 +1,15 @@
+# AI-Powered Visual Attendance System — Python dependencies
+#
+# Step 01 (Phase 1): foundation packages only.
+# Heavy CV packages are added by the steps that use them:
+#   - Step 05 (Face detection):        mediapipe
+#   - Step 08 (Face embeddings):       insightface + onnxruntime
+# Rationale: smaller, honest commits; version risk is verified at the step
+# that introduces each package. See ARCHITECTURE.md for the fallback policy.
+#
+# Python: 3.14 (venv). Tested on Windows x64.
+
+numpy==2.5.3
+opencv-python==5.0.0.93
+python-dotenv==1.2.3
+pytest==9.1.1
