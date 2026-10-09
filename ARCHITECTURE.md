@@ -138,6 +138,30 @@ by the libraries in later steps).
 * Deferred by design: reconnection, background streaming, multi-camera
   management, and liveness are later-phase concerns.
 
+### D8 — Face detection: YuNet via FaceDetectorYN, operator-supplied model (Step 05)
+
+`src/face_detection.py` adds the first recognition-pipeline component:
+
+* **Backend**: `cv2.FaceDetectorYN` (YuNet) — verified empirically that
+  opencv-python 5.0.0.93 ships no cascade XMLs and no bundled YuNet
+  model, making legacy cascade usage impossible without a runtime
+  download (not permitted). FaceDetectorYN is part of the existing
+  pinned opencv wheel: **no new dependency**.
+* **Model lifecycle**: the ONNX model file is operator-supplied at
+  `models/yunet.onnx` and is never auto-downloaded or auto-created;
+  `load()` is explicit, idempotent, and raises `FaceDetectorLoadError`
+  with an actionable message when the file is missing or corrupt.
+* **Contract**: frames are BGR uint8 `(H, W, 3)`; invalid inputs raise
+  `FaceDetectionInputError` (a `ValueError` subclass); backend failures
+  raise `FaceDetectorError` and are never misreported as "no faces";
+  the caller's frame is never mutated.
+* **Results**: `FaceDetection` dataclass — `(x, y, width, height)`
+  pixel boxes, clamped to frame bounds; confidence is
+  backend-supplied only (never invented), filtered when non-finite.
+* **Configuration**: score threshold flows from
+  `FACE_PROCESSING.detection_confidence` (Step 02); no constants are
+  hardcoded in the detector module.
+
 ### D4 — Dependency licensing note
 
 `insightface`'s library code is MIT, but its pretrained model packages

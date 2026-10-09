@@ -11,7 +11,7 @@ Updated after every verified step — never ahead of implementation.
 | 02 | Configuration & constants | ✅ Complete | Verified 2026-09-23 — 35/35 tests pass (18 new config tests). Details below. |
 | 03 | Employee data model | ✅ Complete | Verified 2026-10-09 — 71/71 tests pass (36 new employee tests). Details below. |
 | 04 | Live camera service | ✅ Complete | Verified 2026-10-09 — 101/101 tests pass (30 new camera tests). Details below. |
-| 05 | Face detection | ⬜ Not started | Adds `mediapipe` (wheel support verified on 3.14; import to be confirmed). |
+| 05 | Face detection | ✅ Complete | Verified 2026-10-09 — 143/143 tests pass (42 new face-detection tests); YuNet backend requires an operator-supplied ONNX model. Details below. |
 | 06 | Face quality assessment | ⬜ Not started | |
 | 07 | Multi-image face enrollment | ⬜ Not started | |
 | 08 | Face embedding generation | ⬜ Not started | Adds `insightface` + `onnxruntime`. |
@@ -146,6 +146,66 @@ Security/RBAC/audit · Docker/deployment · Advanced liveness + optimization.
   is serialization for logging/tests/interchange only.
 * Uniqueness of `employee_id` is not checked by the model (needs a
   storage session; enforced in later steps).
+
+## Step 05 — completion record
+
+**Implemented**
+
+* `src/face_detection.py` — `FaceDetector` built on `cv2.FaceDetectorYN`
+  (YuNet ONNX, already pinned via opencv-python; **no new dependency**).
+  Explicit `load()` / `is_loaded` / `detect()` lifecycle.
+* `FaceDetection` — frozen, slotted result dataclass with
+  `x, y, width, height` (pixel coordinates, top-left origin) and an
+  optional backend-supplied `confidence` (None when absent; never
+  invented).
+* Frame contract: BGR uint8 `(H, W, 3)`; validation raises
+  `FaceDetectionInputError` (a `FaceDetectionError` and `ValueError`)
+  for None, empty, wrong dimensionality, unsupported channels,
+  zero-size dimensions, and non-uint8 dtypes. Input frames are never
+  mutated or copied.
+* Errors: `FaceDetectorLoadError` (missing/corrupt model or backend
+  init failure — directories are never auto-created, models never
+  auto-downloaded), `FaceDetectorError` (not loaded or backend
+  failure during detection — never silently misreported as
+  "no faces").
+* `tests/test_face_detection.py` — 42 deterministic tests using typed
+  `StubBackend` doubles plus real-backend load-failure integration and
+  fresh-process import-hygiene checks (no camera, no model load, no
+  network, no filesystem writes at import).
+
+**Detected backend and model lifecycle**
+
+* opencv-python 5.0.0.93 was inspected empirically: it ships **no**
+  cascade XMLs and no YuNet model file (verified: empty `cv2/data/`,
+  no `CascadeClassifier` symbols). Any cascade-based plan would have
+  required downloading files at runtime — not acceptable per the task,
+  so `FaceDetectorYN` with an operator-supplied YuNet ONNX model was
+  chosen instead.
+* Model file expected at `<project>/models/yunet.onnx`
+  (`DEFAULT_MODEL_PATH`); the operator downloads it from the official
+  OpenCV zoo. `load()` fails with `FaceDetectorLoadError` and a clear
+  message if it is missing or invalid; import is untouched.
+* `confidence` uses the configured score threshold
+  (`FACE_PROCESSING.detection_confidence = 0.5` from Step 02); no
+  detection parameters are hardcoded in the module.
+
+**Verified**
+
+* Focused face-detection tests: **42 passed**
+* `python -m pytest` from project root → **143 passed**, exit 0
+  (101 prior + 42 new)
+* External-cwd run (`cd /tmp`, project venv) → **143 passed**, exit 0
+* `git diff --check` → clean
+
+**Known limitations / deferred**
+
+* No YuNet model file exists in the repo (per design); real-image
+  detection accuracy requires the operator to provide
+  `models/yunet.onnx` and manually verify on target hardware. Test
+  coverage exercises the real backend only on failure paths (missing/
+  corrupt model) and a no-face synthetic control image.
+* Detection confidence/box quality on real faces, NMS tuning, and
+  performance are deferred until Step 06/07 consume real frames.
 
 ## Step 04 — completion record
 

@@ -120,6 +120,45 @@ as done. Format based on Keep a Changelog.
   recognition, attendance logic; camera reconnection/background
   streaming/multi-camera management by design.
 
+## [0.5.0] — 2026-10-09 — Phase 1, Step 05: Face detection
+
+### Added
+
+* `src/face_detection.py`: `FaceDetector` — locating faces in
+  caller-supplied frames (no identification, no camera ownership).
+  * Backend: `cv2.FaceDetectorYN` (YuNet ONNX) from the already-pinned
+    opencv-python dependency — **no new dependency added**. Verified
+    empirically that opencv-python 5.0.0.93 ships no cascade files and
+    no YuNet model; the ONNX model is operator-supplied
+    (`models/yunet.onnx`, never auto-downloaded, never auto-created).
+  * `FaceDetector.load()` is explicit and idempotent;
+    `FaceDetectionInputError` (a `ValueError`) covers invalid frames
+    (None/empty/wrong-dim/channels/dtype/zero-size); frames are never
+    mutated; `FaceDetectorLoadError` covers missing/corrupt models;
+    `FaceDetectorError` covers backend failures — failures are never
+    misreported as "no faces".
+  * `FaceDetection` frozen result: `x, y, width, height` pixel box plus
+    backend-supplied `confidence` (None when absent, never invented),
+    clamped to frame bounds, fully-outside boxes dropped.
+  * Detection threshold comes from `FACE_PROCESSING.detection_confidence`
+    (Step 02); nothing hardcoded.
+* `tests/test_face_detection.py`: 42 deterministic tests (typed stub
+  backend for correctness paths, real-backend failure integration for
+  missing/corrupt models, fresh-process import hygiene — no camera, no
+  model load, no network, no filesystem writes at import).
+
+### Verified
+
+* Focused face-detection tests: 42 passed.
+* `python -m pytest` → 143 passed (101 prior + 42 new), from both the
+  project root and an external working directory.
+
+### Not included (per plan — later steps)
+
+* Face quality assessment, enrollment, embeddings, recognition,
+  temporal verification, attendance logic. The YuNet model file itself
+  must be supplied by the operator before real-world detection runs.
+
 ## [0.1.0] — 2026-09-23 — Phase 1, Step 01: Project structure & environment
 
 ### Added
