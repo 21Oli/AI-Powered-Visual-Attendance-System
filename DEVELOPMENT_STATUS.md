@@ -9,7 +9,7 @@ Updated after every verified step — never ahead of implementation.
 |---|------|--------|-------|
 | 01 | Project structure & environment | ✅ Complete | Verified 2026-09-23 — 17/17 tests pass. Details below. |
 | 02 | Configuration & constants | ✅ Complete | Verified 2026-09-23 — 35/35 tests pass (18 new config tests). Details below. |
-| 03 | Employee data model | ⬜ Not started | |
+| 03 | Employee data model | ✅ Complete | Verified 2026-10-09 — 71/71 tests pass (36 new employee tests). Details below. |
 | 04 | Live camera service | ⬜ Not started | |
 | 05 | Face detection | ⬜ Not started | Adds `mediapipe` (wheel support verified on 3.14; import to be confirmed). |
 | 06 | Face quality assessment | ⬜ Not started | |
@@ -96,3 +96,53 @@ Security/RBAC/audit · Docker/deployment · Advanced liveness + optimization.
 * Frozen dataclasses everywhere — no global mutable state
 * Fail-fast validation at import/load time
 * Step 01 logging contract unchanged (`LOG_LEVEL`/`LOG_DIR` still honored)
+
+## Step 03 — completion record
+
+**Implemented**
+
+* `src/employee.py` — the identity layer: `Employee` frozen/slots dataclass
+  with `employee_id`, `full_name`, `is_active`, `created_at` and
+  `__post_init__` validation raising `EmployeeValidationError(ValueError)`
+  with field-specific messages; explicit `to_dict()` serialization
+* `tests/test_employee.py` — 36 tests mapped to the nine Step 03
+  requirements
+* New `ARCHITECTURE.md` decision **D6**: identity boundaries (no biometric
+  fields, no CV/ML/database dependencies in the employee model)
+
+**Model design & validation rules**
+
+* `employee_id` — non-empty after stripping surrounding whitespace;
+  every other character preserved exactly (leading zeros, hyphens,
+  underscores, mixed case all valid — real business IDs like `"007"` or
+  `"EMP-0042"` survive unchanged; no case-folding). Uniqueness is a
+  storage-layer concern, not a model-construct concern.
+* `full_name` — non-empty after stripping plus collapsing internal
+  whitespace runs to a single space (documented normalization); case
+  preserved as provided.
+* `is_active` — must be a real `bool`; strings/ints/None rejected,
+  never coerced.
+* `created_at` — defaults to `datetime.now(UTC)`; custom values must be
+  timezone-aware datetimes (naive rejected); non-UTC zones accepted.
+* Frozen: mutation raises `FrozenInstanceError`; slots for compactness.
+* No speculative fields added beyond the four required identity fields.
+
+**Verified**
+
+* `python -m pytest` → **71 passed** (35 Step 02 + 36 Step 03) from the
+  project root
+* External-cwd run (`cd /tmp`, project venv specified explicitly) →
+  **71 passed** — import guarantees hold regardless of working directory
+* Focused employee tests: **36 passed**
+* `git diff --check` → no whitespace errors
+* Fresh-interpreter check: importing `src.employee` imports no CV/ML
+  stack (no cv2, mediapipe, insightface, onnxruntime, numpy) and performs
+  no side effects
+
+**Known limitations / deferred**
+
+* No employee persistence/repository yet — that is squarely Step 09
+  (embeddings/employee storage) plus Phase 3 (PostgreSQL); `to_dict()`
+  is serialization for logging/tests/interchange only.
+* Uniqueness of `employee_id` is not checked by the model (needs a
+  storage session; enforced in later steps).

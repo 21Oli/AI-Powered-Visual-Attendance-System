@@ -93,6 +93,29 @@ by the libraries in later steps).
   unchanged; `LOG_LEVEL`/`LOG_DIR` remain the interface between the two
   modules.
 
+### D6 — Employee identity is a pure, frozen model (Step 03)
+
+`src/employee.py` defines the identity layer's contract:
+
+* **Pure standard library.** The model depends on nothing beyond the
+  Python stdlib — no OpenCV, mediapipe, insightface, numpy, database
+  drivers, or network services. Verified by a fresh-interpreter test.
+* **Frozen dataclass.** Instances are immutable; the recognition and
+  attendance layers later *reference* employees by `employee_id` but
+  never mutate or extend this model with biometric fields (embeddings,
+  face samples, confidence, attendance state).
+* **Validation at construction**, never coercion: empty/whitespace
+  IDs or names, non-boolean `is_active`, and naive `created_at`
+  datetimes all raise `EmployeeValidationError` (a `ValueError`).
+* **Minimal documented normalization**: `employee_id` is trimmed only
+  (leading zeros, hyphens, underscores, and case are preserved —
+  real business IDs must survive); `full_name` is trimmed with
+  internal whitespace collapsed to single spaces, case preserved.
+* `created_at` is timezone-aware only (defaults to `datetime.now(UTC)`).
+* `to_dict()` is an explicit dict serialization for
+  logging/tests/interchange — it is **not** persistence. Uniqueness of
+  `employee_id` is a storage-layer concern enforced in later steps.
+
 ### D4 — Dependency licensing note
 
 `insightface`'s library code is MIT, but its pretrained model packages

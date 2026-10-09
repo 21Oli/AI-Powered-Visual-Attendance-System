@@ -44,7 +44,7 @@ A face being recognized does NOT automatically mean attendance is recorded.
 ```text
 01. Project structure & environment            ✅ complete
 02. Configuration & constants                  ✅ complete
-03. Employee data model                        ⬜
+03. Employee data model                        ✅ complete
 04. Live camera service                        ⬜
 05. Face detection                             ⬜
 06. Face quality assessment                    ⬜
@@ -85,6 +85,7 @@ visual-attendance/
 ├── notebooks/            # experimentation & demonstration
 ├── src/                  # reusable production code
 │   ├── config.py         # Step 02
+│   ├── employee.py       # Step 03
 │   ├── camera.py         # Step 04
 │   ├── detection.py      # Step 05
 │   ├── quality.py        # Step 06

@@ -42,6 +42,43 @@ as done. Format based on Keep a Changelog.
 * Camera service, detection, quality, enrollment logic, embeddings,
   recognition, temporal verification, attendance logic.
 
+## [0.3.0] — 2026-10-09 — Phase 1, Step 03: Employee data model
+
+### Added
+
+* `src/employee.py`: the identity-layer `Employee` model.
+  * `Employee` — frozen, slotted dataclass with `employee_id`,
+    `full_name`, `is_active`, `created_at` and `to_dict()` explicit
+    serialization (dictionary only — not persistence).
+  * Validation: `EmployeeValidationError(ValueError)` with actionable,
+    field-specific messages; no silent coercion of invalid input.
+  * Normalization: `employee_id` trimmed only (entries like `"007"` and
+    `"EMP-0042"` preserved exactly); `full_name` trimmed plus internal
+    whitespace collapsed, case preserved; `is_active` must be a real
+    `bool`; `created_at` defaults to UTC now and must be timezone-aware.
+  * Identity boundaries honored: no face data, embeddings, camera
+    frames, recognition confidence, or attendance state in the model;
+    no CV/ML/database dependencies (ARCHITECTURE.md D6).
+* `tests/test_employee.py`: 36 tests mapped to the nine Step 03
+  requirements (creation, field validation, whitespace rejection,
+  boolean strictness, normalization, ID preservation, timestamps,
+  serialization, import hygiene).
+
+### Verified
+
+* `python -m pytest` → 71 passed (35 Step 02 + 36 Step 03) from the
+  project root.
+* External-cwd run → 71 passed.
+* Fresh-interpreter check: importing `src.employee` imports no CV/ML
+  stack and performs no side effects.
+
+### Not included (per plan — later steps)
+
+* Employee persistence/repository and `employee_id` uniqueness
+  enforcement (storage steps + Phase 3).
+* Camera service, detection, quality, enrollment logic, embeddings,
+  recognition, temporal verification, attendance logic.
+
 ## [0.1.0] — 2026-09-23 — Phase 1, Step 01: Project structure & environment
 
 ### Added
