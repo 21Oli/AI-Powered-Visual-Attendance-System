@@ -10,7 +10,7 @@ Updated after every verified step — never ahead of implementation.
 | 01 | Project structure & environment | ✅ Complete | Verified 2026-09-23 — 17/17 tests pass. Details below. |
 | 02 | Configuration & constants | ✅ Complete | Verified 2026-09-23 — 35/35 tests pass (18 new config tests). Details below. |
 | 03 | Employee data model | ✅ Complete | Verified 2026-10-09 — 71/71 tests pass (36 new employee tests). Details below. |
-| 04 | Live camera service | ⬜ Not started | |
+| 04 | Live camera service | ✅ Complete | Verified 2026-10-09 — 101/101 tests pass (30 new camera tests). Details below. |
 | 05 | Face detection | ⬜ Not started | Adds `mediapipe` (wheel support verified on 3.14; import to be confirmed). |
 | 06 | Face quality assessment | ⬜ Not started | |
 | 07 | Multi-image face enrollment | ⬜ Not started | |
@@ -146,3 +146,54 @@ Security/RBAC/audit · Docker/deployment · Advanced liveness + optimization.
   is serialization for logging/tests/interchange only.
 * Uniqueness of `employee_id` is not checked by the model (needs a
   storage session; enforced in later steps).
+
+## Step 04 — completion record
+
+**Implemented**
+
+* `src/camera.py` — `CameraService` wrapping `cv2.VideoCapture`:
+  open (`CameraOpenError` on failure), `read_frame()` (`(False, None)`
+  on failure, never a fabricated frame), idempotent `release()`,
+  accurate `is_open`, context-manager support (`__enter__` opens,
+  `__exit__` always releases even on exception), and strict lifecycle
+  errors (`CameraStateError`) for invalid-state operations
+  (read/open misuse). Error hierarchy: `CameraError` → `CameraOpenError`
+  / `CameraStateError`.
+* `tests/test_camera.py` — 30 hardware-independent tests using
+  deterministic `FakeCapture` / `FakeCaptureFactory` doubles for
+  `cv2.VideoCapture` (mock injection at `src.camera.cv2.VideoCapture`),
+  mapped to the thirteen Step 04 behaviors plus import hygiene.
+
+**Resource-management & error-handling decisions**
+
+* Failed opens release the half-initialized handle and leave
+  `_capture = None` — no leaked device handle; retry-after-failure works.
+* Property application failures (width/height not honored by the
+  device) also release and raise `CameraOpenError`.
+* `release()` swallows its own failures (logged via the Step 01 logging
+  contract) so cleanup never masks an in-flight exception; returning
+  `None` from `__exit__` lets exceptions propagate unchanged.
+* `_safe_release()` is static — no capture mutation during cleanup.
+* Read failures (`read()` returns `False`/`None`, or empty array) return
+  `(False, None)` — never a stale or fabricated frame.
+* Configuration comes from `src.config.CAMERA` only — a test asserts no
+  hardcoded index/dimensions in the module's source.
+
+**Verified**
+
+* Focused camera tests: **30 passed**
+* `python -m pytest` from project root → **101 passed** (71 prior +
+  30 new), exit 0
+* External-cwd run (`cd /tmp`, project venv) → **101 passed**
+* Import hygiene (fresh interpreter): importing `src.camera` does not
+  instantiate `cv2.VideoCapture` (verified against a patched capture
+  class) and imports no ML stack
+
+**Known limitations / deferred**
+
+* No automatic retry or reconnection, no background streaming thread,
+  no multi-camera management, no frame-rate control beyond advisory
+  `CAMERA.target_fps` — all deferred by design.
+* Physical-camera behavior (real device property negotiation, actual
+  frame timing) can only be sanity-checked manually on target hardware;
+  the suite is intentionally hardware-independent.

@@ -116,6 +116,28 @@ by the libraries in later steps).
   logging/tests/interchange — it is **not** persistence. Uniqueness of
   `employee_id` is a storage-layer concern enforced in later steps.
 
+### D7 — Camera service: strict lifecycle, injected backend (Step 04)
+
+`src/camera.py` defines the pipeline's frame source:
+
+* **Single backend, injected for tests.** `cv2.VideoCapture` is the only
+  camera backend (already a pinned dependency — no new frameworks);
+  tests replace it deterministically at `src.camera.cv2.VideoCapture`
+  so the suite runs without physical hardware.
+* **Configuration flows one way**: all camera parameters come from
+  `src.config.CAMERA` (Step 02); the module hardcodes nothing.
+* **Fail fast, never fabricate**: a failed open raises
+  `CameraOpenError` after releasing the half-initialized handle (no
+  leak, clean retry); a failed read returns `(False, None)` — stale or
+  synthetic frames are never returned to callers.
+* **Lifecycle errors**: `CameraStateError` guards misuse (read before
+  open, re-open while open); `release()` is idempotent, logs its own
+  failures, and never masks an in-flight exception from a `with` block.
+* **Import hygiene**: importing the module touches no device —
+  acquisition happens only on explicit `open()` / `__enter__`.
+* Deferred by design: reconnection, background streaming, multi-camera
+  management, and liveness are later-phase concerns.
+
 ### D4 — Dependency licensing note
 
 `insightface`'s library code is MIT, but its pretrained model packages

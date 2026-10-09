@@ -45,7 +45,7 @@ A face being recognized does NOT automatically mean attendance is recorded.
 01. Project structure & environment            ✅ complete
 02. Configuration & constants                  ✅ complete
 03. Employee data model                        ✅ complete
-04. Live camera service                        ⬜
+04. Live camera service                        ✅ complete
 05. Face detection                             ⬜
 06. Face quality assessment                    ⬜
 07. Multi-image face enrollment                ⬜

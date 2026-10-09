@@ -79,6 +79,47 @@ as done. Format based on Keep a Changelog.
 * Camera service, detection, quality, enrollment logic, embeddings,
   recognition, temporal verification, attendance logic.
 
+## [0.4.0] — 2026-10-09 — Phase 1, Step 04: Live camera service
+
+### Added
+
+* `src/camera.py`: `CameraService` — the frame source for downstream
+  face detection.
+  * `open()` raises `CameraOpenError` if the device cannot be opened or
+    configured framing cannot be applied; `read_frame()` returns
+    `(True, frame)` only for verified non-empty device frames and
+    `(False, None)` on failure; `release()` is idempotent and never
+    raises; `is_open` reflects actual device state.
+  * Context-manager support: `__enter__` performs the open,
+    `__exit__` always releases the capture — even if the `with` block
+    raises — and never masks the in-flight exception.
+  * `CameraStateError` for invalid lifecycle misuse (reading/opening
+    in the wrong state); `CameraError` is the common base.
+  * Configuration comes solely from `src.config.CAMERA` (index,
+    frame dimensions); logging reuses the Step 01 `get_logger`
+    contract.
+* `tests/test_camera.py`: 30 hardware-independent tests with
+  deterministic `cv2.VideoCapture` fakes covering: success/failure of
+  open and read, capture release and idempotent release, context-manager
+  cleanup on normal and exceptional exit, no handle leak on failed
+  open, no fabricated/stale frames, configured index/framing honored,
+  custom `CameraConfig` injection, lifecycle-state semantics, and
+  import hygiene (no `VideoCapture` instantiation at import).
+
+### Verified
+
+* Focused camera tests: 30 passed.
+* `python -m pytest` → 101 passed (71 prior + 30 new), from both the
+  project root and an external working directory.
+* Fresh-interpreter checks: importing `src.camera` instantiates no
+  `cv2.VideoCapture` and imports no ML stack.
+
+### Not included (per plan — later steps)
+
+* Face detection, quality assessment, enrollment, embeddings,
+  recognition, attendance logic; camera reconnection/background
+  streaming/multi-camera management by design.
+
 ## [0.1.0] — 2026-09-23 — Phase 1, Step 01: Project structure & environment
 
 ### Added
