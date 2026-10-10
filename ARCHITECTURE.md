@@ -162,6 +162,47 @@ by the libraries in later steps).
   `FACE_PROCESSING.detection_confidence` (Step 02); no constants are
   hardcoded in the detector module.
 
+### D9 — Face quality: pure deterministic metrics, policy split (Step 06)
+
+`src/quality.py` gates image quality between detection (D8) and
+enrollment (Step 07):
+
+* **Pure metric layer.** No camera (frames and `FaceDetection` results
+  are caller-supplied), no model load, no filesystem, no network, no
+  enrollment, no persistence. Importing or constructing the assessor
+  performs no side effects.
+* **Two explicitly separate concerns.** `assess_face()` is per-face
+  *image* quality (size, Laplacian-variance sharpness, grayscale mean
+  brightness, optional landmark orientation proxy);
+  `assess_frame_faces()` is the *face-count policy* only
+  (`no_faces` / `multiple_faces` / `None`). A policy-rejected
+  multi-face frame never blocks per-face assessment — future phases
+  can score each face independently.
+* **Explicit decisions, stable reasons.** Results are frozen
+  dataclasses with an `ACCEPT`/`REJECT` decision enum and a
+  machine-readable `FaceQualityReason` naming the single first-failed
+  check in a documented stable order. Measured metrics are always
+  reported when computable — even on rejection; metrics that could
+  not be computed stay `None` (never invented). Contract-violating
+  inputs raise `FaceQualityInputError` (a `ValueError`), mirroring
+  Step 05; valid-but-unusable inputs (out-of-frame box) are documented
+  rejections, not exceptions.
+* **Configuration centralization.** All thresholds live in the frozen
+  `QualityConfig` (`src/config.py`, ARCHITECTURE.md D5): defaults are
+  initial, testable calibration starting points — never claims of
+  production biometric accuracy — and are tuned in Phase 2 in exactly
+  one place.
+* **Pose honesty.** The orientation check is a geometric landmark
+  proxy (nose-tip offset from the eye midpoint, normalized by box
+  width/height) — **not** 3D pose estimation. Without landmarks the
+  check is skipped (`pose_policy="optional"`, metrics `None`) or
+  rejects (`pose_policy="required"`, `no_landmarks`); values are
+  never synthesized.
+* **Backward-compatible detector extension.** `FaceDetection` gained
+  an optional `landmarks` field populated only from real backend rows
+  (15-column YuNet format); legacy 5-column behavior and construction
+  sites are unchanged, guarded by regression tests.
+
 ### D4 — Dependency licensing note
 
 `insightface`'s library code is MIT, but its pretrained model packages

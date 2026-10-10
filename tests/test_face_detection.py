@@ -152,6 +152,53 @@ def test_detect_with_no_faces_returns_empty(detector) -> None:
     assert detector.detect(make_frame()) == []
 
 
+# ---------------------------------------------------------------------------
+# Landmarks (Step 06 backward-compatible extension)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_15_column_row_exposes_five_landmarks(detector) -> None:
+    """Full YuNet rows ([x, y, w, h, landmarks(10), score]) carry landmarks."""
+    lm = [30.0, 40.0, 80.0, 40.0, 55.0, 70.0, 35.0, 100.0, 75.0, 100.0]
+    rows = np.array([[10, 20, 100, 120, *lm, 0.93]], dtype=np.float32)
+    stub_backend(detector, StubBackend(rows=rows))
+    (det,) = detector.detect(make_frame())
+    assert det.landmarks is not None
+    assert len(det.landmarks) == 5
+    # Pairs must round-trip the raw values (int conversion).
+    assert det.landmarks[0] == (30, 40)
+    assert det.landmarks[4] == (75, 100)
+    assert det.confidence == pytest.approx(0.93)
+
+
+def test_detect_5_column_row_keeps_landmarks_none(detector) -> None:
+    """Legacy 5-column rows still yield detections with landmarks=None."""
+    rows = np.array([[10, 20, 100, 120, 0.93]], dtype=np.float32)
+    stub_backend(detector, StubBackend(rows=rows))
+    (det,) = detector.detect(make_frame())
+    assert det.landmarks is None
+
+
+def test_detect_landmarks_backwards_compatible_construction() -> None:
+    """Old call sites constructing FaceDetection without landmarks work."""
+    det = FaceDetection(x=1, y=2, width=3, height=4, confidence=0.9)
+    assert det.landmarks is None
+    assert (det.x, det.y, det.width, det.height) == (1, 2, 3, 4)
+
+
+def test_detect_non_finite_landmarks_drop_landmarks_keep_box(detector) -> None:
+    """A bad landmark row must not lose the (valid) face box."""
+    lm = [float("nan"), 40.0, 80.0, 40.0, 55.0, 70.0, 35.0, 100.0, 75.0, 100.0]
+    rows = np.array([[10, 20, 100, 120, *lm, 0.93]], dtype=np.float64)
+    stub_backend(detector, StubBackend(rows=rows))
+    (det,) = detector.detect(make_frame())
+    assert det.landmarks is None
+    assert det.confidence == pytest.approx(0.93)
+
+
+# ---------------------------------------------------------------------------
+# Correctness & rejection paths
+# ---------------------------------------------------------------------------
 def test_detect_with_one_face_returns_box_and_confidence(detector) -> None:
     rows = np.array([[10, 20, 100, 120, 0.93]], dtype=np.float32)
     stub_backend(detector, StubBackend(rows=rows))

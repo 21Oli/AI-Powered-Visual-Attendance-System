@@ -41,9 +41,11 @@ __all__ = [
     "PROJECT_ROOT",
     "CameraConfig",
     "FaceProcessingConfig",
+    "QualityConfig",
     "EnrollmentConfig",
     "CAMERA",
     "FACE_PROCESSING",
+    "QUALITY",
     "ENROLLMENT",
     "AppSettings",
     "Settings",
@@ -189,9 +191,69 @@ class EnrollmentConfig:
             )
 
 
+# ---------------------------------------------------------------------------
+# Quality constants (configuration only — Step 06 implements the assessor)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class QualityConfig:
+    """Thresholds for Step 06 face-quality gating.
+
+    Defaults are initial, testable calibration starting points — **not**
+    claims of production biometric accuracy. Phase 2 evaluation tunes
+    them here (single module, per ARCHITECTURE.md D5).
+    """
+
+    #: Smallest usable (frame-clamped) box side (px) accepted per axis.
+    min_face_size_px: int = 80
+    #: Laplacian-variance sharpness floor on the grayscale face crop.
+    min_sharpness: float = 50.0
+    #: Mean-brightness acceptance window (grayscale 0–255).
+    min_brightness: float = 40.0
+    max_brightness: float = 220.0
+    #: Landmark orientation proxy tolerances (normalized offsets).
+    pose_yaw_tolerance: float = 0.15
+    #: Vertical offset allowance is looser — yaw (side-to-side) is the
+    #: stronger enrollment-quality signal for a face-looking-at-camera
+    #: check; pitch still rejects extreme up/down tilts.
+    pose_pitch_tolerance: float = 0.35
+    #: "optional": skip the pose check without landmarks (metrics None).
+    #: "required": reject with NO_LANDMARKS when landmarks are absent.
+    pose_policy: Literal["optional", "required"] = "optional"
+    #: Frame must contain exactly one face for enrollment-quality use.
+    require_single_face: bool = True
+
+    def __post_init__(self) -> None:
+        if self.min_face_size_px <= 0:
+            raise ValueError(
+                f"min_face_size_px must be positive, got {self.min_face_size_px}"
+            )
+        if self.min_sharpness < 0:
+            raise ValueError(
+                f"min_sharpness must be >= 0, got {self.min_sharpness}"
+            )
+        if not 0 <= self.min_brightness < self.max_brightness <= 255:
+            raise ValueError(
+                "brightness window must satisfy 0 <= min < max <= 255, got "
+                f"[{self.min_brightness}, {self.max_brightness}]"
+            )
+        if self.pose_yaw_tolerance < 0 or self.pose_pitch_tolerance < 0:
+            raise ValueError(
+                "pose tolerances must be >= 0, got yaw="
+                f"{self.pose_yaw_tolerance}, pitch={self.pose_pitch_tolerance}"
+            )
+        if self.pose_policy not in ("optional", "required"):
+            raise ValueError(
+                f"pose_policy must be 'optional' or 'required', got "
+                f"{self.pose_policy!r}"
+            )
+
+
 #: Frozen constant instances — the project-wide single source of truth.
 CAMERA: Final[CameraConfig] = CameraConfig()
 FACE_PROCESSING: Final[FaceProcessingConfig] = FaceProcessingConfig()
+QUALITY: Final[QualityConfig] = QualityConfig()
 ENROLLMENT: Final[EnrollmentConfig] = EnrollmentConfig()
 
 

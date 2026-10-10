@@ -47,7 +47,7 @@ A face being recognized does NOT automatically mean attendance is recorded.
 03. Employee data model                        ✅ complete
 04. Live camera service                        ✅ complete
 05. Face detection                             ✅ complete
-06. Face quality assessment                    ⬜
+06. Face quality assessment                    ✅ complete
 07. Multi-image face enrollment                ⬜
 08. Face embedding generation                  ⬜
 09. Embedding storage                          ⬜
@@ -88,7 +88,7 @@ visual-attendance/
 │   ├── employee.py       # Step 03
 │   ├── camera.py         # Step 04
 │   ├── face_detection.py # Step 05
-│   ├── quality.py        # Step 06
+│   ├── quality.py        # Step 06 (implemented)
 │   ├── enrollment.py     # Step 07
 │   ├── embeddings.py     # Step 08
 │   ├── recognition.py    # Step 10

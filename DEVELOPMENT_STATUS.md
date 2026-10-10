@@ -3,6 +3,100 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 06 — completion record (2026-10-10)
+
+**Implemented**
+
+* `src/quality.py` — `FaceQualityAssessor`: reusable, deterministic
+  face-quality assessment between detection (Step 05) and enrollment
+  (Step 07). Pure image metrics — no camera, no model load, no
+  filesystem, no network, no enrollment;
+  * `assess_face(frame, detection)` — per-face **image quality**:
+    box size (usable/camped area), Laplacian-variance sharpness,
+    grayscale mean brightness, and an optional landmark-based
+    orientation proxy. Returns a frozen `FaceQuality` result with an
+    explicit `FaceQualityDecision` (ACCEPT/REJECT — never a bare bool)
+    and a stable machine-readable `FaceQualityReason` naming the
+    first-failed check (order: OUT_OF_FRAME → TOO_SMALL →
+    NO_LANDMARKS/POSE → BLUR → TOO_DARK → TOO_BRIGHT);
+  * `assess_frame_faces(detections)` — **face-count policy** separate
+    from image quality: `NO_FACES` (empty frame), `MULTIPLE_FACES`
+    (single-face policy on), or `None` (policy satisfied). The face
+    count never merges with per-face quality: in a multi-face frame
+    every face is still individually assessable;
+  * invalid caller inputs (None/wrong-shape/wrong-dtype/empty frames,
+    zero-area boxes, non-sequence detections) raise
+    `FaceQualityInputError` (a `ValueError`) — `FaceQualityReasons`
+    are reserved for *valid* inputs that fail the quality gates.
+    Out-of-frame/mostly-outside faces are documented returns, not
+    exceptions.
+* `src/config.py` — new frozen `QualityConfig` + project-wide `QUALITY`
+  instance: `min_face_size_px=80`, `min_sharpness=50.0`,
+  `min_brightness=40`, `max_brightness=220`, `pose_yaw_tolerance=0.15`,
+  `pose_pitch_tolerance=0.35`, `pose_policy` (`"optional"`/
+  `"required"`), `require_single_face=True`. Fail-fast `ValueError`
+  validation; thresholds are initial calibration starting points, not
+  claims of production biometric accuracy.
+* `src/face_detection.py` — **backward-compatible** `FaceDetection`
+  extension: optional `landmarks: tuple[(x, y), ...] | None` (5 points,
+  canonical YuNet order — right eye, left eye, nose tip, right mouth
+  corner, left mouth corner). Populated from real backend rows in the
+  full 15-column format; `None` for legacy 5-column rows; never
+  synthesized; non-finite landmark values drop the landmarks but keep
+  the box. Existing construction sites work unchanged.
+* `tests/test_quality.py` — 56 deterministic tests (synthetic
+  NumPy/OpenCV images, real `cv2` metric computation; private-seeded
+  RNG so order-independent expected values; zero-area/negative-origin
+  boxes probed via `object.__new__` doubles) covering: acceptance,
+  each rejection reason, stable reason values, first-failed-check
+  order, box clamping (partial, mostly-out, fully-out, edge-touching),
+  frozen results, input-frame/detection immutability, face-count
+  policy (0/1/2+ faces, policy off), pose frontal/yaw/pitch,
+  `pose_required` / landmarks-absent behavior, threshold flips,
+  config validation, scope guarantees (no file writes, no camera or
+  network surface) and fresh-process import hygiene.
+
+**Pose support & limitations (documented, honest)**
+
+* The pose check is a **landmark geometric proxy** — nose-tip offset
+  from the eye midpoint, normalized by box width (yaw-ish) and height
+  (pitch-ish). It is **NOT 3D pose estimation** and cannot distinguish
+  head rotation from facial-shape variation.
+* Default `pose_policy="optional"`: without landmarks the check is
+  skipped and the metrics stay `None` — never invented.
+  `pose_policy="required"` rejects such detections with
+  `NO_LANDMARKS`.
+* Real calibration (are 0.15/0.35 right?) is deferred to Phase 2
+  evaluation on real enrollment footage.
+
+**Verified**
+
+* Focused quality tests: **56 passed**.
+* Landmark regression tests in `tests/test_face_detection.py`:
+  **4 passed** (file total 46).
+* `python -m pytest` from the project root → **271 passed**, exit 0
+  (215 prior + 56 new), stable across repeated runs (order-sensitivity
+  root-caused and fixed via a test-private RNG seed).
+* External-cwd run (`cd` into a temp dir, project venv) →
+  **271 passed**, exit 0.
+* `git diff --check` → clean.
+* Import/cli checks: `import src.quality` + `import src.config` succeed
+  in a fresh interpreter; fresh-process hygiene tests confirm no
+  camera/`FaceDetectorYN_create` activity at import or assessor
+  construction and no unrelated ML stack pulled in.
+
+**Known limitations / deferred**
+
+* Thresholds (80 px, 50.0 Laplacian variance, brightness 40–220,
+  pose 0.15/0.35) are initial testable defaults; real-accuracy
+  calibration on target footage is Phase 2 work.
+* The pose proxy inherits detector-landmark accuracy; no alternative
+  landmark source, no eye-openness/mouth-occlusion metrics, no
+  liveness, no multi-frame decisioning — all later steps by design.
+* `assess_frame_faces` takes only the detection list (not the frame);
+  merging frame-level context into quality scoring is deliberately
+  not done in this step.
+
 ## Phase 1 — Computer Vision Core
 
 | # | Step | Status | Notes |
@@ -12,7 +106,7 @@ Updated after every verified step — never ahead of implementation.
 | 03 | Employee data model | ✅ Complete | Verified 2026-10-09 — 71/71 tests pass (36 new employee tests). Details below. |
 | 04 | Live camera service | ✅ Complete | Verified 2026-10-09 — 101/101 tests pass (30 new camera tests). Details below. |
 | 05 | Face detection | ✅ Complete | Verified 2026-10-09 — 143/143 tests pass (42 new face-detection tests); YuNet backend requires an operator-supplied ONNX model. Details below. |
-| 06 | Face quality assessment | ⬜ Not started | |
+| 06 | Face quality assessment | ✅ Complete | Verified 2026-10-10 — 271/271 tests pass (56 new quality tests + 4 landmark regression tests). Details below. |
 | 07 | Multi-image face enrollment | ⬜ Not started | |
 | 08 | Face embedding generation | ⬜ Not started | Adds `insightface` + `onnxruntime`. |
 | 09 | Embedding storage | ⬜ Not started | |

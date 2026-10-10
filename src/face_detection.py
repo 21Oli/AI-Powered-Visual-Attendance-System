@@ -106,6 +106,16 @@ class FaceDetection:
         height: Test-dependent height in pixels (> 0).
         confidence: Detector-supplied confidence, or ``None`` when the
             backend provides none. Not invented for backends lacking it.
+        landmarks: Optional tuple of 5 detected landmarks, each an
+            ``(x, y)`` pixel point, in the backend's canonical order:
+            right eye, left eye, nose tip, right mouth corner, left
+            mouth corner (YuNet's ordering — “right”/“left” is from
+            the *subject's* perspective). Present only when the backend
+            row carried the full 15-column format
+            ``[x, y, w, h, landmarks(10), score]``; ``None`` otherwise.
+            Never synthesized from a box. Landmarks may lie anywhere in
+            the frame — they are NOT guaranteed to fall inside the
+            bounding box.
     """
 
     x: int
@@ -113,6 +123,8 @@ class FaceDetection:
     width: int
     height: int
     confidence: float | None = None
+    #: Optional five ``(x, y)`` landmark points; None when not supplied.
+    landmarks: tuple[tuple[int, int], ...] | None = None
 
     def __post_init__(self) -> None:
         if self.width <= 0 or self.height <= 0:
@@ -326,7 +338,21 @@ class FaceDetector:
             h = y2 - y
             if w <= 0 or h <= 0:
                 continue
+            landmarks: tuple[tuple[int, int], ...] | None = None
+            if row.size >= 15:
+                raw_lm = row[4:14]
+                if np.isfinite(raw_lm).all():
+                    landmarks = tuple(
+                        (int(px), int(py)) for px, py in raw_lm.reshape(-1, 2)
+                    )
+                else:
+                    _logger.warning(
+                        "dropping non-finite landmark values (box kept)"
+                    )
             detections.append(
-                FaceDetection(x=x, y=y, width=w, height=h, confidence=score)
+                FaceDetection(
+                    x=x, y=y, width=w, height=h, confidence=score,
+                    landmarks=landmarks,
+                )
             )
         return detections

@@ -4,6 +4,71 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [0.6.0] — 2026-10-10 — Phase 1, Step 06: Face quality assessment
+
+### Added
+
+* `src/quality.py`: `FaceQualityAssessor` — deterministic per-face
+  image-quality gating plus the frame face-count policy.
+  * `assess_face(frame, detection)`: measured metrics (usable box size,
+    Laplacian-variance sharpness, grayscale mean brightness) plus an
+    optional landmark orientation proxy, returning a frozen `FaceQuality`
+    with an explicit `FaceQualityDecision` (ACCEPT/REJECT) and a stable,
+    machine-readable `FaceQualityReason` for the first-failed check
+    (stable order: out_of_frame → too_small → no_landmarks/pose → blur
+    → too_dark → too_bright). Rejections still carry the measured
+    metrics; unusable inputs (fully-out-of-frame box) reject with all
+    metrics `None` — nothing is invented.
+  * `assess_frame_faces(detections)`: face-count policy kept separate
+    from image quality — `no_faces` / `multiple_faces` / `None`. Even a
+    policy-rejected multi-face frame leaves every face individually
+    assessable for future multi-face use.
+  * Errors mirror Step 05 conventions: `FaceQualityInputError`
+    (a `ValueError`) for contract-violating inputs; typed reasons for
+    valid inputs that fail quality gates. Frames and detections are
+    never mutated; no camera/model/file/network surface.
+* `src/config.py`: new frozen `QualityConfig` + project-wide `QUALITY`
+  instance (Step 02 convention: tune thresholds in one place).
+  Defaults are initial calibration starting points, not proven
+  biometric cutoffs: `min_face_size_px=80`, `min_sharpness=50.0`,
+  brightness window `[40, 220]`, `pose_yaw_tolerance=0.15`,
+  `pose_pitch_tolerance=0.35`, `pose_policy="optional"|"required"`,
+  `require_single_face=True`. Fail-fast `ValueError` validation.
+* `src/face_detection.py` (backward-compatible): `FaceDetection` gains
+  an optional `landmarks` field — five `(x, y)` points in canonical
+  YuNet order, populated only from real 15-column backend rows, `None`
+  otherwise; non-finite landmark values drop the landmarks, keep the
+  box. Legacy code constructing `FaceDetection` without landmarks is
+  unaffected.
+* `tests/test_quality.py`: 56 deterministic tests with synthetic
+  images (private-seeded RNG so expected metric values are
+  order-independent) and real `cv2` metric computation; plus 4
+  landmark regression tests in `tests/test_face_detection.py`.
+
+### Verified
+
+* Focused quality tests: 56 passed. Face-detection tests: 46 passed.
+* `python -m pytest` → 271 passed (215 prior + 56 new) from the project
+  root and an external working directory; stable across repeated runs.
+* Fresh-process import hygiene: no camera, no model init, no state at
+  import or assessor construction; no unrelated ML stack loaded.
+* `git diff --check` → clean.
+
+### Known limitations
+
+* The orientation check is a geometric landmark proxy — **not** 3D
+  pose estimation; cannot distinguish head rotation from facial-shape
+  variation. Without landmarks (`pose_policy="optional"`) the check is
+  skipped and the pose metrics stay `None`.
+* Thresholds are initial, testable defaults; calibration on real
+  enrollment footage is deferred to Phase 2 evaluation.
+
+### Not included (per plan — later steps)
+
+* Enrollment itself (Step 07), embeddings (Step 08), recognition,
+  temporal verification, attendance logic, liveness, multi-frame
+  quality decisioning.
+
 ## [0.2.0] — 2026-09-23 — Phase 1, Step 02: Configuration & constants
 
 ### Added
