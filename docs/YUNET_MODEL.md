@@ -96,8 +96,21 @@ python tools/download_yunet_model.py
 ```
 
 Downloads from the pinned URL, verifies HTTPS, byte size, SHA-256,
-content sniffs (not HTML/LFS), and OpenCV loadability, then atomically
-installs to `models/yunet.onnx`.
+content sniffs (not HTML/LFS/Git-LFS pointer), a structural ONNX check
+(the bytes must parse as an ONNX `ModelProto` protobuf header — ONNX
+has no guaranteed leading magic bytes, so a literal-marker check would
+wrongly reject e.g. the pytorch-produced artifact), and OpenCV
+loadability, then atomically installs to `models/yunet.onnx`.
+
+The OpenCV validation step runs against a short-lived `.onnx`
+cross-check copy, not the `.tmp` download file itself: OpenCV's DNN
+loader dispatches model-format detection by *filename extension*, so a
+`.tmp` file is rejected with `Cannot determine an origin framework`
+even when the bytes are a perfectly valid ONNX model (confirmed with
+OpenCV 5.0.0). The cross-check copy is byte-identical to the verified
+download, lives in the same directory (same filesystem, so the final
+`os.replace` stays atomic), and is removed on every exit path — success,
+validation failure, or cancellation.
 
 ### Validate an existing model (no download)
 
@@ -105,9 +118,11 @@ installs to `models/yunet.onnx`.
 python tools/download_yunet_model.py --validate-only
 ```
 
-Checks an existing `models/yunet.onnx` against size, SHA-256, format
-sniffs, and OpenCV loadability. **Non-destructive**: the file is never
-modified, whichever way the check exits.
+Checks an existing `models/yunet.onnx` against size, SHA-256, content
+sniffs, the same structural ONNX check, and OpenCV loadability (also
+via a short-lived `.onnx` cross-check copy — see above).
+**Non-destructive**: the file is never modified, whichever way the
+check exits.
 
 ### Replace an existing model (explicit opt-in only)
 

@@ -31,7 +31,9 @@ import hashlib
 import importlib.util
 import io
 import os
+import pathlib
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from contextlib import redirect_stderr
@@ -63,16 +65,31 @@ GOOD_SIZE = helper.YUNET_SIZE
 
 
 def _model_bytes() -> bytes:
-    """Deterministic fake 'model' payload of the verified upstream size.
+    """Deterministic fake "model" payload of the verified upstream size.
 
-    Built by repeating a synthetic ONNX-like header so (a) the byte count
-    matches and (b) content sniffs (ONNX marker present, no HTML/LFS magic)
-    pass — the bytes are obviously not the real artifact, so in tests that
-    expect success the stub server serves these bytes and the *expected
-    digest* is overridden to match.
+    Built to *structurally* look like an ONNX ``ModelProto`` head (parseable
+    protobuf: ir_version varint, "pytorch" producer string, graph field
+    tag) so (a) the byte count matches, (b) content sniffs (no HTML/LFS
+    magic) pass, and (c) the new structural ONNX check accepts it — the
+    bytes are obviously not the real artifact, so in tests that expect
+    success the stub server serves these bytes and the *expected digest*
+    is overridden to match. Content fidelity beyond structure is not the
+    unit test's job: the real artifact's SHA-256 is what the helper pins.
     """
-    header = b"onnx\x08\x07model\x12\x1aYuNetFaceDetector"
-    return (header * (GOOD_SIZE // len(header) + 1))[:GOOD_SIZE]
+    def _ld(field: int, payload: bytes) -> bytes:
+        n = len(payload)
+        length = bytes([n]) if n < 128 else bytes([0x80 | (n & 0x7F), n >> 7])
+        return bytes([(field << 3) | 2]) + length + payload
+
+    head = (
+        bytes([0x08, 0x06])     # ir_version = 6 (varint)
+        + _ld(2, b"pytorch")    # producer_name = "pytorch"
+        + _ld(3, b"1.7")        # producer_version = "1.7"
+                                        # field 7: graph (GraphProto) — mandatory;
+        + _ld(7, b"g" * 1000)   # payload truncates mid-payload at the 512-
+                                        # byte head window, as in the real file
+    )
+    return (head * (GOOD_SIZE // len(head) + 1))[:GOOD_SIZE]
 
 
 FAKE_MODEL_BYTES = _model_bytes()
@@ -630,6 +647,93 @@ class TestRedirectAndContentPolicy:
         assert "HTML" in stderr
 
 
+class TestOnnxStructuralCheck:
+    """The ONNX acceptance check is structural (ModelProto wire format).
+
+    Regression cover for the former literal ``b"onnx"`` sniff, which
+    wrongly rejected the real artifact (a pytorch-produced ModelProto
+    carrying no "onnx" anywhere in its head bytes).
+    """
+
+    @staticmethod
+    def _ld(field: int, payload: bytes) -> bytes:
+        n = len(payload)
+        length = bytes([n]) if n < 128 else bytes([0x80 | (n & 0x7F), n >> 7])
+        return bytes([(field << 3) | 2]) + length + payload
+
+    def _head(self) -> bytes:
+        return (
+            bytes([0x08, 0x06])                    # ir_version = 6
+            + self._ld(2, b"pytorch")             # producer_name
+            + self._ld(3, b"1.7")                 # producer_version
+            + self._ld(7, b"g" * 1000)            # graph (mandatory)
+        )
+
+    def test_producer_string_without_literal_onnx_is_accepted(self):
+        # The exact shape the real artifact has: "pytorch" producer, no
+        # literal b"onnx" anywhere in the head window.
+        assert helper._onnx_structural_check(self._head()) == ""
+
+    def test_header_followed_by_tensor_data_is_accepted(self):
+        # Trailing garbage (zeros, arbitrary tensor bytes) after a clean
+        # header run ends the parse; the schema check only sees the header.
+        assert helper._onnx_structural_check(self._head() + b"\x00" * 600) == ""
+        assert helper._onnx_structural_check(self._head() + bytes([0xFF]) * 20) == ""
+
+    def test_clean_multifield_head_is_accepted(self):
+        out = self._head() + self._ld(8, b"\x08\x0b")  # + opset_import
+        assert helper._onnx_structural_check(out) == ""
+
+    def test_non_protobuf_bytes_rejected(self):
+        for payload in (b"definitely not a model!!", b"\x06", b"", b"\x70\x15"):
+            reason = helper._onnx_structural_check(payload)
+            assert reason != "", f"should reject {payload!r}"
+            assert "wire format" in reason or "graph" in reason
+
+    def test_html_and_lfs_rejected_by_structure(self):
+        assert helper._onnx_structural_check(
+            b"<!DOCTYPE html><html><body>Rate limit</body></html>"
+        ) != ""
+        assert helper._onnx_structural_check(
+            b"version https://git-lfs.github.com/spec/v1\noid sha256:deadbeef"
+        ) != ""
+
+    def test_valid_protobuf_without_graph_field_rejected(self):
+        out = bytes([0x08, 0x06]) + self._ld(2, b"pytorch") + self._ld(3, b"1.7")
+        reason = helper._onnx_structural_check(out)
+        assert "graph" in reason
+
+    def test_unknown_fields_rejected(self):
+        out = self._ld(9, b"xyz") + self._head()[:-50]
+        reason = helper._onnx_structural_check(out)
+        assert "schema" in reason
+
+    def test_proto2_group_wire_types_rejected(self):
+        # wire types 3/4 cannot appear at ModelProto top level (proto3)
+        out = bytes([0x3B, 0x3C]) + self._head()[:-50]
+        reason = helper._onnx_structural_check(out)
+        assert "wire format" in reason
+
+    def test_verify_contents_uses_structural_check(self, tmp_path: Path):
+        good = tmp_path / "good.onnx"
+        good.write_bytes(self._head() + b"\x00" * 1000)
+        helper.verify_contents(good)  # must not raise
+
+        bad = tmp_path / "bad.onnx"
+        bad.write_bytes(b"junk" * 300)
+        with pytest.raises(helper.ModelDownloadError) as excinfo:
+            helper.verify_contents(bad)
+        assert "structurally" in str(excinfo.value)
+
+    def test_real_artifact_head_shape_accepted(self):
+        # First 30 bytes of the pinned upstream artifact, captured from a
+        # 512-byte Range probe (see docs/YUNET_MODEL.md):
+        real_head = bytes.fromhex(
+            "080612077079746f7263681a03312e373af3980e0a82010a05696e7075740a03"
+        )
+        assert helper._onnx_structural_check(real_head) == ""
+
+
 # ---------------------------------------------------------------------------
 # 12–18: existing destination guards and replacement authorization
 # ---------------------------------------------------------------------------
@@ -849,16 +953,104 @@ class TestTempFileHygiene:
         ]
         assert leftovers == []
 
-    def test_final_path_absent_until_install(
-        self, isolated_model_dir, stub_cv2_ok, monkeypatch
+    # ------------------------------------------------------------------
+    # Regression: OpenCV 5 dispatches model-format detection by filename
+    # extension — a .tmp file raises "Cannot determine an origin framework"
+    # in cv::dnn::readNet even when the bytes ARE a valid ONNX model —
+    # so backend validation must run against a .onnx cross-check copy,
+    # never the download temp file directly.
+    # ------------------------------------------------------------------
+
+    def test_staged_validation_copy_has_onnx_suffix(
+        self, isolated_model_dir, fake_urlopen_factory, stub_cv2_ok, monkeypatch
     ):
-        """A download that fails mid-flow must never leave partial output."""
+        """cv2 is handed a ``.onnx`` copy, not the ``.part-.tmp`` file."""
+        payload = _model_bytes()
+        monkeypatch.setattr(helper, "YUNET_SHA256", hashlib.sha256(payload).hexdigest())
+        fake_urlopen_factory(
+            [_FakeResponse([payload], headers={"X-Linked-Size": str(len(payload))})]
+        )
+        code, _ = _run_main([])
+        assert code == 0
+        # stub_cv2_ok recorded the path cv2 actually received:
+        assert stub_cv2_ok, "cv2 validation never ran"
+        handed_to_cv2 = stub_cv2_ok[0][0]
+        assert handed_to_cv2.endswith(".onnx"), (
+            f"cv2 was handed a non-.onnx path: {handed_to_cv2!r}"
+        )
+        assert ".part-" not in handed_to_cv2
+        assert ".val-" in handed_to_cv2 or handed_to_cv2.endswith("yunet.onnx")
+
+    def test_staged_validation_copy_is_removed_after_success(
+        self, isolated_model_dir, fake_urlopen_factory, stub_cv2_ok, monkeypatch
+    ):
+        payload = _model_bytes()
+        monkeypatch.setattr(helper, "YUNET_SHA256", hashlib.sha256(payload).hexdigest())
+        fake_urlopen_factory(
+            [_FakeResponse([payload], headers={"X-Linked-Size": str(len(payload))})]
+        )
+        code, _ = _run_main([])
+        assert code == 0
+        assert sorted(p.name for p in isolated_model_dir.iterdir()) == ["yunet.onnx"]
+
+    def test_staged_validation_copy_is_removed_after_backend_failure(
+        self, isolated_model_dir, fake_urlopen_factory, stub_cv2_fail, monkeypatch
+    ):
+        payload = _model_bytes()
+        monkeypatch.setattr(helper, "YUNET_SHA256", hashlib.sha256(payload).hexdigest())
+        fake_urlopen_factory(
+            [_FakeResponse([payload], headers={"X-Linked-Size": str(len(payload))})]
+        )
+        code, stderr = _run_main([])
+        assert code != 0
+        # Error comes from the model backend, NOT from a .tmp dispatch:
+        assert "origin framework" not in stderr
+        assert sorted(p.name for p in isolated_model_dir.iterdir()) == []
+
+    def test_staged_validation_copy_is_byte_identical_to_download(
+        self, isolated_model_dir, fake_urlopen_factory, stub_cv2_ok, monkeypatch
+    ):
+        payload = _model_bytes()
+        monkeypatch.setattr(helper, "YUNET_SHA256", hashlib.sha256(payload).hexdigest())
+        fake_urlopen_factory(
+            [_FakeResponse([payload], headers={"X-Linked-Size": str(len(payload))})]
+        )
+        code, _ = _run_main([])
+        assert code == 0
+        # Fine-grained check of the staging logic in isolation:
+        with tempfile.TemporaryDirectory() as td:
+            source = pathlib.Path(td) / "src.bin"
+            source.write_bytes(payload)
+            staged = helper._stage_onnx_copy(source, helper.DEFAULT_MODEL_PATH)
+            try:
+                assert staged.suffix == ".onnx"
+                assert staged.parent == helper.DEFAULT_MODEL_PATH.parent
+                assert staged.read_bytes() == payload
+            finally:
+                helper.remove_quietly(staged)
+
+    def test_final_path_absent_until_install(
+        self, isolated_model_dir, fake_urlopen_factory, stub_cv2_ok
+    ):
+        """A download that fails mid-flow must never leave partial output.
+
+        The failure is simulated with a stubbed server error so the test
+        does real network I/O: a stub-free invocation would perform the
+        actual download (JSON: no network access is permitted in tests).
+        """
         dest = helper.DEFAULT_MODEL_PATH
-        code, _ = _run_main([])  # no network stub → download fails
+        fake_urlopen_factory(
+            [
+                helper.urllib.error.HTTPError(
+                    helper.YUNET_URL, 500, "Internal Server Error", None, None
+                )
+            ]
+        )
+        code, _ = _run_main([])
         assert code != 0
         # Failures happen before the atomic install, so nothing must exist
         # at the destination.
-        assert not dest.exists() or dest.suffix != ".tmp"
+        assert not dest.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -979,17 +1171,69 @@ class TestPathResolutionAndStartupHygiene:
         allowed = {
             "argparse", "hashlib", "os", "sys", "tempfile", "urllib", "pathlib",
             "typing", "io", "__future__", "cv2",  # cv2: existing dependency
+            "shutil",  # stdlib: .onnx validation-copy staging
         }
         assert imported <= allowed, f"unexpected imports: {imported - allowed}"
 
-    def test_face_detector_path_unchanged_by_helper(self):
-        """The production loader still fails through its documented error."""
+    def test_face_detector_path_unchanged_by_helper(self, tmp_path):
+        """The production loader honors its configured path, per its contract.
+
+        Deterministic regardless of whether the real model happens to be
+        installed: the detector is bound to an explicit, definitely-missing
+        path, so ``load()`` must fail through the documented error.
+        Machine-dependent model presence is deliberately not part of the
+        contract under test here (nothing in this helper touches it).
+        """
         import src.face_detection
 
-        detector = src.face_detection.FaceDetector()  # no device work
+        absent = tmp_path / "definitely-absent-yunet.onnx"
+        assert not absent.exists()
+        detector = src.face_detection.FaceDetector(model_path=absent)
         assert detector.is_loaded is False
-        with pytest.raises(src.face_detection.FaceDetectorLoadError):
+        with pytest.raises(src.face_detection.FaceDetectorLoadError, match="not found"):
             detector.load()
+        # The configured path is what the loader consulted — unchanged.
+        assert detector._model_path == absent
+        assert not absent.exists()
+
+    def test_helper_never_touches_real_model_file(
+        self, tmp_path, monkeypatch, fake_urlopen_factory, stub_cv2_ok
+    ):
+        """A full (mocked) helper run leaves the real model path alone.
+
+        The run targets an isolated temp destination; afterwards the
+        production default path must still not exist in that temp tree,
+        proving the helper does not write anywhere near it.
+        """
+        import src.face_detection as fd
+
+        real_default = Path(fd.DEFAULT_MODEL_PATH)
+        # Only meaningful while the real model is absent on this machine;
+        # if it IS installed, the guarantee being tested is that this run
+        # leaves its bytes untouched.
+        before = real_default.read_bytes() if real_default.exists() else None
+        # Record the real model's mtime so we can prove no rewrite happened.
+        before_mtime = real_default.stat().st_mtime_ns if real_default.exists() else None
+
+        isolated = fake_urlopen_factory(
+            [_FakeResponse([FAKE_MODEL_BYTES], headers={"X-Linked-Size": str(GOOD_SIZE)})]
+        )
+        # Test-standard convention: the expected digest is overridden to
+        # match the fake bytes (the real pin is exercised elsewhere).
+        monkeypatch.setattr(
+            helper, "YUNET_SHA256", hashlib.sha256(FAKE_MODEL_BYTES).hexdigest()
+        )
+        code, _stderr = _run_main(["--dest", str(tmp_path / "mock.onnx")])
+        assert code == 0, _stderr
+        assert isolated  # the fake opener was actually consulted
+
+        # The real production path must be untouched.
+        assert real_default != (tmp_path / "mock.onnx")
+        if before is not None:
+            assert real_default.read_bytes() == before
+            assert real_default.stat().st_mtime_ns == before_mtime
+        else:
+            assert not real_default.exists()
 
 
 # ---------------------------------------------------------------------------

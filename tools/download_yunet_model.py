@@ -19,14 +19,16 @@ Design rules
 * **Hard-coded provenance.** The source URL and expected SHA-256 are fixed,
   independently verified constants (see ``docs/YUNET_MODEL.md``). The CLI
   accepts no arbitrary URL and no arbitrary checksum.
-* **Trust nothing unverified.** Checksum + byte size + content sniffing +
-  a real ``cv2.FaceDetectorYN`` initialization on the downloaded bytes must
+* **Trust nothing unverified.** Checksum + byte size + content sniffing +    a real ``cv2.FaceDetectorYN`` initialization on a short-lived ``.onnx``
+    cross-check copy (OpenCV's DNN loader dispatches model-format detection
+    on the filename extension, so the temp file itself must never be
+    handed to the backend directly — see :func:`_stage_onnx_copy`) must
   all pass before the file is installed. A verification failure never
   installs the model and never modifies the destination.
 * **Never overwrite silently.** An existing destination requires explicit
   ``--replace`` (plus ``--yes`` when noninteractive, or a typed confirmation
   when interactive).
-* **Atomic install.** The model is streamed into a uniquely named temporary
+* **Atomic install.** The model is streamed into a uniquely named ``.tmp`` temporary
   file in the destination directory and moved into place with
   :func:`os.replace` only after every validation step succeeds. Temporary
   files created by a failed invocation are cleaned up; unrelated files are
@@ -51,6 +53,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import shutil
+import urllib.error
 import sys
 import tempfile
 import urllib.error
@@ -118,7 +122,164 @@ CHUNK_SIZE: Final[int] = 65_536
 
 # Content sniffs that prove the payload is NOT the model.
 _LFS_POINTER_MAGIC: Final[bytes] = b"version https://git-lfs"
-_ONNX_MAGIC: Final[bytes] = b"onnx"  # ONNX protobuf must contain this marker
+
+#: ONNX files are protobuf ``ModelProto`` messages, not a fixed byte-layout
+#: container. The ASCII marker embedded in some exports (e.g. a
+#: ``producer_name`` of "onnx") is a property of the *producer string*, not
+#: of the format itself — OpenCV-converted models legitimately carry other
+#: producer names, so a literal sniff there produces false negatives. The
+#: ``ModelProto`` wire schema (proto3) defines exactly which field numbers
+#: are legal at the message top level; the structural check below verifies
+#: a head window of the bytes parses against that schema before install.
+#: See docs/YUNET_MODEL.md — the pinned SHA-256 and exact size remain the
+#: primary artifact-integrity checks; this structural check only guards
+#: against validating a not-even-looks-like-ONNX file when the artifact
+#: identity constants are deliberately overridden in tests.
+_MODEL_PROTO_FIELDS: Final[frozenset[int]] = frozenset(
+    {
+        1,   # ir_version (int64)
+        2,   # producer_name (string)
+        3,   # producer_version (string)
+        4,   # domain (string)
+        5,   # model_version (int64)
+        6,   # doc_string (string)
+        7,   # graph (GraphProto)
+        8,   # opset_import (OperatorSetIdProto, repeated)
+        11,  # training_info
+        20,  # functions
+        16,  # configuration
+    }
+)
+# Minimum plausible protobuf field structure for a real ModelProto:
+# the ``graph`` field (7) is mandatory in any usable model.
+_REQUIRED_PROTO_TAG: Final[int] = 7
+
+
+def _parse_proto_header(bytes_: bytes) -> dict[int, int] | None:
+    """Parse the top-level protobuf field header of ``bytes_``.
+
+    Returns ``{field_number: wire_type}`` for the leading run of complete,
+    well-formed top-level fields, or ``None`` when the bytes do not even
+    start with a parseable protobuf field.
+
+    Once at least one complete field has been parsed, parsing stops at the
+    first trailing anomaly (field 0, wire-type garbage, truncated
+    payload) — the head window of a real model continues into arbitrary
+    tensor data, not more clean header fields; the schema check decides
+    on what was parsed before the anomaly.
+
+    Wire types and varint encoding are from the protobuf specification;
+    no third-party protobuf library is required.
+    """
+    fields: dict[int, int] = {}
+
+    def _stop_on_anomaly() -> dict[int, int] | None:
+        """Anomaly after ≥1 clean field: stop; before any: hard reject."""
+        return fields or None
+
+    index = 0
+    while index < len(bytes_):
+        # 1. field key: varint field_number << 3 | wire_type
+        key = 0
+        shift = 0
+        complete = False
+        while index < len(bytes_):
+            byte = bytes_[index]
+            index += 1
+            key |= (byte & 0x7F) << shift
+            shift += 7
+            if not byte & 0x80:
+                complete = True
+                break
+        if not complete:
+            return _stop_on_anomaly()  # truncated key varint
+        field_number, wire_type = key >> 3, key & 0x7
+        if not field_number:
+            # field_number 0 is never valid at the top level.
+            return _stop_on_anomaly()
+        if field_number in (14, 15) or wire_type in (3, 4):
+            # Reserved numbers 14/15 (map entries) and wire types 3/4
+            # (legacy proto2 groups) cannot appear at the top level of a
+            # ModelProto (proto3) — structural anomalies, not just the end
+            # of the header run. Check BEFORE registering the field.
+            return fields or None
+        fields[field_number] = wire_type
+        # 2. skip past the field's value payload (length-delimited or scalar)
+        if wire_type == 0:      # varint
+            while index < len(bytes_):
+                if not bytes_[index] & 0x80:
+                    index += 1
+                    break
+                index += 1
+            else:
+                return _stop_on_anomaly()  # truncated varint value
+        elif wire_type == 1:    # fixed64
+            index += 8
+        elif wire_type == 2:    # length-delimited
+            length = 0
+            shift = 0
+            while index < len(bytes_):
+                byte = bytes_[index]
+                index += 1
+                length |= (byte & 0x7F) << shift
+                shift += 7
+                if not byte & 0x80:
+                    complete = True
+                    break
+            if not complete:
+                return _stop_on_anomaly()  # truncated length varint
+            index += length
+            if index > len(bytes_):
+                return _stop_on_anomaly()  # payload extends past the window
+        elif wire_type == 5:    # fixed32
+            index += 4
+        elif wire_type == 3 or wire_type == 4:
+            # groups: unreachable — rejected at field registration above
+            # (kept for defensive symmetry with the other payload branches).
+            return fields or None
+        else:
+            # Defensive tail for any wire type not handled above.
+            return fields or None
+        if index > len(bytes_):
+            return _stop_on_anomaly()  # scalar extends past the window
+    return fields
+
+
+def _onnx_structural_check(bytes_: bytes) -> str:
+    """Structural acceptance for ONNX ``ModelProto`` bytes (best effort).
+
+    ONNX has no fixed file magic: an ONNX file is a protobuf ``ModelProto``
+    whose first bytes are *field headers*, whose exact layout depends on
+    which fields the producer serialized first (OpenCV-converted models
+    start with ``ir_version`` and a "pytorch" producer string; official
+    onnx-exports start with different field orders). What *must* hold in
+    any valid ModelProto is:
+
+    * the bytes parse as protobuf wire format at the top level;
+    * the field numbers seen are exactly those the ``ModelProto`` schema
+      defines (no unknown fields anywhere in the head window);
+    * the mandatory ``graph`` field (7) is among them.
+
+    Returns a rejection reason, or ``""`` when the bytes are acceptable.
+    """
+    fields = _parse_proto_header(bytes_)
+    if fields is None:
+        return (
+            "bytes do not conform to the ONNX ModelProto wire format "
+            "(no valid protobuf header)"
+        )
+    unexpected = set(fields) - _MODEL_PROTO_FIELDS
+    if unexpected:
+        return (
+            "bytes contain protobuf fields the ONNX ModelProto schema does "
+            f"not define (field(s) {sorted(unexpected)})"
+        )
+    if _REQUIRED_PROTO_TAG not in fields:
+        return (
+            "bytes lack the mandatory ONNX 'graph' field (7) in the "
+            "leading ModelProto header"
+        )
+    return ""
 
 _EXIT_OK: Final[int] = 0
 _EXIT_FAILURE: Final[int] = 1
@@ -265,13 +426,6 @@ def verify_contents(buffer_path: Path) -> None:
     try:
         with buffer_path.open("rb") as handle:
             head = handle.read(512)
-            tail = b""
-            # The ONNX identifier lives near the start of the protobuf; the
-            # model graph name may push it past the head window, so also
-            # scan a tail window for it.
-            if _ONNX_MAGIC not in head:
-                handle.seek(max(0, size - 512))
-                tail = handle.read(512)
     except OSError as exc:
         raise ModelDownloadError(f"cannot re-read downloaded file: {exc}") from exc
 
@@ -286,10 +440,16 @@ def verify_contents(buffer_path: Path) -> None:
             "the source may not have been followed as a raw artifact"
         )
 
-    if _ONNX_MAGIC not in head and _ONNX_MAGIC not in tail:
+    # ONNX is a protobuf ModelProto, not a magic-number container: there is
+    # no guaranteed leading byte sequence. A structural check (top-level
+    # wire-format fields conforming to the ModelProto schema, including the
+    # mandatory graph field) is what actually identifies the format. The
+    # pinned SHA-256 and exact size above remain the primary checks.
+    reason = _onnx_structural_check(head)
+    if reason:
         raise ModelDownloadError(
-            "downloaded file lacks the ONNX bytes signature; refusing to "
-            "install something that is not an ONNX model"
+            f"downloaded file is not structurally a valid ONNX model: "
+            f"{reason}; refusing to install"
         )
 
 
@@ -581,13 +741,38 @@ def check_existing(destination: Path, *, replace: bool, yes: bool, interactive: 
     return True
 
 
+def _stage_onnx_copy(buffer_path: Path, destination: Path) -> Path:
+    """Create a short-lived ``.onnx``-suffixed copy for backend validation.
+
+    OpenCV's DNN loader dispatches model-format detection by file
+    extension: a ``.tmp`` file is handed to `readNet` with no framework
+    hint and fails with ``Cannot determine an origin framework`` —
+    observed with OpenCV 5.0.0 — regardless of the bytes actually being
+    a valid ONNX model. Same-directory copy keeps ``os.replace`` atomic
+    (same filesystem) and is removed by the caller in every code path.
+    """
+    probe_writable(destination.parent)
+    handled = destination.parent / f"{destination.stem}.val-{os.getpid()}.onnx"
+    if handled.exists():  # stale leftovers from an interrupted earlier run
+        remove_quietly(handled)
+    shutil.copyfile(buffer_path, handled)
+    return handled
+
+
 def download_model(destination: Path, *, replace: bool, yes: bool, interactive: bool) -> None:
-    """Download → verify → validate → atomically install the model."""
+    """Download → verify → validate → atomically install the model.
+
+    Backend validation runs against a short-lived ``.onnx``-suffixed
+    copy of the verified temp file (OpenCV dispatches on the name, not
+    the bytes); the download temp file itself stays ``.tmp``-suffixed so
+    a crash can never leave anything that looks like an installed model.
+    """
     dest = prepare_destination(destination)
     if not check_existing(dest, replace=replace, yes=yes, interactive=interactive):
         return
 
     temp_path: Path | None = None
+    validation_copy: Path | None = None
     temp_file: IO[bytes] | None = None
     try:
         temp_file = make_temp_file(dest)
@@ -597,7 +782,8 @@ def download_model(destination: Path, *, replace: bool, yes: bool, interactive: 
         temp_file = None
 
         verify_contents(temp_path)
-        validate_model_file(temp_path)
+        validation_copy = _stage_onnx_copy(temp_path, dest)
+        validate_model_file(validation_copy)
         atomic_install(temp_path, dest)
         temp_path = None  # installed; nothing left to clean up
         print(f"OK: model installed at {dest}")
@@ -608,6 +794,7 @@ def download_model(destination: Path, *, replace: bool, yes: bool, interactive: 
             except OSError:
                 pass
         remove_quietly(temp_path)
+        remove_quietly(validation_copy)
 
 
 def validate_existing(destination: Path) -> bool:
@@ -639,7 +826,11 @@ def validate_existing(destination: Path) -> bool:
         )
 
     verify_contents(dest)
-    validate_model_file(dest)
+    validation_copy = _stage_onnx_copy(dest, dest)
+    try:
+        validate_model_file(validation_copy)
+    finally:
+        remove_quietly(validation_copy)
     return True
 
 
