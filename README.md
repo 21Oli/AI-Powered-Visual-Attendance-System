@@ -58,6 +58,21 @@ cp .env.example .env
 python -m pytest tests/ -v                      # Linux/macOS
 ```
 
+## Face-detection model (manual download)
+
+Step 05's face detector needs the official YuNet ONNX model, which is not
+bundled with opencv-python and is intentionally kept out of Git:
+
+```bash
+python tools/download_yunet_model.py          # download, verify, install
+python tools/download_yunet_model.py --validate-only   # check an existing file
+python tools/download_yunet_model.py --help   # all options incl. --replace
+```
+
+The application never downloads the model automatically; see
+[docs/YUNET_MODEL.md](docs/YUNET_MODEL.md) for provenance, verification,
+replacement, and troubleshooting.
+
 ## Environment variables
 
 Copy `.env.example` to `.env` and adjust as needed. `.env` is git-ignored;
