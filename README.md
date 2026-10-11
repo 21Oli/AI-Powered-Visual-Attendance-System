@@ -6,7 +6,8 @@ faces, assesses their quality, recognizes enrolled people against stored
 embeddings, and turns temporally verified recognitions into structured
 attendance events.
 
-**Status:** Phase 1 (Computer Vision Core) — Step 02 complete. See
+**Status:** Phase 1 (Computer Vision Core) — Step 07 (multi-image face
+enrollment) complete; Steps 08–15 pending. See
 [DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md).
 
 ## Core architectural principle

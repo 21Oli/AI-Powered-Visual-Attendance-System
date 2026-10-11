@@ -203,6 +203,46 @@ enrollment (Step 07):
   (15-column YuNet format); legacy 5-column behavior and construction
   sites are unchanged, guarded by regression tests.
 
+### D10 — Enrollment: bounded session orchestration, staged persistence (Step 07)
+
+`src/enrollment.py` consumes Steps 03–06 and hands accepted face
+samples to Step 08. It owns no new algorithms — only orchestration,
+limits, and safe persistence:
+
+* **Injectable pipeline.** Camera factory, detector, assessor,
+  enrollment config, and `AppSettings` are constructor parameters;
+  tests run without a webcam, the YuNet model, or any real data
+  directory. Importing or constructing the service performs no
+  camera/model/filesystem side effects; directory creation happens
+  only inside a real persistence run.
+* **Explicit statuses, non-overloaded errors.** COMPLETED /
+  CANCELLED / FAILED never collapse into a boolean. Bad identity input
+  or traversal-shaped IDs raise `EnrollmentInputError` before capture;
+  existing enrollment data raises `DuplicateEnrollmentError` before
+  the camera opens; staging/publish failures raise
+  `EnrollmentPersistenceError` after best-effort cleanup. Camera
+  read failures and quality/face-count rejections are *attempts*
+  (bounded by `EnrollmentConfig.max_capture_attempts`), while camera
+  open errors and detector/assessor exceptions are fatal session
+  errors — a hardware failure can never be misread as "keep trying".
+* **Bounded sessions.** `min_samples` → COMPLETED; caller
+  `should_cancel` (polled before every attempt) → CANCELLED with
+  nothing persisted, even mid-session after the minimum was reached;
+  attempt budget exhausted → FAILED. Release happens on every exit
+  path.
+* **Traversal-proof, deterministic storage.** Employee IDs are
+  percent-encoded into directory names (dots encoded → no `..`) while
+  the manifest carries the exact ID (`format_version: 1`). Existing
+  enrollments are never overwritten; enrollment existence is defined
+  by the published manifest, published samples-first via rename and
+  manifest-last via `os.replace`.
+* **Biometric hygiene.** Face crops stay in the already-ignored
+  `data/face_samples` tree; no image data is logged, echoed, or
+  uploaded; on failure only current-attempt artifacts (tracked paths)
+  are removed; pre-existing and unrelated employees are untouched.
+  Duplicate handling is byte-level only — biometric similarity is
+  explicitly a Step 08+ concern.
+
 ### D4 — Dependency licensing note
 
 `insightface`'s library code is MIT, but its pretrained model packages

@@ -3,6 +3,109 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 07 — completion record (2026-10-11)
+
+**Implemented**
+
+* `src/enrollment.py` — `EnrollmentService`: reusable multi-image face
+  enrollment orchestration between identity (Step 03), camera (Step
+  04), detection (Step 05) and quality (Step 06). It contains no
+  embeddings (Step 08), no recognition (Step 10), no liveness, no
+  attendance logic, and no GUI. Camera, detector, assessor, enrollment
+  config, and `AppSettings` are all injectable — tests run fully
+  hardware-free.
+  * `enroll(employee_id, full_name, *, is_active=True, should_cancel=None)`
+    runs one bounded capture session: validate identity → refuse
+    duplicates → open the camera → read frames → detect → apply the
+    existing face-count policy and per-face assessor → collect valid
+    samples → persist. Returns a frozen `EnrollmentResult` with an
+    explicit `EnrollmentStatus` (COMPLETED / CANCELLED / FAILED — never
+    a bare bool), accepted `SampleRecord`s (filename, frame index,
+    UTC capture time, measured `FaceQuality`, published path), every
+    non-accepting attempt as a `SampleRejection` (reason + quality),
+    the total frame attempt count, exact-duplicate skip count, and an
+    error string (no image data) for FAILED/CANCELLED sessions.
+  * Terminations are bounded and explicit: `min_samples` reached →
+    COMPLETED; caller `should_cancel()` (polled before every attempt) →
+    CANCELLED with nothing persisted, even if the minimum was already
+    collected mid-session; `EnrollmentConfig.max_capture_attempts`
+    exhausted → FAILED. Camera read failures and rejections count as
+    attempts (bounded, never endless); camera acquisition/open errors,
+    detector/assessor exceptions, and persistence failures are fatal
+    session errors, not sample rejections. Camera release happens on
+    every exit path (success, cancellation, failure, exception).
+  * Employee validation reuses the `Employee` model exactly: IDs keep
+    leading zeros, hyphens, case (`007`, `EMP-0042`); empty/whitespace
+    IDs/names rejected; IDs with path separators or equal to `.`/`..`
+    rejected before any capture. Active-employee semantics preserved
+    (recognition gating of inactive employees is a later step).
+  * Persistence: `<data>/employees/<encoded-id>/employee.json` (schema
+    `format_version: 1`, full Employee serialization, sample count,
+    per-sample file/UTC time/quality metrics) and
+    `<data>/face_samples/<encoded-id>/sample_001.png …`. `<encoded-id>`
+    is a deterministic, reversible, collision-free percent-encoding
+    (dots included), making path traversal structurally impossible
+    while preserving the exact ID in the manifest. An existing
+    enrollment is never overwritten (checked before capture and again
+    before staging). Samples are staged in hidden `.staging-`
+    directories, PNG-coded and decoded for verification, and published
+    samples-first, manifest-last (`os.replace`) — the manifest is the
+    "enrollment exists" marker, so a crash between publishes leaves
+    orphan samples without a recognized enrollment. On failure only
+    current-attempt artifacts are cleaned; pre-existing/unrelated data
+    is preserved. Atomicity across the two trees is best-effort, not
+    transactional (documented).
+  * Exact-duplicate suppression: accepted crops are sha-256 hashed; a
+    byte-identical crop is skipped (reported in
+    `duplicates_skipped`, not silently hidden). This is frame-level
+    hygiene, not a biometric similarity system — no embeddings at this
+    step, duplicate/near-duplicate filtering beyond byte-equality is
+    deferred to later steps.
+* `src/config.py` — `EnrollmentConfig` gains `max_capture_attempts=60`
+  (hard cap on frame attempts per session; validated
+  `>= min_samples`). Sample-count constants unchanged.
+* `tests/test_enrollment.py` — 38 deterministic tests with fake
+  camera/detector/assessor doubles and synthetic NumPy frames in
+  temporary directories (no webcam, no network, no model file, no real
+  biometric images): valid input; empty/whitespace IDs and names;
+  leading zeros and hyphens preserved; path-traversal IDs refused;
+  duplicates refused byte-for-byte untouched; capture continues past
+  no-face/multi-face/quality-rejected frames with preserved reasons;
+  completion at `min_samples`; cancellation before/after success
+  publishes nothing; attempt budget enforced; camera open/factory/read
+  failures; camera released on every path; detector/assessor exceptions
+  fatal; byte-identical crops skipped and reported; persistence layout,
+  naming, and manifest schema; encoding of IDs with special characters;
+  persistence failure cleanup with no staging remnants and untouched
+  pre-existing/unrelated data; import/construction hygiene (no
+  filesystem side effects).
+
+**Verified**
+
+* Focused enrollment tests: **38 passed**.
+* `python -m pytest` from the project root → **309 passed**, exit 0
+  (271 prior + 38 new), stable across 3 repeated full-suite runs.
+* External-cwd run (`cd` into an empty temp dir, project venv) →
+  **309 passed**, exit 0.
+* `git diff --check` → clean.
+* Fresh-interpreter + foreign-CWD checks: `import src.enrollment` and
+  `EnrollmentService(settings=...)` construction perform no filesystem
+  side effects; the default (unloaded) `FaceDetector` raises a typed
+  `FaceDetectorError` on first use — the YuNet model is never
+  auto-downloaded and never required by tests.
+
+**Known limitations / deferred**
+
+* Sample-count thresholds and capture budget are initial, testable
+  defaults; calibration on real footage is Phase 2 work.
+* Near-duplicate biometric similarity is a non-goal at this step
+  (embeddings, Step 08); only exact byte-duplicate suppression exists.
+* Multi-file persistence is not transactional: a crash between sample
+  and manifest publication leaves orphan sample files (never a declared
+  enrollment without images); manual cleanup would be required.
+* No CLI/GUI for enrollment sessions; interactive capture UX is a
+  later phase.
+
 ## Step 06 — completion record (2026-10-10)
 
 **Implemented**
@@ -107,7 +210,7 @@ Updated after every verified step — never ahead of implementation.
 | 04 | Live camera service | ✅ Complete | Verified 2026-10-09 — 101/101 tests pass (30 new camera tests). Details below. |
 | 05 | Face detection | ✅ Complete | Verified 2026-10-09 — 143/143 tests pass (42 new face-detection tests); YuNet backend requires an operator-supplied ONNX model. Details below. |
 | 06 | Face quality assessment | ✅ Complete | Verified 2026-10-10 — 271/271 tests pass (56 new quality tests + 4 landmark regression tests). Details below. |
-| 07 | Multi-image face enrollment | ⬜ Not started | |
+| 07 | Multi-image face enrollment | ✅ Complete | Verified 2026-10-11 — 309/309 tests pass (38 new enrollment tests); new `max_capture_attempts` constant in `EnrollmentConfig`. Details below. |
 | 08 | Face embedding generation | ⬜ Not started | Adds `insightface` + `onnxruntime`. |
 | 09 | Embedding storage | ⬜ Not started | |
 | 10 | Face recognition | ⬜ Not started | |

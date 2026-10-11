@@ -179,6 +179,10 @@ class EnrollmentConfig:
     target_samples: int = 5
     #: Hard cap on stored samples per employee.
     max_samples: int = 10
+    #: Hard cap on frame attempts per enrollment session (poor-quality
+    #: frames, unreadable frames, and no-face frames all count) — the
+    #: bound that prevents endless capture loops (Step 07).
+    max_capture_attempts: int = 60
 
     def __post_init__(self) -> None:
         if self.min_samples < 1:
@@ -188,6 +192,11 @@ class EnrollmentConfig:
                 "sample counts must satisfy min <= target <= max, got "
                 f"min={self.min_samples}, target={self.target_samples}, "
                 f"max={self.max_samples}"
+            )
+        if self.max_capture_attempts < self.min_samples:
+            raise ValueError(
+                "max_capture_attempts must be >= min_samples, got "
+                f"{self.max_capture_attempts} < {self.min_samples}"
             )
 
 

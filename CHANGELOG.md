@@ -4,6 +4,68 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [0.7.0] — 2026-10-11 — Phase 1, Step 07: Multi-image face enrollment
+
+### Added
+
+* `src/enrollment.py`: `EnrollmentService` — one controlled, bounded
+  capture session per employee: identity validation via the existing
+  `Employee` model (IDs preserved exactly, `007`/`EMP-0042`),
+  duplicate-refusal before any capture, camera/detector/assessor
+  orchestration through the existing Step 04–06 services, per-sample
+  accept/reject with explicit typed reasons, and staged persistence.
+  Typed errors: `EnrollmentInputError`, `DuplicateEnrollmentError`,
+  `EnrollmentPersistenceError`. Results: frozen `EnrollmentResult` with
+  COMPLETED/CANCELLED/FAILED status, accepted `SampleRecord`s,
+  per-frame `SampleRejection`s (reason + measured quality), attempt
+  count and duplicate-skip count. Camera released on every exit path;
+  cancellation and failure never persist; persistence failures clean
+  up only current-attempt artifacts. Camera, detector, assessor,
+  config, and settings are injectable (hardware-free tests).
+* `src/config.py`: `EnrollmentConfig.max_capture_attempts=60` — the
+  bound preventing endless capture loops when frames keep failing;
+  validated `>= min_samples`.
+* Storage layout (both roots already git-ignored):
+  `<data>/employees/<encoded-id>/employee.json` (schema version 1;
+  full Employee serialization incl. `is_active`, sample count,
+  per-sample file/UTC time/quality metrics) and
+  `<data>/face_samples/<encoded-id>/sample_001.png`. `<encoded-id>` is
+  a deterministic percent-encoding of the exact ID (dots encoded),
+  making path traversal structurally impossible. Existing enrollments
+  are never overwritten; samples stage in `.staging-` dirs, are
+  verified by re-decoding, and publish samples-first,
+  manifest-last.
+* `tests/test_enrollment.py`: 38 deterministic tests with fakes and
+  synthetic frames — validation, duplicate refusal, capture flow,
+  cancellation, camera lifecycle/errors, service exceptions, attempt
+  budget, byte-duplicate skipping, persistence layout/content,
+  path-safety encoding, failure cleanup, and import hygiene.
+
+### Verified
+
+* Focused enrollment tests: 38 passed.
+* `python -m pytest` → **309 passed** (271 prior + 38 new) from the
+  project root and an external working directory; stable across
+  repeated runs.
+* Fresh-interpreter/foreign-CWD hygiene: import and service
+  construction create no directories and touch no camera/model/files.
+* `git diff --check` → clean.
+
+### Known limitations
+
+* Near-duplicate biometric similarity is out of scope (needs
+  embeddings, Step 08); only exact byte-duplicate suppression exists.
+* Multi-file persistence is best-effort atomic, not transactional: a
+  crash between sample and manifest publication can leave orphan
+  sample files — never a declared enrollment without images.
+* Capture/sampling thresholds are initial defaults; Phase 2
+  calibration pending.
+
+### Not included (per plan — later steps)
+
+* Embeddings (Step 08), recognition (Step 10), liveness, attendance
+  logic, CLI/GUI enrollment UX.
+
 ## [0.6.0] — 2026-10-10 — Phase 1, Step 06: Face quality assessment
 
 ### Added

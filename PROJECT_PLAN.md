@@ -48,7 +48,7 @@ A face being recognized does NOT automatically mean attendance is recorded.
 04. Live camera service                        ✅ complete
 05. Face detection                             ✅ complete
 06. Face quality assessment                    ✅ complete
-07. Multi-image face enrollment                ⬜
+07. Multi-image face enrollment                ✅ complete
 08. Face embedding generation                  ⬜
 09. Embedding storage                          ⬜
 10. Face recognition                           ⬜
