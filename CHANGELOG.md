@@ -4,6 +4,60 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [0.8.0] — 2026-10-11 — Phase 1, Step 08: Face embedding generation
+
+### Added
+
+* `src/face_embedding.py`: `FaceEmbedder` — converts one BGR uint8
+  face crop (the exact format Step 07 persists) into a validated
+  float32 1-D embedding. Explicit `load()`/`is_loaded`/`embed()`
+  lifecycle; import and construction are side-effect-free;
+  `backend_factory` injectable (tests use fakes; the real default is
+  `cv2.FaceRecognizerSF`, bundled in the pinned opencv-python wheel —
+  no new dependency, no `onnxruntime`). Typed errors:
+  `FaceEmbeddingInputError` (ValueError) / `FaceEmbeddingModelError`
+  (RuntimeError) / `FaceEmbeddingOutputError` (RuntimeError).
+  Validated frozen `FaceEmbedding` result: write-protected vector,
+  dimension, pre-normalization L2 norm, explicit dtype marker.
+* Output contract: 1-D, finite, dimension validated against the
+  configured `expected_dimension` (0 = accept any non-empty),
+  zero-norm rejected (never divided), L2 normalization only when
+  `normalize_output=True` (contract-driven, not convention).
+* `tests/test_face_embedding.py`: 33 deterministic tests on
+  injected fakes — input contract, lifecycle, generation/output
+  validation (NaN/inf/zero-norm/shape), output isolation,
+  hygiene (import/construction/foreign-CWD/fresh-subprocess), and
+  Step 07 PNG-crop format roundtrip compatibility.
+
+### Model approach
+
+* **SFace** (OpenCV Zoo `face_recognition_sface_2021dec.onnx`) chosen
+  over insightface buffalo: buffalo's ArcFace path requires five
+  landmarks that Step 07 crops do not carry; SFace's documented
+  crop→112×112 preprocessing works on plain crops; Apache-2.0 (vs
+  research-only buffalo); bundled DNN loader in the pinned wheel.
+* The SFace artifact is **operator-supplied** at `models/sface.onnx`
+  and **never downloaded**; until provided, `load()` raises
+  `FaceEmbeddingModelError`. **Real-model inference is pending**
+  (no artifact in this repository; unit tests are explicitly
+  fake-backed).
+
+### Verified
+
+* Focused embedding tests: 33 passed.
+* `python -m pytest` → **342 passed** (309 prior + 33 new) from the
+  project root and an external working directory; stable across
+  repeated runs.
+* `git diff --check` → clean.
+
+### Known limitations
+
+* Crop-only (no landmark alignment) SFace accuracy is unmeasured;
+  Phase 2 evaluation on real footage required before any accuracy
+  claim.
+* Not included per plan: embedding persistence (Step 09),
+  matching/recognition (Step 10), liveness, attendance logic.
+
 ## [0.7.0] — 2026-10-11 — Phase 1, Step 07: Multi-image face enrollment
 
 ### Added

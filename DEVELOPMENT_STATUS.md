@@ -3,6 +3,99 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 08 — completion record (2026-10-11)
+
+**Implemented**
+
+* `src/face_embedding.py` — `FaceEmbedder`: converting one accepted
+  face sample (BGR uint8 crop, exactly the format Step 07 persists)
+  into a validated float32 1-D embedding. **Generation only** — no
+  matching (Step 10), no persistence (Step 09), no liveness or
+  attendance.
+  * Explicit `load()`/`is_loaded`/`embed()` lifecycle; construction
+    and import are side-effect-free;
+  * injectable `backend_factory`; without one, the real
+    `cv2.FaceRecognizerSF` (SFace, OpenCV Zoo) is used — bundled in
+    the pinned `opencv-python` wheel, so **no new dependency** and
+    no `onnxruntime` install needed;
+  * typed errors: `FaceEmbeddingInputError` (ValueError) for bad
+    crops; `FaceEmbeddingModelError` (RuntimeError) for
+    missing/invalid artifacts and backend-init failures;
+    `FaceEmbeddingOutputError` (RuntimeError) for inference failures
+    and non-finite/empty/wrong-shape/zero-norm outputs;
+  * frozen `FaceEmbedding` result: write-protected float32 vector,
+    `dimension`, pre-normalization `norm`, explicit `VectorDtype`;
+  * output validation contract: 1-D, finite, dimension checked
+    against the configured `expected_dimension` (0 = accept any
+    non-empty 1-D), zero-norm rejected (never divided by zero),
+    L2 normalization only when `normalize_output=True`;
+  * error messages never include image content or embedding values.
+* `tests/test_face_embedding.py` — 33 deterministic tests
+  (fake/injected backends, synthetic crops, temporary dirs; **no
+  real-model inference anywhere**): lifecycle (construction purity,
+  explicit idempotent load, missing-artifact typed error, factory
+  failure, non-backend rejection); input contract (None/non-array/
+  empty/wrong-ndim/channels/dtype/zero-dim); generation and output
+  contract (shape/dtype, 2-D backend output reshape, backend
+  receives untouched uint8 3-D, dimension-contract enforcement,
+  inference exceptions wrapped, output isolation/write-protection);
+  output validation (NaN, ±inf, zero-norm with and without
+  normalization, wrong dimensionality, unit-norm after
+  normalization, raw-norm preservation); hygiene (import +
+  construction create nothing, foreign-WD construction with explicit
+  paths, fresh-subprocess check from a foreign CWD); Step 07 format
+  compatibility (PNG encode/decode roundtrip → embed succeeds with
+  no landmarks or source-frame info) and model-distinction check
+  (yunet.onnx ≠ sface.onnx).
+
+**Model approach & evidence**
+
+* **SFace** chosen over insightface buffalo: the standard insightface
+  recognition path (`ArcFaceONNX.get` → `face_align.norm_crop`)
+  *requires five landmarks* which Step 07 crops do not contain;
+  SFace's `FaceRecognizerSF.feature()` performs documented crop →
+  112×112 blob preprocessing (scale 1, mean 0, BGR→RGB) that works
+  on a plain crop; Apache-2.0 licensing (vs buffalo's non-commercial
+  research-only, ARCHITECTURE.md D4); bundled in the pinned
+  opencv-python wheel.
+* **Crop-only mode is an explicit, honest limitation:** without
+  landmark alignment, SFace accuracy is *not* equivalent to the
+  documented landmark-aligned workflow. Phase 2 evaluation on real
+  footage is required before any accuracy claim.
+* The SFace ONNX artifact (`face_recognition_sface_2021dec.onnx`,
+  ~38.7 MB, SHA-256 `0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79`
+  per the upstream Hugging Face model card) is **operator-supplied**
+  at `models/sface.onnx` (`DEFAULT_MODEL_PATH`) and **never
+  downloaded** by this codebase. Until provided, `load()` raises
+  `FaceEmbeddingModelError`; unit tests run exclusively on fakes.
+
+**Verified**
+
+* Focused embedding tests: **33 passed**.
+* `python -m pytest` from the project root → **342 passed**, exit 0
+  (309 prior + 33 new), stable across 3 repeated full-suite runs.
+* External-cwd run (`cd` into an empty temp dir, project venv) →
+  **342 passed**, exit 0.
+* `git diff --check` → clean.
+* Import/construction hygiene (fresh-subprocess, foreign CWD):
+  importing `src.face_embedding` and constructing `FaceEmbedder`
+  open no camera, load no model, touch no network, create no
+  directories.
+
+**Known limitations / deferred**
+
+* **Real-model inference is pending** — no SFace artifact exists in
+  the repository and none was downloaded in this step; all embedding
+  tests use injected fakes with the same validation rigor, and no
+  test claims real face-recognition accuracy.
+* Crop-only (no landmark alignment) embedding quality is unmeasured;
+  aligning YuNet's 5-point detections would require re-running
+  detection at embed time (Step 07 crops carry no source frame or
+  landmarks by design).
+* `expected_dimension=0` default accepts any non-empty 1-D vector;
+  set it to 128 for real SFace usage to enforce the documented
+  128-D contract.
+
 ## Step 07 — completion record (2026-10-11)
 
 **Implemented**
@@ -211,7 +304,7 @@ Updated after every verified step — never ahead of implementation.
 | 05 | Face detection | ✅ Complete | Verified 2026-10-09 — 143/143 tests pass (42 new face-detection tests); YuNet backend requires an operator-supplied ONNX model. Details below. |
 | 06 | Face quality assessment | ✅ Complete | Verified 2026-10-10 — 271/271 tests pass (56 new quality tests + 4 landmark regression tests). Details below. |
 | 07 | Multi-image face enrollment | ✅ Complete | Verified 2026-10-11 — 309/309 tests pass (38 new enrollment tests); new `max_capture_attempts` constant in `EnrollmentConfig`. Details below. |
-| 08 | Face embedding generation | ⬜ Not started | Adds `insightface` + `onnxruntime`. |
+| 08 | Face embedding generation | ✅ Complete | Verified 2026-10-11 — 342/342 tests pass (33 new embedding tests); SFace backend via injectable `FaceEmbedder`, real model artifact pending. Details below. |
 | 09 | Embedding storage | ⬜ Not started | |
 | 10 | Face recognition | ⬜ Not started | |
 | 11 | Temporal / multi-frame verification | ⬜ Not started | |

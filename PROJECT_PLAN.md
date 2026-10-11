@@ -49,7 +49,7 @@ A face being recognized does NOT automatically mean attendance is recorded.
 05. Face detection                             ✅ complete
 06. Face quality assessment                    ✅ complete
 07. Multi-image face enrollment                ✅ complete
-08. Face embedding generation                  ⬜
+08. Face embedding generation                  ✅ complete
 09. Embedding storage                          ⬜
 10. Face recognition                           ⬜
 11. Temporal / multi-frame verification        ⬜

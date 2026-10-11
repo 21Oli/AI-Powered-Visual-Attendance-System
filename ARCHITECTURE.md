@@ -243,6 +243,44 @@ limits, and safe persistence:
   Duplicate handling is byte-level only — biometric similarity is
   explicitly a Step 08+ concern.
 
+### D11 — Face embeddings: SFace crop-only generation, validated outputs (Step 08)
+
+`src/face_embedding.py` turns accepted face crops into validated
+float32 vectors — generation only (matching is Step 10, persistence
+is Step 09):
+
+* **Backend choice: SFace (`cv2.FaceRecognizerSF`), with evidence.**
+  The documented insightface ArcFace path (`ArcFaceONNX.get` →
+  `face_align.norm_crop`) *requires five landmarks*; Step 07
+  deliberately persists plain crops without landmarks or source
+  frames, so that path is not usable on the existing data as-is.
+  SFace's documented preprocessing (crop → 112×112 blob, scale 1,
+  mean 0, BGR→RGB) works directly on a plain crop, is Apache-2.0
+  licensed (D4), and uses the DNN loader bundled in the pinned
+  opencv-python wheel — **no new dependency, no `onnxruntime`**.
+* **Crop-only honesty.** The alignCrop/landmark workflow remains the
+  reference accuracy path; without alignment, SFace embedding
+  accuracy is unknown until measured on real footage (Phase 2).
+  Documented as a limitation rather than hidden.
+* **Explicit lifecycle, injectable inference.**
+  `FaceEmbedder(model_path, expected_dimension, normalize_output,
+  backend_factory)`; `load()` is explicit and idempotent;
+  construction/import perform no camera/model/filesystem/network
+  side effects. The ONNX artifact is operator-supplied at
+  `models/sface.onnx` (`DEFAULT_MODEL_PATH`), never downloaded.
+* **Typed errors, validated outputs.** `FaceEmbeddingInputError`
+  (ValueError) for bad crops (None/empty/wrong shape/dtype);
+  `FaceEmbeddingModelError` for missing/invalid artifacts and init
+  failures; `FaceEmbeddingOutputError` for inference/output failures
+  (non-finite, wrong shape, contract dimension mismatch, zero norm —
+  rejected, never divided by zero). L2 normalization happens only
+  when `normalize_output=True` (contract-driven). Results are frozen
+  with write-protected float32 vectors so callers can never mutate
+  backend state. Error messages carry no image or vector content.
+* **Biometric hygiene.** No persistence in this step; nothing is
+  logged, uploaded, or written; Step 07's `.gitignore` protections
+  are unchanged; tests use only synthetic crops and injected fakes.
+
 ### D4 — Dependency licensing note
 
 `insightface`'s library code is MIT, but its pretrained model packages
