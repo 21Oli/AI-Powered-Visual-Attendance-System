@@ -3,6 +3,147 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 10 — completion record (2026-10-12)
+
+**Implemented**
+
+* `src/face_recognition.py` — `FaceRecognitionService`: one reusable,
+  injectable recognition decision (crop → embedding via the existing
+  Step 08 `FaceEmbedder` → eligible stored candidates via the
+  existing Step 09 `EmbeddingStorageService` → deterministic cosine
+  ranking → explicit typed decision). **Decision only** — no temporal
+  verification (Step 11), no liveness, no unknown-face capture, no
+  attendance events, no camera, no writes, no network. Recognition is
+  a similarity-based decision, never proof of identity.
+  * **Similarity:** pure cosine `a·b / (‖a‖‖b‖)` in [-1, 1]
+    (`cosine_similarity`, independently unit-testable), computed on
+    float64 dot products; validated inputs (1-D, non-empty, finite,
+    equal dimensions, non-zero norms) on both query and candidates;
+    zero-norm/NaN/infinite inputs raise typed errors instead of
+    producing a score; nothing is mutated; no Euclidean distance or
+    threshold borrowed from other models.
+  * **Decision procedure (deterministic):** rank by
+    `(-score, employee_id)`; `NO_CANDIDATES` when none are eligible;
+    `UNKNOWN` when best < `min_similarity` (best == threshold ⇒
+    MATCHED); `AMBIGUOUS` when `min_margin` is configured and
+    `best − runner_up < min_margin` (margin == boundary ⇒ MATCHED;
+    identical scores ⇒ margin 0 ⇒ AMBIGUOUS — ties are never resolved
+    into identity); otherwise `MATCHED` with the exact employee ID.
+    `runner_up`/`margin` reported on every scored result. Single
+    candidates have no runner-up and are decided on threshold alone.
+  * **`RecognitionConfig` (src/config.py, Step 02 convention):**
+    `min_similarity=0.36` (raw-cosine scale) and `min_margin=None`
+    (ambiguity checks disabled unless configured) — both
+    **explicitly provisional**, not production thresholds; validated
+    ranges ([0, 1] / [0, 2]) fail fast; `FaceProcessingConfig.`
+    `recognition_threshold` (0.6, a *normalized*-feature value from
+    the literature SFace workflow) is deliberately **not reused**
+    because Step 08's crop-only mode stores raw embeddings.
+  * **Employee eligibility (existing authorities only):** a stored
+    record competes only when the Step 07 *published enrollment
+    manifest* exists (the "enrollment exists" marker — no second
+    source of truth; storage's manifest independence is preserved)
+    and passes the active check: trusted from the manifest's recorded
+    `is_active` (Step 07 semantics) or overridden by an injectable
+    `active_lookup` dependency. Manifests are untrusted input:
+    unreadable/malformed/schema-mismatched/identity-contradicting
+    manifests raise `ManifestIntegrityError` (fail-closed default;
+    `eligibility_error_policy="skip"` is the documented operator
+    escape hatch that excludes the affected candidate). Inactive
+    employees are simply excluded from a decision — their embeddings
+    and manifests are never deleted or modified.
+  * **Corruption is never a decision:** corrupt stored records raised
+    through explicit candidate requests surface as their typed Step
+    09 errors; a vanished record between listing and load raises
+    `RecognitionStorageError`; corrupt sidecars on the auto-listed
+    path follow Step 09's documented skip-policy (composition is
+    tested, never converted into UNKNOWN or a low score).
+  * **Typed results:** frozen `RecognitionResult` carrying status,
+    `employee_id` (None unless MATCHED — unknown/ambiguous never
+    carry identity), `best_score`, `runner_up_score`, `margin`,
+    `reason`. **Privacy:** results, errors and logs carry counts,
+    IDs, statuses, reasons and scores only — never crops, never full
+    vectors; all computation local; no network/camera/telemetry.
+  * Construction/import perform no side effects; candidates may be
+    narrowed with an explicit `candidate_employee_ids` subset.
+* `src/enrollment.py` — added a *backward-compatible* public
+  `safe_dir_name(employee_id)` wrapper over the existing private
+  encoder, so the recognizer derives the **same** encoded directory
+  names as the writer (no scheme duplication, no behavior change).
+* `src/config.py` — new frozen `RecognitionConfig` + project-wide
+  `RECOGNITION` instance (see above; validated in `__post_init__`).
+* `tests/test_face_recognition.py` — 74 deterministic tests on fake
+  embedders and temporary-directory-backed real storage (no real
+  SFace artifact, no camera, no network, no real biometrics): clear
+  match; explicit-candidate subsets; unknown below threshold; exact
+  threshold and margin boundaries; ambiguity vs margin-satisfied;
+  no-candidates; single candidate; identical-score ties AMBIGUOUS;
+  deterministic ranking; dimension mismatch → typed format error;
+  empty/NaN/inf/zero-norm candidates and query (corrupt/model-error
+  typed); cosine_similarity unit contract (identical/orthogonal/
+  opposite non-normalized pairs, dim/zero/NaN/1-D/empty rejections);
+  corrupt-record propagation (explicit candidate typed error;
+  auto-list composition NO_CANDIDATES); embedder exceptions and
+  unusable results → `RecognitionModelError`; vanished-record race →
+  `RecognitionStorageError`; config validation incl. inclusive
+  boundaries and the documented "provisional" doc note; ID
+  preservation (`007`, `EMP-0042`); inactive exclusion/no-candidates,
+  embeddings-not-deleted, missing manifest exclusion, malformed/
+  contradictory/non-bool manifests → `ManifestIntegrityError`, skip
+  policy, `active_lookup` override and its non-bool failure;
+  model-compatibility honesty (documented limitation, no provenance
+  invention); no mutation of query/candidate/crop/stored arrays;
+  no vectors or image data in results/exception messages; import/
+  construction purity, `recognize` creating no trees, fresh-
+  subprocess and foreign-CWD hygiene, no camera/network surface;
+  crop contract rejection before the embedder is ever invoked.
+
+**Verified**
+
+* Focused recognition tests: **74 passed**.
+* `python -m pytest` from the project root → **495 passed**, exit 0
+  (421 prior + 74 new), stable across 3 repeated full-suite runs.
+* External-cwd run (`cd` into an empty temp dir, project venv) →
+  **495 passed**, exit 0.
+* `git diff --check` → clean.
+* Import/construction hygiene (fresh subprocess, foreign CWD):
+  importing `src.face_recognition` and constructing the service (with
+  never-called injected embedder) performs no camera/model/filesystem
+  or network activity; `recognize` with no stored data creates no
+  directory trees.
+
+**Model compatibility & real-model status (honest)**
+
+* **Real SFace inference is still NOT verified** — the artifact does
+  not exist in the repository and was not downloaded (Steps 08/09
+  pending items carried forward). Every recognition test is
+  fake-backed with real validation rigor; no accuracy claim is made.
+* **No model identifier exists in Step 09 sidecars** (SFace exposes
+  no version API at inference time), and none was invented. Dimension
+  equality is NOT claimed to prove compatibility: the documented
+  remedy is operational — all records compared in one deployment must
+  come from one known, consistent embedding-model generation
+  (re-embedding after any model change). No metadata format change
+  was made (existing records remain byte-compatible, D12 untouched).
+* Thresholds are **provisional** starting points on the raw-feature
+  cosine scale; empirical calibration against representative
+  positive/negative footage is required before any production claim
+  (Phase 2). The alternative documented-literature threshold (0.6)
+  applies to *normalized* features and was deliberately not adopted.
+
+**Known limitations / deferred**
+
+* Recognition integrates Steps 07–09 through their public APIs only;
+  the “one generation” rule is documented, not machine-enforced
+  (enforcement would require a sidecar format change, rejected here
+  as invasive without operator provenance data).
+* Auto-listed corrupt sidecars follow Step 09's skip policy — the
+  composition is tested to yield NO_CANDIDATES (never an identity
+  decision); deployments requiring fail-closed auto-listing should
+  enumerate explicit candidate IDs.
+* No unknown-face capture, per-frame streaming, temporal
+  confirmation, liveness, or attendance semantics (later steps).
+
 ## Step 09 — completion record (2026-10-12)
 
 **Implemented**

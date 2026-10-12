@@ -145,6 +145,7 @@ __all__ = [
     "SampleRejection",
     "EnrollmentService",
     "MANIFEST_FILENAME",
+    "safe_dir_name",
 ]
 
 _logger = get_logger(__name__)
@@ -817,3 +818,15 @@ class EnrollmentService:
                 _logger.exception(
                     "cleanup of %s from the failed attempt failed", path
                 )
+
+
+def safe_dir_name(employee_id: str) -> str:
+    """Public encoding used for employee directory names.
+
+    Thin, documented wrapper over :meth:`EnrollmentService._safe_dir_name`
+    so downstream steps (e.g. Step 10's recognition eligibility check,
+    reading an existing enrollment manifest) derive the **same**
+    directory name as the writer without duplicating the scheme.
+    Raises the same typed :class:`EnrollmentInputError` on invalid IDs.
+    """
+    return EnrollmentService._safe_dir_name(employee_id)

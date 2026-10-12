@@ -322,6 +322,63 @@ D3) without competing directories or identity sources:
   tests use synthetic vectors in temporary directories. Returned
   records are frozen with write-protected vectors.
 
+### D13 — Recognition: cosine decision over Steps 08/09, provisional thresholds, fail-closed eligibility (Step 10)
+
+`src/face_recognition.py` implements the recognition stage between
+storage (D12) and temporal verification (later phases):
+
+* **Pure cosine decision, honest scale.** score = `a·b / (‖a‖‖b‖)`
+  over validated float64 dot products, in [-1, 1]; inputs validated
+  (1-D, non-empty, finite, equal dimensions, non-zero norms) on both
+  query and candidates — zero-norm/NaN/inf vectors raise typed errors
+  instead of producing scores, and no Euclidean distance or borrowed
+  threshold is used. Because Step 08's crop-only mode stores **raw**
+  embeddings, the literature's 0.6 *normalized*-feature threshold is
+  deliberately NOT reused; `RecognitionConfig.min_similarity=0.36`
+  and `min_margin=None` are documented **provisional** starting
+  points requiring Phase 2 empirical calibration (D5 conventions).
+* **Deterministic decision procedure.** Eligible candidates ranked by
+  `(-score, employee_id)`; `NO_CANDIDATES` when nothing is eligible;
+  `UNKNOWN` when best < threshold; `AMBIGUOUS` when a configured
+  margin separates top two too narrowly; `MATCHED` otherwise.
+  Boundary semantics are explicit (best == threshold ⇒ MATCHED;
+  margin == boundary ⇒ MATCHED; equal top scores ⇒ AMBIGUOUS — ties
+  never resolve into identity). Unknown/ambiguous results never
+  carry an employee ID; results carry scores, status and a short
+  reason — never crops or vectors.
+* **Eligibility from existing authorities (no new identity store).**
+  Candidates must have a published Step 07 enrollment manifest
+  (the "enrollment exists" marker) and pass the active gate — trusted
+  from the manifest's recorded `is_active` (Step 07 semantics) or
+  overridden by an injectable `active_lookup`. Manifests are untrusted
+  input: unreadable/malformed/schema-mismatched/identity-contradicting
+  manifests raise `ManifestIntegrityError` (fail-closed default;
+  documented `"skip"` policy is the operator escape hatch). Inactive
+  employees are excluded from decisions — never deleted or modified.
+* **Failure honesty.** Corrupt stored records (explicit candidate
+  requests) surface as their typed Step 09 errors; a record vanishing
+  between listing and load raises `RecognitionStorageError`; embedder
+  failures raise `RecognitionModelError` — none of these ever
+  degrade into an ordinary unknown-person result.
+* **Model compatibility honesty (D12 unchanged).** Step 09 sidecars
+  record no model identifier and none was invented; dimension
+  equality is not claimed to prove provenance. The documented remedy
+  is operational: one known, consistent embedding-model generation
+  per deployment (re-embed after model changes). No metadata format
+  change was made — existing records stay byte-compatible.
+* **Composition not bypass.** The recognizer uses only the public
+  Step 09 storage API (`list_employee_ids`/`load`) plus a public
+  `safe_dir_name` wrapper over Step 07's encoder so eligibility reads
+  and writes share one path scheme; private storage files are never
+  read directly. Auto-listed corrupt sidecars follow Step 09's
+  documented skip-policy (tested composition: NO_CANDIDATES, never
+  an identity decision).
+* **Privacy & scope.** All computation is local; logs/results carry
+  IDs, statuses, reasons and scores only. No temporal verification,
+  liveness, unknown-face capture, attendance events, camera loop, or
+  persistence of recognition results; tests are fake-backed (no real
+  SFace artifact) and no recognition-accuracy claim is made.
+
 ### D4 — Dependency licensing note
 
 `insightface`'s library code is MIT, but its pretrained model packages

@@ -4,6 +4,85 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [0.10.0] — 2026-10-12 — Phase 1, Step 10: Face recognition
+
+### Added
+
+* `src/face_recognition.py`: `FaceRecognitionService` — one reusable,
+  injectable recognition decision (crop → Step 08 embedder → Step 09
+  storage candidates → deterministic cosine ranking → typed result).
+  Decision only — no temporal verification (Step 11), no liveness, no
+  unknown-face capture, no attendance events, no camera/writes/
+  network. Recognition is a similarity-based decision, never proof of
+  identity.
+* Similarity & decision: pure cosine `a·b / (‖a‖‖b‖)` in [-1, 1]
+  (`cosine_similarity`, unit-testable; validated 1-D/non-empty/
+  finite/equal-dimension/non-zero-norm inputs; nothing mutated).
+  Deterministic rank by `(-score, employee_id)`; statuses `MATCHED`/
+  `UNKNOWN`/`AMBIGUOUS`/`NO_CANDIDATES` in frozen `RecognitionResult`
+  (best/runner-up/margin scores + short reason; identity assigned
+  only on unambiguous MATCHED). `best == threshold` ⇒ MATCHED;
+  `margin == min_margin` ⇒ MATCHED; identical top scores ⇒ AMBIGUOUS
+  (ties never resolve into identity). Single candidates decided on
+  threshold alone.
+* `src/config.py`: frozen `RecognitionConfig` + `RECOGNITION`
+  — `min_similarity=0.36` (raw-cosine scale) and `min_margin=None`,
+  both **explicitly provisional** until empirical calibration; range
+  validation in `__post_init__`. The literature 0.6 threshold
+  (normalized features) is deliberately not reused, because Step 08
+  stores raw crop-only embeddings; `FaceProcessingConfig` unchanged.
+* Employee eligibility via existing authorities only: the Step 07
+  published enrollment manifest gates candidacy (no second source of
+  truth); active status trusted from the manifest (or overridden by
+  an injectable `active_lookup`); untrusted manifests are validated —
+  unreadable/malformed/schema-mismatched/identity-contradicting ones
+  raise the new typed `ManifestIntegrityError` (fail-closed default,
+  documented `"skip"` escape hatch). Inactive employees are excluded
+  from decisions but their records are never deleted. Stored IDs
+  (`007`, `EMP-0042`) are preserved exactly.
+* `src/enrollment.py`: backward-compatible public `safe_dir_name()`
+  wrapper so the recognizer reuses the writer's exact encoded-name
+  scheme (no duplication, no behavior change).
+* Corruption & failure honesty: corrupt records surfaced via explicit
+  candidates raise their typed Step 09 errors; a vanished record
+  raises `RecognitionStorageError`; embedder failures raise
+  `RecognitionModelError`; invalid inputs/config raise
+  `RecognitionInputError`. Results/logs never contain crops or full
+  vectors (privacy by contract, tested).
+* `tests/test_face_recognition.py`: 74 deterministic tests on fake
+  embedders + temp-dir real storage (no real SFace artifact, no
+  camera, no network, no real biometrics) covering: matches, explicit
+  subsets, unknown, exact threshold/margin boundaries, ambiguity,
+  ties, candidate-set edges, vector validation matrix (NaN/inf/zero-
+  norm/empty/dimension mismatch), corrupt-record propagation,
+  embedder/storage failures, config validation, ID preservation,
+  active/inactive + manifest integrity, model-compatibility honesty,
+  immutability, privacy, import/construction/foreign-CWD/subprocess
+  hygiene.
+
+### Verified
+
+* Focused recognition tests: 74 passed.
+* `python -m pytest` → **495 passed** (421 prior + 74 new) from the
+  project root and an external working directory; stable across
+  repeated runs.
+* `git diff --check` → clean; no biometric artifacts in the repo.
+
+### Known limitations
+
+* **Real SFace inference remains unverified** (artifact absent,
+  never downloaded; Steps 08/09 status carried forward) — all
+  recognition tests are fake-backed with real validation rigor, and
+  no recognition accuracy claim is made.
+* Model identity is not machine-enforced (no identifier exists in
+  Step 09 sidecars and none was invented): all candidates in one
+  deployment must come from one known, consistent embedding-model
+  generation (documented operational remedy; no format change).
+* Thresholds/margin are provisional starting points on the raw
+  cosine scale; Phase 2 calibration required before production use.
+* Not included per plan: temporal verification (Step 11), liveness,
+  unknown-face capture, attendance events, camera loop.
+
 ## [0.9.0] — 2026-10-12 — Phase 1, Step 09: Embedding storage
 
 ### Added

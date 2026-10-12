@@ -43,10 +43,12 @@ __all__ = [
     "FaceProcessingConfig",
     "QualityConfig",
     "EnrollmentConfig",
+    "RecognitionConfig",
     "CAMERA",
     "FACE_PROCESSING",
     "QUALITY",
     "ENROLLMENT",
+    "RECOGNITION",
     "AppSettings",
     "Settings",
     "ConfigError",
@@ -259,11 +261,76 @@ class QualityConfig:
             )
 
 
+# ---------------------------------------------------------------------------
+# Recognition constants (configuration only — Step 10 implements recognition)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RecognitionConfig:
+    """Constants for future face recognition (Step 10).
+
+    Defaults are **provisional, testable starting points** — not claims
+    of production biometric accuracy. The literature SFace workflow
+    matches *normalized* features; Step 08 (crop-only mode, no landmark
+    alignment) produces **raw** embeddings, so the raw-feature cosine
+    scale differs from commonly quoted thresholds. Calibration against
+    representative positive/negative footage is Phase 2 work, tuned
+    exactly here (per ARCHITECTURE.md D5).
+    """
+
+    #: Minimum cosine similarity for accepting a best candidate
+    #: (raw-feature cosine scale). Provisional until evaluated.
+    min_similarity: float = 0.36
+    #: Minimum margin between the best and runner-up scores for an
+    #: unambiguous match; ``None`` disables the ambiguity check (any
+    #: margin above this value is accepted). Provisional until evaluated.
+    min_margin: float | None = None
+    #: Only recognize candidates whose published enrollment manifest
+    #: (Step 07 ``employee.json``) exists — the ``"enrollment exists"``
+    #: marker. Active-status gating is handled separately by the
+    #: recognition service's eligibility logic.
+    require_enrollment: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.min_similarity, (int, float)) or isinstance(
+            self.min_similarity, bool
+        ):
+            raise ValueError(
+                "min_similarity must be a real number, got "
+                f"{type(self.min_similarity).__name__}"
+            )
+        if not 0.0 <= self.min_similarity <= 1.0:
+            raise ValueError(
+                "min_similarity must be a finite cosine-similarity value "
+                f"in [0, 1], got {self.min_similarity}"
+            )
+        if self.min_margin is not None:
+            if not isinstance(self.min_margin, (int, float)) or isinstance(
+                self.min_margin, bool
+            ):
+                raise ValueError(
+                    "min_margin must be None or a real number, got "
+                    f"{type(self.min_margin).__name__}"
+                )
+            if not 0.0 <= self.min_margin <= 2.0:
+                raise ValueError(
+                    "min_margin must be in [0, 2] on the raw cosine scale, "
+                    f"got {self.min_margin}"
+                )
+        if not isinstance(self.require_enrollment, bool):
+            raise ValueError(
+                "require_enrollment must be a bool, got "
+                f"{type(self.require_enrollment).__name__}"
+            )
+
+
 #: Frozen constant instances — the project-wide single source of truth.
 CAMERA: Final[CameraConfig] = CameraConfig()
 FACE_PROCESSING: Final[FaceProcessingConfig] = FaceProcessingConfig()
 QUALITY: Final[QualityConfig] = QualityConfig()
 ENROLLMENT: Final[EnrollmentConfig] = EnrollmentConfig()
+RECOGNITION: Final[RecognitionConfig] = RecognitionConfig()
 
 
 # ---------------------------------------------------------------------------
