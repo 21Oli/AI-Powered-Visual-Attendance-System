@@ -281,6 +281,47 @@ is Step 09):
   logged, uploaded, or written; Step 07's `.gitignore` protections
   are unchanged; tests use only synthetic crops and injected fakes.
 
+### D12 — Embedding storage: validated per-employee record files, no silent overwrites (Step 09)
+
+`src/embedding_storage.py` persists Step 08's validated embeddings
+under the existing `AppSettings.embeddings_dir` (`data/embeddings/`,
+D3) without competing directories or identity sources:
+
+* **Format: `.npz` + JSON sidecar.** One array file per employee
+  (`np.savez` write, `np.load(allow_pickle=False)` read — pickle and
+  object arrays are structurally excluded) plus a small validated
+  JSON sidecar (schema `format_version: 1`: exact employee ID,
+  declared dimension, dtype marker, UTC `stored_at`). Chosen over a
+  text codec for value-exactness and over SQLite/any DB for zero new
+  dependencies. Face images are never part of embedding storage.
+* **Single identity source-of-truth.** IDs are validated through the
+  existing `Employee` model rules and Step 07's traversal-proof
+  percent-encoding (dots encoded); enrollment manifests are never
+  read or modified, and no employee is created by a storage request.
+  Verifying that a recognized match is an enrolled employee is left
+  to Step 10's policy.
+* **Validation before write, re-validation on read.** Save rejects
+  non-1-D, empty, non-finite (NaN/±inf), non-zero-norm violations and
+  enforces the constructor's `expected_dimension` contract on save
+  and load (cross-model dimension mismatches are typed format
+  errors, never silent feature-space mixing). Load treats files as
+  untrusted input and re-checks schema, ID association, readability,
+  dtype, shape, and metadata-vs-array agreement on every call;
+  corruption raises typed errors instead of degrading into an empty
+  vector or an inclusive not-found answer.
+* **No silent overwrite.** A record exists iff both files exist;
+  `save()` refuses by default and `replace=True` is the explicit,
+  documented update path. Non-replacing publication hard-links staged
+  files into place so a concurrent winner surfaces as a duplicate
+  error rather than being clobbered; replacing publication is one
+  `os.replace` per file, array first and sidecar last, so a crash can
+  leave an unpublished array but never a declared record without
+  validated metadata. Failed attempts clean only their own artifacts.
+* **Biometric hygiene.** Embeddings live only in the already-ignored
+  tree; nothing is logged (counts and IDs only), uploaded, or echoed;
+  tests use synthetic vectors in temporary directories. Returned
+  records are frozen with write-protected vectors.
+
 ### D4 — Dependency licensing note
 
 `insightface`'s library code is MIT, but its pretrained model packages

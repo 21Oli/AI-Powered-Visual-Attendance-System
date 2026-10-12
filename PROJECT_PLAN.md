@@ -50,7 +50,7 @@ A face being recognized does NOT automatically mean attendance is recorded.
 06. Face quality assessment                    ✅ complete
 07. Multi-image face enrollment                ✅ complete
 08. Face embedding generation                  ✅ complete
-09. Embedding storage                          ⬜
+09. Embedding storage                          ✅ complete
 10. Face recognition                           ⬜
 11. Temporal / multi-frame verification        ⬜
 12. Unknown-face handling                      ⬜
@@ -90,7 +90,8 @@ visual-attendance/
 │   ├── face_detection.py # Step 05
 │   ├── quality.py        # Step 06 (implemented)
 │   ├── enrollment.py     # Step 07
-│   ├── embeddings.py     # Step 08
+│   ├── embeddings.py     # Step 08 (implemented as face_embedding.py)
+│   ├── embedding_storage.py # Step 09
 │   ├── recognition.py    # Step 10
 │   ├── verification.py   # Step 11
 │   └── attendance.py     # Step 13

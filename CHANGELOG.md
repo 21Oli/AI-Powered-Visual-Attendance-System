@@ -4,6 +4,81 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [0.9.0] — 2026-10-12 — Phase 1, Step 09: Embedding storage
+
+### Added
+
+* `src/embedding_storage.py`: `EmbeddingStorageService` — saves,
+  loads, lists, and validates stored face embeddings under the
+  existing configured `data/embeddings/` directory. Storage only: no
+  matching (Step 10), no recognition, no attendance, no enrollment
+  changes; storage proves nothing about identity.
+* Storage format (one choice, documented): per employee one NumPy
+  `.npz` array file (`np.savez` write / `np.load(allow_pickle=False)`
+  read — no pickle, no object arrays) plus a JSON metadata sidecar
+  (schema `format_version: 1`: exact employee ID, declared dimension,
+  `float32` dtype marker, timezone-aware UTC `stored_at`). Record
+  name stems reuse Step 07's traversal-proof percent-encoding; IDs
+  (`007`, `EMP-0042`) survive byte-exactly and must satisfy the
+  `Employee` model rules. No database, no new dependency.
+* Contracts: `save(employee_id, embedding, *, replace=False)` accepts
+  a Step 08 `FaceEmbedding` or a raw 1-D float array (normalized to
+  the float32 on-disk contract); `load()` re-validates everything on
+  every call treating stored files as untrusted input;
+  `exists()` counts only complete record pairs;
+  `list_employee_ids()` skips corrupt sidecars instead of crashing.
+  The constructor's `expected_dimension` (default `0` = any positive
+  dimension) is enforced on both save and load, making cross-model
+  dimension compatibility explicit (`EmbeddingRecordFormatError`).
+* Safety: save validates the vector (1-D, non-empty, floating, finite,
+  non-zero norm) and the ID **before any write**; a record is never
+  overwritten without the explicit `replace=True` flag (files staged,
+  flushed, fsync-ed; hard-link publication fails loudly on a
+  concurrent winner; publication order array-then-sidecar so a crash
+  can leave an unpublished array but never a metadata-declared record
+  without its validated sidecar); failed attempts clean only their
+  own staged/unpublished artifacts. Typed errors:
+  `EmbeddingStorageInputError` (ValueError),
+  `DuplicateEmbeddingRecordError`, `EmbeddingRecordNotFoundError`,
+  `CorruptEmbeddingRecordError`, `EmbeddingRecordFormatError`,
+  `EmbeddingPersistenceError`. Returned records are frozen with
+  write-protected vectors. Import/construction perform no filesystem
+  work (directories created only when a real save needs them).
+* `tests/test_embedding_storage.py`: 79 deterministic tests on
+  synthetic vectors in temporary directories (no real biometrics, no
+  network): round trips, exact-ID preservation, vector validation
+  (NaN/±inf/zero-norm/shape/dtype), duplicate refusal + explicit
+  replace, corruption matrix (garbage files, invalid JSON, object
+  arrays, smuggled pickle bytes that must never execute, on-disk
+  NaN, dtype/shape/dimension/ID mismatches, naive timestamps,
+  unknown dtype markers, incompatible schema versions), traversal
+  and malicious-ID rejection before any write, write-failure cleanup
+  with unrelated data untouched, hygiene (import/construction/
+  foreign-CWD/fresh-subprocess/no-device-no-network), and output
+  isolation.
+
+### Verified
+
+* Focused embedding-storage tests: 79 passed.
+* `python -m pytest` → **421 passed** (342 prior + 79 new) from the
+  project root and an external working directory; stable across
+  repeated runs.
+* `git diff --check` → clean.
+* No biometric artifacts in the repository (tests use temp dirs).
+
+### Known limitations
+
+* Storage does not consult enrollment manifests (deliberate — no
+  second identity source-of-truth); recognizing only enrolled
+  employees is Step 10's gating decision.
+* Crash between the two file publications leaves an orphan array
+  (never a declared record without metadata); orphans are skipped by
+  `exists()`/`list_employee_ids()` but not garbage-collected.
+* Model identity/version is not recorded (SFace exposes no version
+  API); dimension compatibility is the explicit contract instead.
+* Not included per plan: matching/recognition (Step 10), temporal
+  verification, unknown-face handling, attendance logic.
+
 ## [0.8.0] — 2026-10-11 — Phase 1, Step 08: Face embedding generation
 
 ### Added

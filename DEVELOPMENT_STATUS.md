@@ -3,6 +3,137 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 09 — completion record (2026-10-12)
+
+**Implemented**
+
+* `src/embedding_storage.py` — `EmbeddingStorageService`: saving,
+  loading, listing, and validating stored face embeddings under the
+  existing configured `AppSettings.embeddings_dir` (`data/embeddings/`,
+  already git-ignored). **Storage only** — no matching (Step 10), no
+  recognition, no liveness, no attendance events, no enrollment
+  changes; storage proves nothing about identity.
+  * **Storage format (single choice, no competing formats):** one
+    NumPy `.npz` array file per employee (`<encoded-id>.npz`, written
+    via `np.savez` and loaded with `np.load(allow_pickle=False)`) plus
+    a JSON metadata sidecar (`<encoded-id>.meta.json`, schema
+    `format_version: 1` with the exact employee ID, declared
+    dimension, dtype marker, and UTC `stored_at`). No `pickle` and no
+    object arrays on any path; no database and no new dependency
+    (NumPy is already pinned). Raw face images are never stored here,
+    and model artifacts stay under `models/`.
+  * `<encoded-id>` reuses Step 07's deterministic percent-encoding
+    (dots encoded; path separators and `.`/`..` rejected outright), so
+    `007` and `EMP-0042` survive byte-exactly and path traversal is
+    structurally impossible; IDs must additionally satisfy the exact
+    `Employee` model rules (no second identity source-of-truth is
+    created and enrollment manifests are never read or modified).
+  * **Public API:** `save(employee_id, embedding, *, replace=False)`
+    (accepts a Step 08 `FaceEmbedding` or a raw 1-D float array;
+    returns the on-disk record re-read and re-validated),
+    `load(employee_id)`, `exists(employee_id)`, and
+    `list_employee_ids()`; `expected_dimension` constructor contract
+    (default `0` = any positive dimension; set e.g. `128` for SFace)
+    enforced on **both** save and load so cross-model dimension
+    mismatches fail with a typed `EmbeddingRecordFormatError` rather
+    than silently comparing across feature spaces.
+  * **Validation before save:** ID via `Employee` rules + traversal
+    screen; vector 1-D, non-empty, floating dtype, finite, non-zero
+    norm (zero-norm and NaN/±inf rejected before any write);
+    metadata/dimension consistency. The stored dtype contract is
+    float32 (non-float32 inputs are converted; integrity is validated
+    the same way on load).
+  * **No silent overwrites:** a record exists when *both* files exist;
+    `save()` refuses if either exists and `replace=False` (default).
+    The explicit `replace=True` flag is the only update path. Under
+    concurrency, publication uses hard-linked files when not
+    replacing, so the save fails loudly instead of clobbering a
+    winner between the existence check and publication.
+  * **Persistence safety:** publication order is array-then-sidecar
+    (each file is staged, flushed, `fsync`-ed, and then either hard-
+    linked or `os.replace`-d into place) so a crash between the two
+    publishes can leave an unpublished array but never a declared
+    record without validated metadata; on failure only the current
+    attempt's staged/unpublished artifacts are cleaned, and
+    pre-existing/unrelated files are untouched. Single record file
+    pair per employee — no multi-file transactionality is claimed.
+  * **Load treats stored files as untrusted input:** records are
+    fully re-validated on every load — sidecar schema, exact-ID match
+    (a record is never returned under a different employee's ID),
+    array file readability via `np.load(allow_pickle=False)`,
+    object-array refusal, float32 dtype, 1-D shape, finiteness, and
+    metadata-vs-array dimension agreement. Corruption raises typed
+    errors (`CorruptEmbeddingRecordError` / `EmbeddingRecordFormatError`),
+    never a silent empty vector or a not-found answer. Incomplete
+    records (one file without the other) are reported as corrupt —
+    `exists()` reports only complete pairs.
+  * **Typed errors:** `EmbeddingStorageInputError` (ValueError),
+    `DuplicateEmbeddingRecordError`, `EmbeddingRecordNotFoundError`,
+    `CorruptEmbeddingRecordError`, `EmbeddingRecordFormatError`,
+    `EmbeddingPersistenceError`. Records returned as frozen
+    `StoredEmbedding` with a write-protected vector copy.
+  * Construction/import performs no filesystem work: directories are
+    created only when a real save needs them, and no file is touched
+    merely by importing the module or probing `exists`/`list`.
+* `tests/test_embedding_storage.py` — 79 deterministic tests on
+  temporary directories and synthetic vectors (no real biometrics, no
+  network, no camera): round-trip save/load (incl. a Step 08
+  `FaceEmbedding` input and float64→float32 normalization), exact-ID
+  preservation (`007`, `EMP-0042`, IDs with spaces encoded on disk but
+  exact inside the sidecar), vector validation (2-D/empty/int dtype/
+  NaN/±inf/zero-norm, expected-dimension on save and load), missing
+  records, duplicate refusal (either file present blocks save) and
+  explicit `replace` semantics, corruption matrix (garbage `.npz`,
+  invalid/non-object JSON, missing `embedding` key, object arrays
+  without pickle, a hostile file with smuggled pickle bytes that must
+  never execute, NaN-in-file, wrong dtype on disk, array-vs-metadata
+  dimension disagreement, sidecar-vs-requested-ID mismatch, zero
+  dimension, naive timestamp, unknown dtype marker), incompatible
+  schema versions (future major and non-int), path traversal and
+  malicious IDs (refused before any write; outside-the-tree sentinel
+  untouched), write failures with temp-file cleanup and untouched
+  unrelated/pre-existing data, TOCTOU-safe publication refusal,
+  hygiene (import/construction produce nothing; foreign-CWD use with
+  explicit settings; fresh-subprocess import; no cv2/socket/network
+  surface), manifest independence (storage works without any
+  enrollment manifest and never touches the enrollment trees), and
+  output isolation (write-protected vectors, frozen metadata,
+  caller-mutated arrays don't corrupt stored records).
+
+**Verified**
+
+* Focused embedding-storage tests: **79 passed**.
+* `python -m pytest` from the project root → **421 passed**, exit 0
+  (342 prior + 79 new), stable across 3 repeated full-suite runs.
+* External-cwd run (`cd` into an empty temp dir, project venv) →
+  **421 passed**, exit 0.
+* `git diff --check` → clean.
+* Import/construction hygiene (fresh subprocess, foreign CWD):
+  importing `src.embedding_storage` and constructing`ness the  service (even probing `list_employee_ids()`) creates no files,
+  directories, camera, model, or network activity.
+* No biometric artifacts in the repository: all tests used synthetic
+  vectors in temporary directories; `data/embeddings/` retains only
+  its `.gitkeep`.
+
+**Known limitations / deferred**
+
+* Storage consults **only** the `Employee` model rules for ID form —
+  it does not verify that an employee was ever enrolled (no manifest
+  is read; avoiding a second identity source-of-truth was a task
+  requirement). Recognition-time gating against enrollment existence
+  belongs to Step 10.
+* Crash between the two publications leaves an orphan array file
+  (never a declared record without metadata); such orphans are
+  skipped by `list_employee_ids()` and `exists()` but are not
+  garbage-collected automatically.
+* Two-file publication is not a single atomic transaction
+  (documented); the ordering makes the incomplete state detectable
+  and typed rather than silent.
+* Model identity is not recorded per embedding (SFace has no version
+  API surface to read at inference time); dimension compatibility is
+  the explicit, configurable contract instead. Vector values are
+  normalized to float32 on save.
+
 ## Step 08 — completion record (2026-10-11)
 
 **Implemented**
