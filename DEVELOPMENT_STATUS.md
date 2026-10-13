@@ -3,6 +3,104 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 12 — completion record (2026-10-13)
+
+**Implemented**
+
+* `src/unknown_face_handler.py` — `UnknownFaceHandler`: conservative,
+  in-memory unknown-face handling built **on** the approved Step 10
+  (`RecognitionResult`) and Step 11 (`TemporalVerificationResult`)
+  contracts. It never identifies an unknown person beyond the existing
+  recognition service, never records attendance or generates events,
+  performs no persistence, tracking, notifications, or network calls,
+  and never bypasses `TemporalVerifier`.
+  * **Two documented entry points (trust boundary):**
+    `observe_temporal(result, session_key)` is the **authoritative**
+    path — a `VERIFIED` temporal result is the only signal treated as
+    a temporally verified identity (yielding `NO_ACTION`, or
+    `EPISODE_ENDED` when an unresolved episode was active); the
+    outcome carries **no** identity. `COLLECTING`/`INTERRUPTED` are
+    handled conservatively as unresolved observations (possibly an
+    enrolled employee mid-verification, possibly a stranger — never
+    guessed). `observe_recognition(result, session_key)` is the
+    **observability** path — `UNKNOWN`/`AMBIGUOUS`/`NO_CANDIDATES`
+    classify one-to-one; a raw `MATCHED` is classified
+    `MATCH_UNVERIFIED` (a single-frame match is explicitly NOT a
+    temporally verified identity). No entry point can turn any
+    recognition result into an identity or attendance action.
+  * **Outcome types (frozen):** `UnknownFaceOutcome(status,
+    observation, suppressed_frames, reason)` with
+    `UnknownFaceStatus.{NO_ACTION, OBSERVED, SUPPRESSED,
+    EPISODE_ENDED}` and `UnresolvedObservation.{UNKNOWN, AMBIGUOUS,
+    NO_CANDIDATES, MATCH_UNVERIFIED, TEMPORAL_UNVERIFIED}` —
+    statuses/counts/reasons only, no employee IDs, scores, frames, or
+    crops ever carried.
+  * **Cooldown / dedup policy (deterministic):** the first unresolved
+    observation in a session opens a bounded episode (`OBSERVED`);
+    further unresolved frames within
+    `UnknownFaceConfig.episode_cooldown_seconds` of the alert instant
+    are `SUPPRESSED` (counter reported). The cooldown is
+    **non-refreshing** — the episode expires exactly at
+    alert + cooldown (lazy, checked against an injectable monotonic
+    clock), so a later unresolved frame after expiry opens a fresh
+    episode: stale state can never suppress observations
+    indefinitely. `reset(session_key=None)` ends one or all episodes
+    and returns how many were active. No sleeps in tests (fake clock).
+  * **Bounded state (no face-track identity claims):** per caller-
+    managed session key, at most `UnknownFaceConfig.max_sessions`
+    episodes retained with deterministic LRU eviction (worst case
+    after eviction: one extra alert). Suppression is per session,
+    and the project has no stable face-track identifier — suppression
+    is a bounded unresolved-session policy, NOT proof that repeated
+    frames show the same person; multiple unknown people within one
+    caller session cannot be distinguished (documented limitation; no
+    tracker added). Session keys: non-empty str, capped length
+    (strict; whitespace-only/oversized keys rejected, never
+    truncated); `reset(None)` is the documented clear-all call.
+  * **Fail-safe inputs:** typed `UnknownFaceInputError` for wrong
+    result types, synthetic bogus statuses (the Step 10/11 dataclass'
+    do not type-check their status fields), and contract violations
+    (`MATCHED`/`VERIFIED` without a valid identity) — inconsistent
+    results never become observations, identities, or suppressed
+    state; the handler stays usable afterwards.
+* `src/config.py` — frozen `UnknownFaceConfig` + `UNKNOWN_FACE`:
+  `episode_cooldown_seconds=30.0`, `max_sessions=8`,
+  `max_session_key_length=128`. All **initial engineering defaults**,
+  not calibrated operational or security guarantees (Phase 2
+  calibration); strict validation (bool is rejected for every
+  numeric field; NaN/inf/non-positive cooldowns rejected; ints only
+  for counts). No existing config object changed.
+* `tests/test_unknown_face_handler.py` — 56 deterministic,
+  hardware-free tests (synthetic results + injected fake clock; no
+  camera/model/network/biometric files) covering the full Step 12
+  checklist and edge cases: verified-vs-unverified boundaries for
+  every temporal/recognition status, one-to-one status
+  classification with no identity leakage, cooldown boundaries
+  (suppression window, exact expiry at alert+cooldown,
+  non-refreshing semantics), episode end via verified identity and
+  via reset (single/all), expiry after long stale silence, bounded
+  state (long runs, LRU eviction, no unbounded growth), instance and
+  session isolation, session-key validation (incl. bool/float
+  cooldowns, key types/length), frozen outcome/config types, contract
+  immutability after observation, and a fresh-subprocess foreign-CWD
+  import/construction side-effect check.
+
+**Verification (run 2026-10-13, exit 0)**
+
+* Focused: `pytest tests/test_unknown_face_handler.py` → 56 passed.
+* Full suite, project root: **602 passed** (546 + 56).
+* Full suite from an external working directory: 602 passed.
+* `git diff --check` clean; no generated artifacts, no biometric
+  data, no images, no model files, no persistent logs added.
+
+**Honesty note.** Deterministic in-memory logic only: no real-camera,
+no real-recognition-pipeline, and no operational or security
+calibration was performed. Unknown-face handling is **not** an
+attendance event and stores no audit trail — any future persistent
+audit/event design belongs to a later approved step. Suppression is
+per caller-managed session, not per person (no stable tracking
+exists).
+
 ## Step 11 — completion record (2026-10-13)
 
 **Implemented**

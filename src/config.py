@@ -29,6 +29,7 @@ numbers through the pipeline modules.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,12 +46,14 @@ __all__ = [
     "EnrollmentConfig",
     "RecognitionConfig",
     "TemporalVerificationConfig",
+    "UnknownFaceConfig",
     "CAMERA",
     "FACE_PROCESSING",
     "QUALITY",
     "ENROLLMENT",
     "RECOGNITION",
     "TEMPORAL_VERIFICATION",
+    "UNKNOWN_FACE",
     "AppSettings",
     "Settings",
     "ConfigError",
@@ -388,7 +391,78 @@ class TemporalVerificationConfig:
             )
 
 
-#: Frozen constant instances — the project-wide single source of truth.
+# ---------------------------------------------------------------------------
+# Unknown-face-handling constants (configuration only — Step 12 implements it)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class UnknownFaceConfig:
+    """Constants for unknown-face handling (Step 12).
+
+    Defaults are **initial engineering defaults**, explicitly NOT
+    calibrated operational or security guarantees — tuned with real
+    camera data in Phase 2 (tuned exactly here, per ARCHITECTURE.md
+    D5). Conservative semantics: an unresolved episode suppresses
+    repeated handling for ``episode_cooldown_seconds`` from the alert
+    instant (non-refreshing — deterministic expiry); state is bounded
+    per caller-managed session (LRU eviction beyond ``max_sessions``).
+    """
+
+    #: An unresolved episode starts with one observed ("alert") frame
+    #: and suppresses further handling for this many seconds from the
+    #: alert instant. Non-refreshing: the episode expires
+    #: deterministically, even if unresolved frames keep arriving.
+    episode_cooldown_seconds: float = 30.0
+    #: Maximum number of caller-managed sessions whose episode state is
+    #: retained. Beyond this, the least-recently-used session's state is
+    #: evicted (bounded memory; worst case one extra alert per eviction).
+    max_sessions: int = 8
+    #: Maximum accepted length (characters) of a caller-provided session
+    #: key. Longer keys are rejected rather than truncated.
+    max_session_key_length: int = 128
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.episode_cooldown_seconds, (int, float))
+            or isinstance(self.episode_cooldown_seconds, bool)
+        ):
+            raise ValueError(
+                "episode_cooldown_seconds must be a real number (bool "
+                "rejected), got "
+                f"{type(self.episode_cooldown_seconds).__name__}"
+            )
+        cooldown = float(self.episode_cooldown_seconds)
+        if not math.isfinite(cooldown) or cooldown <= 0.0:
+            raise ValueError(
+                "episode_cooldown_seconds must be a finite positive "
+                "number of seconds, got "
+                f"{self.episode_cooldown_seconds}"
+            )
+        if not isinstance(self.max_sessions, int) or isinstance(
+            self.max_sessions, bool
+        ):
+            raise ValueError(
+                "max_sessions must be a plain int (bool and float "
+                f"rejected), got {type(self.max_sessions).__name__}"
+            )
+        if self.max_sessions < 1:
+            raise ValueError(
+                f"max_sessions must be >= 1, got {self.max_sessions}"
+            )
+        if not isinstance(self.max_session_key_length, int) or isinstance(
+            self.max_session_key_length, bool
+        ):
+            raise ValueError(
+                "max_session_key_length must be a plain int (bool and "
+                "float rejected), got "
+                f"{type(self.max_session_key_length).__name__}"
+            )
+        if self.max_session_key_length < 1:
+            raise ValueError(
+                "max_session_key_length must be >= 1, got "
+                f"{self.max_session_key_length}"
+            )
 CAMERA: Final[CameraConfig] = CameraConfig()
 FACE_PROCESSING: Final[FaceProcessingConfig] = FaceProcessingConfig()
 QUALITY: Final[QualityConfig] = QualityConfig()
@@ -397,6 +471,7 @@ RECOGNITION: Final[RecognitionConfig] = RecognitionConfig()
 TEMPORAL_VERIFICATION: Final[TemporalVerificationConfig] = (
     TemporalVerificationConfig()
 )
+UNKNOWN_FACE: Final[UnknownFaceConfig] = UnknownFaceConfig()
 
 
 # ---------------------------------------------------------------------------

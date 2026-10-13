@@ -4,6 +4,56 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [0.12.0] — 2026-10-13 — Phase 1, Step 12: Unknown-face handling
+
+### Added
+
+* `src/unknown_face_handler.py`: `UnknownFaceHandler` — conservative,
+  deterministic, in-memory unknown-face handling strictly on top of
+  the approved Step 10 recognition and Step 11 temporal-verification
+  contracts. Two documented entry points: `observe_temporal()` is the
+  authoritative trust boundary (only a `VERIFIED` temporal result
+  resolves an unresolved episode as a known, temporally verified
+  presence; outcomes never carry an identity), `observe_recognition()`
+  is observability-only (a raw `MATCHED` is classified
+  `MATCH_UNVERIFIED` — never an identity). Frozen
+  `UnknownFaceOutcome(status, observation, suppressed_frames, reason)`
+  with `UnknownFaceStatus.{NO_ACTION, OBSERVED, SUPPRESSED,
+  EPISODE_ENDED}` and one-to-one `UnresolvedObservation` values; no
+  employee IDs, scores, frames, crops, or names ever carried.
+* Deterministic episode/cooldown policy: first unresolved observation
+  opens one `OBSERVED` alert per caller-managed session; repeats
+  within `episode_cooldown_seconds` are `SUPPRESSED` (counted); the
+  cooldown is non-refreshing and the episode expires exactly at
+  alert + cooldown (injectable monotonic clock — no sleeps in
+  tests); a VERIFIED identity ends an active episode
+  (`EPISODE_ENDED`); `reset(session_key=None)` ends one or all
+  episodes explicitly.
+* Bounded state: at most `max_sessions` episode records (LRU
+  eviction), no unbounded histories; the project has no stable
+  face-track identifier, so suppression is a documented
+  unresolved-session policy, not evidence that repeated frames show
+  one unknown person (no tracker added; no cross-person merging).
+* `src/config.py`: frozen `UnknownFaceConfig` + `UNKNOWN_FACE` —
+  `episode_cooldown_seconds=30.0`, `max_sessions=8`,
+  `max_session_key_length=128`, all **initial engineering defaults**
+  pending Phase 2 calibration; strict validation (bools rejected for
+  numeric fields, NaN/inf/non-positive cooldowns rejected).
+* `tests/test_unknown_face_handler.py`: 56 deterministic, hardware-
+  free tests (synthetic results, injected fake clock) covering the
+  verified/unverified boundary for every status, identity-free
+  classification, cooldown boundaries and non-refreshing expiry,
+  reset/EPISODE_ENDED semantics, bounded state and LRU eviction,
+  session isolation and key validation, fail-safe malformed inputs,
+  frozen types, and side-effect-free import/construction.
+
+### Notes
+
+* Unknown-face handling does **not** record attendance, generate
+  events, persist any data (images/embeddings/audit trails), or add
+  tracking/notifications/network. Real-camera integration and
+  operational calibration remain future work.
+
 ## [0.11.0] — 2026-10-13 — Phase 1, Step 11: Temporal / multi-frame verification
 
 ### Added

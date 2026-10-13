@@ -422,6 +422,43 @@ single-frame recognition (D13) and attendance decisions (Step 13):
   Temporal verification is **not** an attendance event and no
   real-camera accuracy is claimed.
 
+### D15 — Unknown-face handling: conservative outcomes over Steps 10/11, bounded unresolved-episode policy, no identity leakage (Step 12)
+
+`src/unknown_face_handler.py` sits between temporal verification
+(D14) and future attendance decisions (Step 13), doing nothing but
+handling unresolved faces conservatively:
+
+* **Trust boundary.** `observe_temporal()` is authoritative: only a
+  `VERIFIED` temporal result is treated as a temporally verified
+  presence (`NO_ACTION`, or `EPISODE_ENDED` when it resolves an
+  active episode) and the outcome carries no identity;
+  `COLLECTING`/`INTERRUPTED` stay unresolved observations.
+  `observe_recognition()` is observability-only: raw `MATCHED` is
+  classified `MATCH_UNVERIFIED` — a single-frame match is never an
+  identity here. No entry point can assign an identity to an unknown,
+  ambiguous, or unverified face, and attendance events are not
+  generated.
+* **Deterministic episode/cooldown policy.** One `OBSERVED` alert
+  opens an episode per caller-managed session key; unresolved frames
+  within `episode_cooldown_seconds` of the alert are `SUPPRESSED`
+  (countered); the cooldown does not refresh and the episode expires
+  exactly at alert + cooldown (lazy, injectable monotonic clock), so
+  stale state never suppresses observations indefinitely, and a
+  `VERIFIED` result or `reset()` ends an episode explicitly.
+* **Bounded minimal state, no person claims.** At most `max_sessions`
+  tiny episode records (LRU eviction); no frames, crops, embeddings,
+  names, IDs, scores, or audit trail are retained or persisted.
+  Without a stable face-track identifier, suppression is a
+  caller-managed session policy — repeated suppressed frames are not
+  proof of one person, and unknown people are never merged or
+  distinguished by appearance.
+* **Fail-safe inputs, limits documented.** Typed errors for wrong
+  result types, synthetic bogus statuses, contract violations
+  (`MATCHED`/`VERIFIED` without identity), oversized/whitespace
+  session keys (never truncated), and non-callable clocks; defaults
+  (`UnknownFaceConfig`) are engineering starting points pending
+  Phase 2 calibration; real-camera integration remains future work.
+
 ### D4 — Dependency licensing note
 
 `insightface`'s library code is MIT, but its pretrained model packages

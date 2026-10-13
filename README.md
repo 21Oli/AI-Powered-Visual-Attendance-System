@@ -7,8 +7,8 @@ embeddings, and turns temporally verified recognitions into structured
 attendance events.
 
 **Status:** Phase 1 (Computer Vision Core) — Steps 10 (face
-recognition) and 11 (temporal / multi-frame verification) complete;
-Steps 12–15 pending. See
+recognition), 11 (temporal / multi-frame verification), and 12
+(unknown-face handling) complete; Steps 13–15 pending. See
 [DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md).
 
 ## Core architectural principle

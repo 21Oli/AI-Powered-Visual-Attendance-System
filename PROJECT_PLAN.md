@@ -53,7 +53,7 @@ A face being recognized does NOT automatically mean attendance is recorded.
 09. Embedding storage                          ✅ complete
 10. Face recognition                           ✅ complete
 11. Temporal / multi-frame verification        ✅ complete
-12. Unknown-face handling                      ⬜
+12. Unknown-face handling                      ✅ complete
 13. Attendance event engine                    ⬜
 14. Testing & evaluation                       ⬜
 15. Phase 1 integration demo                   ⬜
@@ -94,6 +94,7 @@ visual-attendance/
 │   ├── embedding_storage.py # Step 09
 │   ├── recognition.py    # Step 10 (implemented as face_recognition.py)
 │   ├── verification.py   # Step 11 (implemented as temporal_verification.py)
+│   ├── unknown_faces.py  # Step 12 (implemented as unknown_face_handler.py)
 │   └── attendance.py     # Step 13
 ├── data/                 # employees, face_samples, embeddings, logs
 ├── models/  tests/  reports/  docs/
