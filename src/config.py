@@ -47,6 +47,7 @@ __all__ = [
     "RecognitionConfig",
     "TemporalVerificationConfig",
     "UnknownFaceConfig",
+    "AttendanceConfig",
     "CAMERA",
     "FACE_PROCESSING",
     "QUALITY",
@@ -54,6 +55,7 @@ __all__ = [
     "RECOGNITION",
     "TEMPORAL_VERIFICATION",
     "UNKNOWN_FACE",
+    "ATTENDANCE",
     "AppSettings",
     "Settings",
     "ConfigError",
@@ -471,7 +473,75 @@ RECOGNITION: Final[RecognitionConfig] = RecognitionConfig()
 TEMPORAL_VERIFICATION: Final[TemporalVerificationConfig] = (
     TemporalVerificationConfig()
 )
+# ---------------------------------------------------------------------------
+# Attendance-event constants (configuration only — Step 13 implements it)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AttendanceConfig:
+    """Constants for the attendance-event engine (Step 13).
+
+    Defaults are **initial engineering values**, explicitly NOT
+    calibrated workplace attendance policies — real policies (shift
+    rules, daily dedup, grace periods) are Phase 2 business work and
+    must be tuned with real deployment data (tuned exactly here, per
+    ARCHITECTURE.md D5).
+
+    Duplicate-suppression semantics (conservative, documented):
+    exactly one ``CHECK_IN`` event per employee per
+    ``check_in_cooldown_seconds`` of engine-lifetime state; repeated
+    verified frames do NOT refresh the cooldown anchor. State is
+    bounded per unique verified employee (LRU eviction beyond
+    ``max_tracked_employees``). Durable/cross-process storage is out
+    of scope for Step 13 (see the engine module docstring).
+    """
+
+    #: Duplicate-suppression interval in seconds: repeated temporally
+    #: verified results for the same employee within this many seconds
+    #: of that employee's last accepted event suppress the decision.
+    #: Boundary is exact and non-refreshing (engine module docstring).
+    check_in_cooldown_seconds: float = 300.0
+    #: Maximum number of employees whose per-employee suppression
+    #: anchors are retained. Beyond this, the least-recently-seen
+    #: employee's anchor is evicted (bounded memory; worst case after
+    #: eviction is one additional check-in event). Sized for typical
+    #: site employee counts; oversized deployments must raise it.
+    max_tracked_employees: int = 64
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.check_in_cooldown_seconds, (int, float))
+            or isinstance(self.check_in_cooldown_seconds, bool)
+        ):
+            raise ValueError(
+                "check_in_cooldown_seconds must be a real number (bool "
+                "rejected), got "
+                f"{type(self.check_in_cooldown_seconds).__name__}"
+            )
+        cooldown = float(self.check_in_cooldown_seconds)
+        if not math.isfinite(cooldown) or cooldown <= 0.0:
+            raise ValueError(
+                "check_in_cooldown_seconds must be a finite positive "
+                f"number of seconds, got {self.check_in_cooldown_seconds}"
+            )
+        if not isinstance(self.max_tracked_employees, int) or isinstance(
+            self.max_tracked_employees, bool
+        ):
+            raise ValueError(
+                "max_tracked_employees must be a plain int (bool and "
+                "float rejected), got "
+                f"{type(self.max_tracked_employees).__name__}"
+            )
+        if self.max_tracked_employees < 1:
+            raise ValueError(
+                "max_tracked_employees must be >= 1, got "
+                f"{self.max_tracked_employees}"
+            )
+
+
 UNKNOWN_FACE: Final[UnknownFaceConfig] = UnknownFaceConfig()
+ATTENDANCE: Final[AttendanceConfig] = AttendanceConfig()
 
 
 # ---------------------------------------------------------------------------

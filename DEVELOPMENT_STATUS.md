@@ -3,6 +3,101 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 13 — completion record (2026-10-13)
+
+**Implemented**
+
+* `src/attendance.py` — `AttendanceEngine`: deterministic,
+  independently testable attendance-event engine building strictly on
+  the approved Step 11 trust boundary (accepts only
+  `TemporalVerificationResult`; a raw `RecognitionResult` is never an
+  accepted input — a `MATCHED` recognition result alone cannot
+  authorize an event). No matching, threshold, embedding, manifest,
+  camera, persistence, check-out/shift/lateness/payroll, audit-trail,
+  or camera-loop code; the identity/recognition/attendance split is
+  preserved.
+  * **Trust boundary (enforced):** only a structurally valid
+    `VERIFIED` temporal result authorizes a decision;
+    `COLLECTING`/`INTERRUPTED` yield `NOT_VERIFIED` (no event);
+    malformed inputs (wrong type, synthetic bogus status,
+    `VERIFIED` without a valid non-whitespace employee ID) fail
+    safely with typed `AttendanceInputError` — no event, no state
+    change, no fabricated success. IDs preserved exactly
+    (`"007"`, `"EMP-0042"`); inputs are never mutated.
+  * **Active gate (no invention):** optional injectable
+    `active_lookup` (the same hook pattern Step 10 recognition
+    already uses — no new manifest or storage reads) reports the
+    verified employee inactive → `INACTIVE_EMPLOYEE` decision, no
+    event; a non-bool return fails safely. With no hook, the engine
+    invents no active status — gating is delegated upward.
+  * **Event schema (frozen, minimal):** `AttendanceEvent(event_id,
+    employee_id, event_type, occurred_at)` with `EventType.CHECK_IN`
+    only; `occurred_at` requires a timezone-aware datetime and is
+    normalized to UTC at construction (naive datetimes rejected);
+    `event_id` defaults to `uuid.uuid4().hex` (documented,
+    validated, injectable factory). No images, crops, embeddings,
+    similarity diagnostics, or unknown-person info.
+  * **Decision API:** frozen `AttendanceDecision(status, event,
+    reason)` with `AttendanceDecisionStatus.{EVENT_CREATED,
+    NOT_VERIFIED, INACTIVE_EMPLOYEE, SUPPRESSED}` — `event` is
+    non-`None` **only** for `EVENT_CREATED`; suppressed/unverified
+    decisions never expose a fabricated event.
+  * **Duplicate suppression (in-memory, bounded, non-refreshing):**
+    one `CHECK_IN` per employee per
+    `AttendanceConfig.check_in_cooldown_seconds=300.0`; the anchor is
+    the created event's instant on an injectable **monotonic** clock
+    (default `time.monotonic`); boundary exact (elapsed < cooldown
+    suppressed; == cooldown → new event); suppressed repeats never
+    refresh the anchor. Different employees independent; anchors
+    bounded by `max_tracked_employees=64` with LRU eviction (worst
+    case: one extra event). **Restart limitation documented:**
+    duplicate protection lives only for the engine-instance
+    lifetime — this is NOT durable storage, database-level, or
+    cross-process exactly-once; a process restart loses anchors.
+  * **Clock separation (documented, tested):** `clock_wall`
+    (timezone-aware datetimes; naive/non-datetime outputs rejected)
+    produces event timestamps; `monotonic_clock` governs suppression
+    (non-finite/non-numeric outputs rejected) — backward wall-clock
+    movement can neither bypass duplicate protection nor expire
+    anchors; no contradictory decision paths.
+* `src/config.py` — frozen `AttendanceConfig` + `ATTENDANCE`:
+  `check_in_cooldown_seconds=300.0`, `max_tracked_employees=64` —
+  **initial engineering values**, not calibrated workplace policies
+  (Phase 2 business work); strict validation (bool/float/str
+  cooldowns rejected, NaN/inf/non-positive rejected, int counts
+  only). No existing config object changed.
+* `tests/test_attendance_engine.py` — 52 deterministic,
+  hardware-free tests (synthetic temporal results, injected fake
+  wall+monotonic clocks, injected event-ID factories; no sleeps/no
+  camera/model/network/biometric files) covering all 30 Step 13
+  checklist items: the full trust boundary (verified vs
+  COLLECTING/INTERRUPTED vs raw recognition vs malformed), event
+  schema (immutability, exact IDs, UTC normalization, unique
+  uuid-hex IDs, no biometric fields), suppression semantics (first
+  eligible, within-interval suppression, per-employee independence,
+  exact boundary, non-refreshing repeats, re-eligibility after
+  expiry), invalid config values/types, invalid clock outputs
+  (incl. backward wall time), reset (single/all/invalid), instance
+  isolation, factory-failure atomicity, LRU-bounded state, and a
+  fresh-subprocess foreign-CWD import/construction side-effect
+  check.
+
+**Verification (run 2026-10-13, exit 0)**
+
+* Focused: `pytest tests/test_attendance_engine.py` → 52 passed.
+* Full suite, project root: **654 passed** (602 + 52).
+* Full suite from an external working directory: 654 passed.
+* `git diff --check` clean; no generated artifacts, biometric
+  samples, or persistent attendance files added.
+
+**Honesty note.** No real-camera accuracy, no durable storage, and no
+production-readiness claim: duplicate protection is engine-instance-
+lifetime only. Event timestamps/suppression are unit-verified against
+injected clocks, not validated against production deployment
+timing. Check-in-only; business rules (check-out, shifts, lateness,
+daily dedup, payroll) and a future durable event store are
+Phase 2 / later approved steps.
+
 ## Step 12 — completion record (2026-10-13)
 
 **Implemented**

@@ -459,6 +459,55 @@ handling unresolved faces conservatively:
   (`UnknownFaceConfig`) are engineering starting points pending
   Phase 2 calibration; real-camera integration remains future work.
 
+### D16 — Attendance-event engine: temporal-verification trust boundary, bounded non-refreshing check-in cooldown, clock separation, no durable storage (Step 13)
+
+`src/attendance.py` converts temporally verified identities into
+structured check-in decisions and preserves the identity /
+recognition / attendance separation:
+
+* **Trust boundary (recognition never becomes attendance).** Only a
+  structurally valid `VERIFIED` `TemporalVerificationResult`
+  authorizes a decision; `COLLECTING`/`INTERRUPTED` yield
+  `NOT_VERIFIED`; raw `RecognitionResult` values are rejected input,
+  so a single-frame `MATCHED` can never create an event. Malformed
+  results, invalid clock outputs, and contract violations fail
+  safely with typed errors — never a fabricated event; inputs are
+  never mutated and IDs stay verbatim (`"007"`, `"EMP-0042"`). An
+  optional injectable `active_lookup` (the Step 10 hook pattern, no
+  new manifest/storage reads) gates inactive employees
+  (`INACTIVE_EMPLOYEE`); nothing is invented when the hook is absent.
+* **Event & decision schema.** Frozen `AttendanceEvent(event_id,
+  employee_id, event_type=CHECK_IN, occurred_at)` with the timestamp
+  normalized to UTC (naive datetimes rejected) and a documented,
+  validated `uuid4().hex` ID default (injectable factory); frozen
+  `AttendanceDecision` exposes the event only on `EVENT_CREATED` —
+  suppressed or unverified decisions never fabricate one. No crops,
+  frames, embeddings, similarity diagnostics, or unknown-person data
+  are carried or logged (statuses/counts only).
+* **Duplicate suppression: in-memory, bounded, non-refreshing.** One
+  `CHECK_IN` per employee per `check_in_cooldown_seconds=300.0`; the
+  anchor is the created event's monotonic instant; boundary exact
+  (elapsed `< cooldown` suppressed, `== cooldown` accepted); repeated
+  frames never refresh the anchor, so the interval expires
+  deterministically; employees tracked independently; anchors LRU-
+  bounded at `max_tracked_employees=64` (worst case after eviction:
+  one extra event); `reset()` clears one or all anchors. **Honest
+  scope:** protection holds only for the engine-instance lifetime —
+  restarts lose it; this is explicitly NOT durable storage,
+  database-level, or cross-process exactly-once delivery, and no
+  audit trail is written.
+* **Explicit clock separation.** `clock_wall` (timezone-aware, naive
+  and non-datetime outputs rejected) produces event timestamps;
+  `monotonic_clock` (finite outputs enforced) governs suppression —
+  backward wall-clock movement can neither bypass duplicate
+  protection nor expire anchors. Defaults (`AttendanceConfig`) are
+  initial engineering values, not calibrated workplace policies;
+  real attendance business rules (check-out, shifts, lateness,
+  daily dedup) and durable storage belong to Phase 2 / later
+  approved steps. Big picture: the future orchestration layer feeds
+  Step 11 verified results into the engine and consumes the frozen
+  decision; the engine is not wired into the camera loop.
+
 ### D4 — Dependency licensing note
 
 `insightface`'s library code is MIT, but its pretrained model packages

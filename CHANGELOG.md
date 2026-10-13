@@ -4,6 +4,61 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [0.13.0] — 2026-10-13 — Phase 1, Step 13: Attendance event engine
+
+### Added
+
+* `src/attendance.py`: `AttendanceEngine` — deterministic,
+  independently testable attendance-event engine strictly on the
+  approved Step 11 trust boundary: only a structurally valid
+  `VERIFIED` temporal result can authorize a check-in; raw
+  recognition results (including `MATCHED`) are rejected input;
+  `COLLECTING`/`INTERRUPTED` yield `NOT_VERIFIED`; malformed inputs
+  and invalid clock outputs fail safely with typed
+  `AttendanceInputError` (no event, no state change, no fabricated
+  success). Optional injectable `active_lookup` (the Step 10 hook
+  pattern; no new manifest/storage reads) yields
+  `INACTIVE_EMPLOYEE` for inactive verified employees and is never
+  invented when absent.
+* Structured event & decision: frozen `AttendanceEvent(event_id,
+  employee_id, event_type, occurred_at)` — `EventType.CHECK_IN` only
+  (no check-out/shift/lateness/payroll logic in this step);
+  timezone-aware `occurred_at` normalized to UTC (naive rejected);
+  documented `uuid.uuid4().hex` event-ID default with validated
+  injectable factory; no biometric data carried. Frozen
+  `AttendanceDecision(status, event, reason)` with
+  `{EVENT_CREATED, NOT_VERIFIED, INACTIVE_EMPLOYEE, SUPPRESSED}`
+  — `event` is non-`None` only on `EVENT_CREATED`.
+* Duplicate suppression (in-memory, bounded, non-refreshing): one
+  `CHECK_IN` per employee per `check_in_cooldown_seconds=300.0`
+  (initial engineering value, not a calibrated policy); exact
+  boundary (`elapsed < cooldown` suppressed, `== cooldown` new
+  event); anchors on an injectable monotonic clock — never refreshed
+  by repeated frames; per-employee independence; LRU-bounded at
+  `max_tracked_employees=64`. **Documented restart limitation:**
+  anchors live for the engine instance only — this is not durable,
+  cross-process exactly-once protection.
+* Explicit clock separation: `clock_wall` (timezone-aware UTC
+  datetimes, naive rejected) for event timestamps vs
+  `monotonic_clock` (finite values, invalid outputs rejected) for
+  suppression — backward wall-clock movement cannot bypass duplicate
+  protection or expire anchors. No sleeps in tests (injected fake
+  clocks).
+* `tests/test_attendance_engine.py`: 52 deterministic,
+  hardware-free tests covering the 30-item Step 13 checklist (trust
+  boundary, event schema, suppression boundaries and expiry, config
+  validation, clock failures and backward time, reset semantics,
+  instance isolation, factory-failure atomicity, bounded LRU state,
+  and side-effect-free import/construction).
+
+### Notes
+
+* The engine is not connected to the camera loop; no orchestration,
+  dashboard, database/CSV persistence, or audit trail was added.
+  Identity/recognition/attendance responsibilities remain separate.
+  Step 14 (testing & evaluation) and Step 15 (integration demo) were
+  not started.
+
 ## [0.12.0] — 2026-10-13 — Phase 1, Step 12: Unknown-face handling
 
 ### Added

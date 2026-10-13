@@ -54,7 +54,7 @@ A face being recognized does NOT automatically mean attendance is recorded.
 10. Face recognition                           ✅ complete
 11. Temporal / multi-frame verification        ✅ complete
 12. Unknown-face handling                      ✅ complete
-13. Attendance event engine                    ⬜
+13. Attendance event engine                    ✅ complete
 14. Testing & evaluation                       ⬜
 15. Phase 1 integration demo                   ⬜
 ```
