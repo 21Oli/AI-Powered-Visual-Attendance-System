@@ -55,7 +55,9 @@ A face being recognized does NOT automatically mean attendance is recorded.
 11. Temporal / multi-frame verification        ✅ complete
 12. Unknown-face handling                      ✅ complete
 13. Attendance event engine                    ✅ complete
-14. Testing & evaluation                       ⬜
+14. Testing & evaluation                       ◐ software regression
+                                               green; empirical CV eval
+                                               BLOCKED (missing artifacts)
 15. Phase 1 integration demo                   ⬜
 ```
 

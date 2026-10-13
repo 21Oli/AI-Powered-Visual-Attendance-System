@@ -4,6 +4,41 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [0.14.0] — 2026-10-13 — Phase 1, Step 14: Testing & evaluation (software regression green; empirical CV evaluation blocked)
+
+### Added
+
+* `notebooks/09_phase1_evaluation.ipynb`: reproducible, privacy-safe
+  Phase 1 evaluation notebook — environment & artifact availability
+  (yuNet `yunet.onnx` PRESENT, `sface.onnx` MISSING; nothing is ever
+  downloaded), safe regression-suite instructions with an opt-in
+  runner cell, software-level detection contract checks + documented
+  IoU helper + explicitly opt-in local YuNet smoke check on a
+  synthetic frame, synthetic-quality threshold rows and face-count
+  policy, synthetic-identity recognition decision rows,
+  temporal/unknown-face/attendance behavior rows with injected fake
+  clocks (no sleeps), machine-dependent software-overhead timing and
+  an explicit limitations/spoof-boundary subsection. No camera is
+  opened, nothing enrolled, the production `data/` store untouched,
+  biometric files never read.
+* `reports/phase1_evaluation.md`: evidence-based evaluation report;
+  every value labeled MEASURED / TEST COVERAGE / NOT RUN / BLOCKED /
+  NOT MEASURED with reasons — regression results, artifact table,
+  detection (precision/recall NOT RUN — no annotated dataset),
+  synthetic quality rows, recognition decisions with FAR/FRR NOT
+  MEASURED (missing embedding model), behavior rows for temporal/
+  unknown-face/attendance incl. exact cooldown boundaries, the
+  documented-but-unexecuted spoof scenario plan (no resistance
+  claim), risks, and reproduction instructions.
+
+### Notes
+
+* Step 14 status is **not** claimed fully passed: software regression
+  (654 tests) is green; empirical CV evaluation (accuracy, FAR/FRR,
+  real-lighting quality, spoof resistance, camera latency) remains
+  blocked on the missing `sface.onnx` artifact and consented labeled
+  data. No model, dataset, or biometric files were added.
+
 ## [0.13.0] — 2026-10-13 — Phase 1, Step 13: Attendance event engine
 
 ### Added

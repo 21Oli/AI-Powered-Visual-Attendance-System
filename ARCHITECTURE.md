@@ -508,6 +508,35 @@ recognition / attendance separation:
   Step 11 verified results into the engine and consumes the frozen
   decision; the engine is not wired into the camera loop.
 
+### D17 — Step 14 evaluation methodology: software regression vs empirical CV status, privacy-safe notebook, evidence labeling (Step 14)
+
+`notebooks/09_phase1_evaluation.ipynb` +
+`reports/phase1_evaluation.md` record Phase 1 evaluation evidence
+under one rule: **every reported number is labeled** MEASURED /
+TEST COVERAGE / NOT RUN / BLOCKED / NOT MEASURED, with its exact
+reason when evidence is unavailable.
+
+* **Two-track status (never conflated).** Software regression is
+  deterministic (654 tests, no camera/model/network) and is the
+  bankable signal; empirical computer-vision evaluation (detection
+  precision/recall on annotated ground truth, quality under real
+  lighting/pose, FAR/FRR recognition accuracy, spoof resistance) is
+  **BLOCKED** on artifacts (sface.onnx) and consented labeled data —
+  a missing-artifact environment record, not a code failure, and
+  never a reason to weaken tests or fabricate metrics.
+* **Notebook safety contract.** No camera opened at run time, nothing
+  enrolled, production `data/` never read or written (all
+  embedding experiments run in private temp dirs), no biometric
+  prints, and no downloads; the only real-model cell (local
+  `yunet.onnx` on a synthetic frame) is explicitly opt-in, and real
+  content measurements are deferred until consented datasets exist.
+* **Metrics honesty.** The IoU matching criterion for future
+  detection evaluation is pre-defined in the notebook; thresholds
+  are exercised with synthetic rows only and are labeled provisional
+  (D5); no FAR/FRR or accuracy is ever inferred from synthetic unit
+  tests; duplicate-suppression correctness is in-software and
+  explicitly not a durable/cross-process exactly-once claim (D16).
+
 ### D4 — Dependency licensing note
 
 `insightface`'s library code is MIT, but its pretrained model packages

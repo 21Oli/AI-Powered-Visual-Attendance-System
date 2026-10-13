@@ -3,6 +3,66 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 14 — status record (2026-10-13)
+
+**Software regression status: green. Empirical CV evaluation status:
+BLOCKED (missing artifacts/data — recorded honestly, not a code
+failure). Step 14 is NOT claimed fully passed.**
+
+**Implemented**
+
+* `notebooks/09_phase1_evaluation.ipynb` — reproducible, privacy-safe
+  evaluation notebook (nbformat 4; 20 cells / 11 code cells) covering
+  the Step 14 scope: objectives & scope, environment summary (python
+  /platform/numpy/opencv, frozen component defaults), artifact
+  availability (yunet.onnx PRESENT, sface.onnx MISSING — nothing ever
+  downloaded), safe regression-test instructions (project root
+  `python -m pytest -q`, external-CWD command; opt-in
+  `RUN_FULL_TEST_SUITE` runner cell), software-level detection checks
+  (box-contract validation, documented IoU matching helper) with an
+  **explicitly opt-in** local YuNet smoke cell, synthetic-input
+  quality-threshold rows plus the frame face-count policy,
+  synthetic-identity recognition decision rows, temporal-verification
+  / unknown-face / attendance behavior rows (fake clocks, no
+  sleeps), machine-dependent software-overhead timing, and a
+  limitations/spoof-boundary/conclusions section. Every cell: no
+  camera, no enrollment, no production-`data/` mutation, no biometric
+  reads, no downloads.
+* `reports/phase1_evaluation.md` — evidence-based report in which
+  every value is labeled MEASURED / TEST COVERAGE / NOT RUN /
+  BLOCKED / NOT MEASURED with the specific reason: regression
+  commands and counts; artifact table; detection (IoU criterion
+  pre-defined; precision/recall NOT RUN — no annotated dataset);
+  synthetic quality rows (incl. the documented first-failed-check
+  semantics and the pose-proxy boundary); recognition decisions on
+  synthetic vectors with FAR/FRR NOT MEASURED (no sface.onnx, no
+  labeled data); temporal/unknown/attendance behavior rows incl.
+  exact cooldown boundaries and inactive gating; performance
+  (YuNet ~7–11 ms median on 240×320 synthetic frames; cosine ~16–34
+  µs; assess_face ~150–171 µs; temporal update ~5 µs —
+  machine-dependent); the documented-but-not-run spoof scenario
+  plan (no spoof-resistance claim); risks; reproduction
+  instructions.
+
+**Verification (run 2026-10-13, exit 0)**
+
+* Baseline before changes: 654 passed (root), exit 0; baseline run
+  re-established rather than assumed.
+* Notebook structural validation: valid JSON, nbformat 4; **all 11
+  code cells executed clean** in sequence (runner with per-cell
+  exit-status capture); the run also demonstrated end-to-end
+  fail-safe behavior on real local code paths.
+* `git diff --check` clean; no model files, datasets, biometric
+  samples, or persistent attendance files added by this step.
+
+**Blocked/boundary records (carry forward):** detection
+precision/recall on annotated data — NOT RUN (no dataset);
+recognition accuracy FAR/FRR — NOT MEASURED (sface.onnx absent);
+real-lighting/pose/occlusion and spoof behavior — NOT RUN (no consented
+images, no liveness component, no authorized rig); end-to-end camera
+latency — deferred to Step 15 integration. These are environment
+blocks, not software failures.
+
 ## Step 13 — completion record (2026-10-13)
 
 **Implemented**

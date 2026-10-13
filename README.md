@@ -8,9 +8,13 @@ attendance events.
 
 **Status:** Phase 1 (Computer Vision Core) — Steps 10 (face
 recognition), 11 (temporal / multi-frame verification), 12
-(unknown-face handling), and 13 (attendance event engine) complete;
-Steps 14–15 pending. See
-[DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md).
+(unknown-face handling), and 13 (attendance event engine) complete.
+Step 14 (testing & evaluation): software regression green (654
+tests); empirical CV evaluation BLOCKED on missing model artifacts /
+consented labeled data — see
+[DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md) and
+[reports/phase1_evaluation.md](reports/phase1_evaluation.md). Step 15
+(live-camera integration demo) pending.
 
 ## Core architectural principle
 
