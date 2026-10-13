@@ -3,6 +3,90 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 11 — completion record (2026-10-13)
+
+**Implemented**
+
+* `src/temporal_verification.py` — `TemporalVerifier`: deterministic
+  multi-frame temporal verification built **on** the Step 10 result
+  contract (consumes `RecognitionResult` values one at a time; never
+  duplicates cosine similarity, embedding loading, manifest
+  validation, or recognition thresholds). **Temporal state only** —
+  no single-frame recognition replacement, no attendance event
+  generation, no face tracking, no persistence, no camera, no model,
+  no network, no writes.
+  * **Evidence policy (conservative):** only `MATCHED` frames with a
+    matched employee ID count as positive evidence, and only for the
+    **same** identity — cross-ID evidence is never combined, and IDs
+    are preserved verbatim (`"007"`, `"EMP-0042"`, punctuation). Any
+    non-MATCHED frame (`UNKNOWN` / `AMBIGUOUS` / `NO_CANDIDATES`)
+    **interrupts** the accumulated streak (`INTERRUPTED`,
+    `employee_id=None`, streak reset to 0); uncertain instants can
+    never contribute to or preserve a verification. A matched frame
+    for a different ID likewise discards the old streak and starts a
+    new candidate streak from zero.
+  * **Verification rule:** `VERIFIED(employee_id)` exactly when the
+    uninterrupted same-ID matched streak reaches
+    `min_consistent_frames`; below that, `COLLECTING` (no identity
+    reported). Repeated processing after verification is
+    **idempotent** — the verifier reports current temporal state, no
+    per-frame "verification events" are emitted (callers that need
+    event-on-transition semantics track transitions themselves).
+    Verification cannot survive without new evidence: the very next
+    non-MATCHED frame drops back to `INTERRUPTED`.
+  * **Bounded state:** retained evidence is the streak (one ID + one
+    counter), the last reason, and a bounded deque of at most
+    `window_frames` recent statuses (deterministic oldest-first
+    advance). No frames, crops, embeddings, scores, or names are
+    retained; logs carry counters/statuses/reasons only, never IDs
+    or biometric data.
+  * **One sequence per instance:** the verifier manages a single
+    tracking sequence — the caller creates one instance per tracked
+    face / camera session; instances share no state (`reset()` is
+    instance-scoped and clears streak + window).
+  * **Types:** frozen `TemporalVerificationResult(status,
+    employee_id, streak_frames, window_frames_used, reason)` with
+    `TemporalVerificationStatus.{COLLECTING, VERIFIED,
+    INTERRUPTED}`; typed `TemporalVerificationError` and
+    `TemporalVerificationInputError` (includes refusal of `MATCHED`
+    results with no valid `employee_id` — a Step 10 contract
+    violation is surfaced, never silently de-escalated).
+* `src/config.py` — frozen `TemporalVerificationConfig` +
+  `TEMPORAL_VERIFICATION`: `min_consistent_frames=3` and
+  `window_frames=10`. Both are **initial engineering defaults**, not
+  calibrated production values — they must be tuned with real camera
+  footage in Phase 2. Strict validation (plain ints only — bools and
+  floats rejected; `window_frames >= min_consistent_frames` so
+  verification is constructible) fails fast. No existing config
+  object changed.
+* `tests/test_temporal_verification.py` — 51 deterministic,
+  hardware-free tests (synthetic `RecognitionResult` values only; no
+  camera, no model, no network, no biometric files) covering the
+  full Step 11 checklist: initial state, threshold-before-
+  verification, eventual verification, cross-ID isolation, exact ID
+  preservation, per-status (UNKNOWN/AMBIGUOUS/NO_CANDIDATES)
+  non-evidence + interruption policy, window bounds/advance
+  determinism, no stale verification, reset/scoping,
+  instance isolation, config validation (incl. bool/float
+  rejection), malformed-input handling, boundary behavior
+  (`min_frames=1`, `window==min_frames`), bounded retention,
+  frozen/immutability guarantees, and a fresh-subprocess
+  foreign-CWD check that import + construction produce no side
+  effects.
+
+**Verification (run 2026-10-13, exit 0)**
+
+* Focused: `pytest tests/test_temporal_verification.py` → 51 passed.
+* Full suite, project root: **546 passed** (495 + 51).
+* Full suite from an external working directory: 546 passed.
+* `git diff --check` clean; no generated artifacts, no biometric
+  samples, no model files added.
+
+**Honesty note.** Deterministic temporal logic only: no real-camera,
+no real-recognition-pipeline, and no accuracy calibration was
+performed. Thresholds need Phase 2 calibration. Temporal verification
+is **not** an attendance event — recording arrives in Step 13.
+
 ## Step 10 — completion record (2026-10-12)
 
 **Implemented**

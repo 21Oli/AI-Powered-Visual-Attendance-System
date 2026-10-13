@@ -4,6 +4,49 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [0.11.0] — 2026-10-13 — Phase 1, Step 11: Temporal / multi-frame verification
+
+### Added
+
+* `src/temporal_verification.py`: `TemporalVerifier` — deterministic
+  multi-frame temporal verification **on top of** the Step 10 result
+  contract (consumes `RecognitionResult` values one at a time; no
+  duplication of cosine similarity, thresholds, storage, or manifest
+  logic). Evidence policy: only consecutive `MATCHED` frames for the
+  **same** employee ID accumulate positive evidence; `UNKNOWN`,
+  `AMBIGUOUS`, and `NO_CANDIDATES` never contribute and **break** the
+  streak (`INTERRUPTED`, no identity reported); a matched frame for a
+  different ID starts a fresh candidate streak (cross-ID evidence is
+  never combined). Verification: `VERIFIED(employee_id)` exactly when
+  the uninterrupted same-ID streak reaches `min_consistent_frames`
+  (frozen `TemporalVerificationResult` with
+  `COLLECTING`/`VERIFIED`/`INTERRUPTED` statuses, bounded
+  `streak_frames`/`window_frames_used` counters, short reason).
+  `reset()` clears all evidence (instance-scoped); one instance per
+  tracked face/session — no shared state. Bounded retention only
+  (deque capped at `window_frames`); no frames, crops, embeddings,
+  scores, or names retained; employee IDs preserved verbatim
+  (`"007"`, `"EMP-0042"`). Repeated post-verification frames are
+  idempotent state reporting, not recurring verification events.
+* `src/config.py`: frozen `TemporalVerificationConfig` +
+  `TEMPORAL_VERIFICATION` — `min_consistent_frames=3`,
+  `window_frames=10`, both **initial engineering defaults** pending
+  Phase 2 real-camera calibration; strict validation (plain ints,
+  bools/floats rejected; `window_frames >= min_consistent_frames`).
+* `tests/test_temporal_verification.py`: 51 deterministic,
+  hardware-free tests covering the temporal checklist (initial state,
+  threshold, cross-ID isolation, ID preservation, per-status
+  non-evidence, interruption, window bounds, reset & isolation,
+  config validation, malformed `MATCHED` refusal, boundaries,
+  bounded state, frozen results, and a side-effect-free
+  import/construction subprocess check).
+
+### Notes
+
+* Temporal verification is **not** an attendance event; recording
+  arrives in Step 13. Deterministic logic only — no real-camera or
+  real-recognition-pipeline accuracy validation was performed.
+
 ## [0.10.0] — 2026-10-12 — Phase 1, Step 10: Face recognition
 
 ### Added

@@ -44,11 +44,13 @@ __all__ = [
     "QualityConfig",
     "EnrollmentConfig",
     "RecognitionConfig",
+    "TemporalVerificationConfig",
     "CAMERA",
     "FACE_PROCESSING",
     "QUALITY",
     "ENROLLMENT",
     "RECOGNITION",
+    "TEMPORAL_VERIFICATION",
     "AppSettings",
     "Settings",
     "ConfigError",
@@ -325,12 +327,76 @@ class RecognitionConfig:
             )
 
 
+# ---------------------------------------------------------------------------
+# Temporal-verification constants (configuration only — Step 11 implements it)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TemporalVerificationConfig:
+    """Constants for temporal (multi-frame) identity verification (Step 11).
+
+    Defaults are **initial engineering starting points**, explicitly NOT
+    calibrated production values — they must be tuned with real camera
+    footage in Phase 2 (tuned exactly here, per ARCHITECTURE.md D5).
+
+    Policy (conservative, documented): only ``MATCHED`` recognition
+    frames for the *same* employee ID accumulate positive evidence;
+    ANY non-matched frame (``UNKNOWN`` / ``AMBIGUOUS`` /
+    ``NO_CANDIDATES``) or a different matched ID breaks the streak.
+    """
+
+    #: Number of consecutive consistent ``MATCHED`` frames (same
+    #: employee ID, uninterrupted) required before the identity becomes
+    #: temporally verified. Provisional until calibrated.
+    min_consistent_frames: int = 3
+    #: Maximum number of recent recognition evidence frames retained
+    #: by the verifier (bounded state — never unbounded history).
+    #: Must be >= ``min_consistent_frames`` so verification is possible.
+    window_frames: int = 10
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.min_consistent_frames, int) or isinstance(
+            self.min_consistent_frames, bool
+        ):
+            raise ValueError(
+                "min_consistent_frames must be a plain int (bool and "
+                "float rejected), got "+ f"{type(self.min_consistent_frames).__name__}"
+            )
+        if self.min_consistent_frames < 1:
+            raise ValueError(
+                "min_consistent_frames must be >= 1, got "
+                f"{self.min_consistent_frames}"
+            )
+        if not isinstance(self.window_frames, int) or isinstance(
+            self.window_frames, bool
+        ):
+            raise ValueError(
+                "window_frames must be a plain int (bool and float "
+                f"rejected), got {type(self.window_frames).__name__}"
+            )
+        if self.window_frames < 1:
+            raise ValueError(
+                f"window_frames must be >= 1, got {self.window_frames}"
+            )
+        if self.window_frames < self.min_consistent_frames:
+            raise ValueError(
+                "window_frames must be >= min_consistent_frames "
+                "(otherwise verification is impossible), got "
+                f"window_frames={self.window_frames} < "
+                f"min_consistent_frames={self.min_consistent_frames}"
+            )
+
+
 #: Frozen constant instances — the project-wide single source of truth.
 CAMERA: Final[CameraConfig] = CameraConfig()
 FACE_PROCESSING: Final[FaceProcessingConfig] = FaceProcessingConfig()
 QUALITY: Final[QualityConfig] = QualityConfig()
 ENROLLMENT: Final[EnrollmentConfig] = EnrollmentConfig()
 RECOGNITION: Final[RecognitionConfig] = RecognitionConfig()
+TEMPORAL_VERIFICATION: Final[TemporalVerificationConfig] = (
+    TemporalVerificationConfig()
+)
 
 
 # ---------------------------------------------------------------------------

@@ -379,6 +379,49 @@ storage (D12) and temporal verification (later phases):
   persistence of recognition results; tests are fake-backed (no real
   SFace artifact) and no recognition-accuracy claim is made.
 
+### D14 — Temporal verification: conservative streak policy over Step 10 results, bounded state, one sequence per instance (Step 11)
+
+`src/temporal_verification.py` implements the temporal stage between
+single-frame recognition (D13) and attendance decisions (Step 13):
+
+* **Composition not duplication.** The verifier consumes existing
+  `RecognitionResult` values one at a time and invents no matching,
+  thresholds, storage, or manifest logic; a `MATCHED` result without
+  a valid employee ID is refused with a typed error (contract
+  violation — never de-escalated into non-evidence).
+* **Conservative evidence policy.** Only consecutive `MATCHED`
+  frames for the **same** employee ID build a streak;
+  `UNKNOWN`/`AMBIGUOUS`/`NO_CANDIDATES` are never positive evidence
+  and **interrupt** it (uncertain instants cannot contribute to or
+  preserve a verification). A matched frame for a different ID
+  discards the old streak (cross-ID evidence never combines).
+  `VERIFIED(employee_id)` requires `min_consistent_frames`
+  consecutive consistent frames; interrupted results carry
+  `employee_id=None` so prior evidence can never be re-reported as a
+  newly verified identity.
+* **Bounded, minimal state.** Retained evidence is one candidate ID,
+  one counter, and a bounded deque of at most `window_frames` recent
+  statuses (deterministic oldest-first advance). No frames, crops,
+  embeddings, scores, or names; logs carry counters/statuses/reasons
+  only — never IDs or biometric data. IDs are preserved verbatim
+  (`"007"`, `"EMP-0042"`). No persistence, camera, model, or network
+  at import or construction time (subprocess-verified).
+* **Session semantics.** One verifier manages one tracking sequence;
+  the caller owns one instance per tracked face / camera session
+  (instances share no state; `reset()` is instance-scoped and clears
+  streak + window). Frame order is the caller's feeding order — no
+  sequence numbers are invented. Post-verification frames are
+  idempotent state reporting (no recurring verification events);
+  verification ends the moment a non-MATCHED frame arrives, so an
+  identity cannot remain verified without new evidence.
+* **Provisional defaults, honest scope.**
+  `TemporalVerificationConfig(min_consistent_frames=3,
+  window_frames=10)` are initial engineering defaults requiring
+  Phase 2 real-camera calibration; strict validation rejects
+  bool/float and impossible (`window < min_consistent`) settings.
+  Temporal verification is **not** an attendance event and no
+  real-camera accuracy is claimed.
+
 ### D4 — Dependency licensing note
 
 `insightface`'s library code is MIT, but its pretrained model packages
