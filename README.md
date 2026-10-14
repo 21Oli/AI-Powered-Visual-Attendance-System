@@ -14,7 +14,12 @@ tests); empirical CV evaluation BLOCKED on missing model artifacts /
 consented labeled data — see
 [DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md) and
 [reports/phase1_evaluation.md](reports/phase1_evaluation.md). Step 15
-(live-camera integration demo) pending.
+(integration demo): integration & automated smoke tests green — run it
+with `python tools/run_integration_demo.py --smoke` (deterministic,
+hardware-free; `--live` is an explicit opt-in real-camera run). No
+real camera/SFace inference was exercised (`models/sface.onnx` still
+absent); empirical CV evaluation remains BLOCKED on the Step 14
+limitations.
 
 ## Core architectural principle
 

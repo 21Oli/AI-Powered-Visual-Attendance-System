@@ -4,6 +4,38 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [0.15.0] — 2026-10-14 — Phase 1, Step 15: Integration demo (integration & smoke green; live-camera real-world results not obtained; empirical CV evaluation still blocked)
+
+### Added
+
+* `src/integration_demo.py`: the Phase 1 integration orchestrator —
+  composes the existing approved components (Steps 04–13) end to end
+  (capture → detect → quality → embed → recognize → temporal verify →
+  unknown-face handling → attendance event) with **no** new pipeline
+  math or thresholds. Two explicitly separated modes: `run_smoke`
+  (deterministic, hardware-free, temp-dir-only fixtures; real
+  downstream engines; honest no-event outcomes) and `run_live`
+  (explicitly opt-in real-camera run with prerequisite probing, a
+  clearly-labeled partial demo while `models/sface.onnx` is absent,
+  and guaranteed resource release on every exit path).
+* `tools/run_integration_demo.py`: CLI entry point (`--smoke` default;
+  `--live` opt-in with `--camera-index`, `--no-window`,
+  `--max-frames`). Verified via `--help` and a `--smoke` run.
+* `tests/test_integration_demo.py`: 20 focused tests covering the
+  single-event happy path (exact ID `"007"`), per-stage checkpoint
+  coverage, boundary-injection integrity, no-event guarantees for
+  quality-rejected/no-face/unknown-evidence runs, real-data safety
+  (repository `data/` untouched before/after), typed input errors,
+  and the live mode's abort/prerequisite/headless paths.
+
+### Notes
+
+* Only a real, temporally `VERIFIED` identity reaches the real
+  attendance engine; the integration layer never fabricates events
+  or recognition results. Real camera/SFace inference was not
+  exercised (`sface.onnx` absent); empirical CV evaluation remains
+  blocked exactly as recorded for Step 14.
+
 ## [0.14.0] — 2026-10-13 — Phase 1, Step 14: Testing & evaluation (software regression green; empirical CV evaluation blocked)
 
 ### Added

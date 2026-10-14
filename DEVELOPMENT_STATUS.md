@@ -3,6 +3,88 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 15 — status record (2026-10-14)
+
+**Integration & automated smoke-test status: green (20 focused tests
+passed; 674/674 full suite, project root and external CWD). Actual
+live-camera results: not obtained (no camera exercised this step).
+Empirical computer-vision accuracy: still BLOCKED exactly as recorded
+in Step 14 — integration passing does not validate real-world CV
+performance.**
+
+**Implemented**
+
+* `src/integration_demo.py` — the Phase 1 integration orchestrator:
+  it *composes* the existing approved services (Steps 04–13) along
+  capture → detect → quality → embed → recognize → temporally verify
+  → unknown-face handling → attendance event, adding **no** new
+  recognition math, quality metrics, temporal policy, or thresholds.
+  Trust boundaries preserved: only a real ``VERIFIED``
+  temporal-surface identity reaches the real attendance engine; raw
+  or unverified recognition can never authorize an event; unknown-face
+  handling stays observational.
+* `run_smoke` — deterministic,
+  hardware-free demo: injected frame source / scripted detector /
+  stub embedder at the module boundaries; the *real* embedding
+  storage, recognition service, temporal verifier, unknown-face
+  handler, and attendance engine run with unchanged contracts over
+  five scripted frames. Builds its Step 07-shaped manifest + Step 09
+  embedding fixture in temp directories (never the real `data/`).
+  One real `CHECK_IN` event for the exact ID `"007"` (streak of 3
+  consecutive MATCHED frames, cosine 1.0 on the synthetic vectors),
+  plus 2 demonstrated engine suppressions for repeat-verified frames,
+  and the full unknown-face episode lifecycle (observed → suppressed
+  → episode_ended). Scenarios that gate attendance (quality
+  rejection, no faces, off-basis/unknown recognition) return an
+  honest `event_created=False` result — nothing fabricated
+* `run_live` (opt-in) — real-camera pipeline: prerequisite probing
+  before any hardware is acquired; `yunet.onnx` missing → clean
+  abort; `sface.onnx` missing (current repository state) → clearly
+  labeled *partial* live demo (capture → detection → quality only)
+  that **never** generates attendance events; camera open/read
+  failures, window closure, `KeyboardInterrupt`, and unexpected
+  exceptions shut down with camera/window/capture release in a
+  `finally` block.
+* `tools/run_integration_demo.py` — CLI (`--smoke` default,
+  `--live` opt-in with `--camera-index/--no-window/--max-frames`);
+  `--help` and `--smoke` verified working.
+* `tests/test_integration_demo.py` — 20 focused tests: happy path
+  (one event for exact ID; per-stage checkpoint coverage; 2
+  suppressions; VERIFIED temporal detail), boundary-injection
+  integrity, no-event guarantees for quality-rejected / no-face /
+  unknown-evidence runs, unknown-face stage follows the real
+  handler, real `data/` untouched (before/after listing), fixtures
+  confined to tmp, typed input errors, live abort/prerequisite and
+  headless-window paths, and README-snippet sync.
+
+**Verified**
+
+* Full suite baseline before this step's code changes: **674
+  passed**, exit 0 (re-run; the project was already green).
+* After changes — root: **674 passed**, exit 0; from an external CWD
+  (`/tmp/empty-cwd-15`, same venv, project tests dir): **674 passed**,
+  exit 0.
+* `python tools/run_integration_demo.py --help` → usage text, exit 0;
+  `python tools/run_integration_demo.py --smoke` → event for `"007"`,
+  2 suppressions, full checkpoint trace, exit 0.
+* The one suite failure encountered (a `src/` hygiene guard forbidding
+  any reference to the model-download helper from startup code) was
+  fixed by removing the docstring reference — the guard's rule stands
+  intact, no test was weakened.
+
+**Known limitations / honest boundaries**
+
+* No real camera and no real SFace inference were exercised:
+  `models/sface.onnx` remains absent (the prerequisite probe reports
+  it), so live mode runs only as the partial demo; recognition
+  accuracy claims would be fabricated and are not made.
+* Smoke mode's synthetic vectors (cosine 1.0) demonstrate pipeline
+  correctness only — never recognition accuracy.
+* Duplicate suppression remains engine-instance-lifetime (Step 13
+  restart limitation, unchanged); no durable store was added.
+* Live mode without a face tracker cannot distinguish two people in
+  one camera session (documented Phase 2 tracker work).
+
 ## Step 14 — status record (2026-10-13)
 
 **Software regression status: green. Empirical CV evaluation status:

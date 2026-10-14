@@ -58,7 +58,12 @@ A face being recognized does NOT automatically mean attendance is recorded.
 14. Testing & evaluation                       ◐ software regression
                                                green; empirical CV eval
                                                BLOCKED (missing artifacts)
-15. Phase 1 integration demo                   ⬜
+15. Phase 1 integration demo                   ◐ integration &
+                                               smoke tests green;
+                                               real-camera demo not
+                                               run; empirical CV eval
+                                               BLOCKED (Step 14
+                                               limitation stands)
 ```
 
 (Completion markers are updated only after a step is verified. See
