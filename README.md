@@ -16,10 +16,12 @@ consented labeled data — see
 [reports/phase1_evaluation.md](reports/phase1_evaluation.md). Step 15
 (integration demo): integration & automated smoke tests green — run it
 with `python tools/run_integration_demo.py --smoke` (deterministic,
-hardware-free; `--live` is an explicit opt-in real-camera run). No
-real camera/SFace inference was exercised (`models/sface.onnx` still
-absent); empirical CV evaluation remains BLOCKED on the Step 14
-limitations.
+hardware-free; `--live` is an explicit opt-in real-camera run). The
+operator-supplied `models/yunet.onnx` and `models/sface.onnx` enable
+`--live`'s full pipeline path; real-camera recognition results have
+not yet been recorded, and empirical CV accuracy evaluation remains
+BLOCKED on consented labeled data (see
+[reports/phase1_evaluation.md](reports/phase1_evaluation.md)).
 
 ## Core architectural principle
 

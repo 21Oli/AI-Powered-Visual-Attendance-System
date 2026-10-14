@@ -33,8 +33,9 @@ as done. Format based on Keep a Changelog.
 * Only a real, temporally `VERIFIED` identity reaches the real
   attendance engine; the integration layer never fabricates events
   or recognition results. Real camera/SFace inference was not
-  exercised (`sface.onnx` absent); empirical CV evaluation remains
-  blocked exactly as recorded for Step 14.
+  exercised at Step 15 recording time (`sface.onnx` was then absent);
+  empirical CV evaluation remains blocked exactly as recorded for
+  Step 14.
 
 ## [0.14.0] — 2026-10-13 — Phase 1, Step 14: Testing & evaluation (software regression green; empirical CV evaluation blocked)
 

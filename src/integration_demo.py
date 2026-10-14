@@ -694,7 +694,7 @@ def run_live(
     Behavior:
         * Preparation: probe prerequisites *before* touching the
           camera; a missing ``yunet.onnx`` aborts the run safely.
-        * With ``sface.onnx`` absent (the documented Phase 1 state) a
+        * With ``sface.onnx`` absent, a
           **partial live demo** runs — capture, detection, and quality
           report real values; the embedding/recognition/temporal/
           attendance stages are reported as clearly blocked, and the

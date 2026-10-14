@@ -39,7 +39,7 @@ performance.**
   honest `event_created=False` result — nothing fabricated
 * `run_live` (opt-in) — real-camera pipeline: prerequisite probing
   before any hardware is acquired; `yunet.onnx` missing → clean
-  abort; `sface.onnx` missing (current repository state) → clearly
+  abort; `sface.onnx` missing → clearly
   labeled *partial* live demo (capture → detection → quality only)
   that **never** generates attendance events; camera open/read
   failures, window closure, `KeyboardInterrupt`, and unexpected
@@ -74,10 +74,13 @@ performance.**
 
 **Known limitations / honest boundaries**
 
-* No real camera and no real SFace inference were exercised:
-  `models/sface.onnx` remains absent (the prerequisite probe reports
-  it), so live mode runs only as the partial demo; recognition
-  accuracy claims would be fabricated and are not made.
+* At Step 15 recording time no real camera and no real SFace
+  inference were exercised: `models/sface.onnx` was absent, so live
+  mode could only run the partial demo. The operator has since
+  provided `models/sface.onnx`, which enables `--live`'s full-chain
+  path — but that path is model loading only until a real supervised
+  camera run is recorded; recognition accuracy claims remain
+  unfabricated and unmade.
 * Smoke mode's synthetic vectors (cosine 1.0) demonstrate pipeline
   correctness only — never recognition accuracy.
 * Duplicate suppression remains engine-instance-lifetime (Step 13

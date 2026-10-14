@@ -7,8 +7,7 @@ Two explicitly separated modes:
   actual storage/recognition/temporal/unknown-face/attendance services
   with unchanged contracts. Never claims real-model accuracy.
 * ``--live`` — opt-in real-camera run. Requires the operator-supplied
-  ``models/yunet.onnx``; with ``models/sface.onnx`` absent (the
-  documented repository state) it runs as a clearly-labeled *partial*
+  ``models/yunet.onnx``; with ``models/sface.onnx`` absent it runs as a clearly-labeled *partial*
   demo (capture → detection → quality only) and never generates an
   attendance event, because identity authorization is impossible
   without the real recognition chain. Nothing is downloaded,

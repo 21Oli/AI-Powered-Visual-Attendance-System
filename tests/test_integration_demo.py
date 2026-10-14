@@ -6,9 +6,10 @@ detector, stub embedder) while every downstream component — embedding
 storage, recognition service, temporal verifier, unknown-face handler,
 and the attendance engine — is the real project service with
 unchanged thresholds and contracts. **No test uses the real SFace
-model** (the artifact is absent and never downloaded) and **no test
-touches a camera**: live mode is covered through its resource-safety
-and prerequisite-failure paths with injected doubles only.
+model** (no test performs real model inference, and models are never
+downloaded) and **no test touches a camera**: live mode is covered
+through its resource-safety and prerequisite-failure paths with
+injected doubles only.
 """
 
 from __future__ import annotations
@@ -401,16 +402,55 @@ class TestInputContracts:
 
 
 class TestLivePrerequisites:
-    def test_probe_reports_actual_artifact_state(self) -> None:
-        prereqs = live_prerequisites()
-        # YuNet bundled by the operator; SFace deliberately absent.
-        if (prereqs.yunet_path).is_file():
-            assert prereqs.yunet_available is True
-        assert not prereqs.sface_available, (
-            "this repository's documented state is operator-supplied "
-            "models only; if sface.onnx is present the live full-chain "
-            "path must be re-verified manually"
+    def test_probe_reports_injected_artifact_state(
+        self, tmp_path: Path
+    ) -> None:
+        """Availability reflects exactly the injected artifact state.
+
+        Probe bytes only — the files are never opened or parsed, so a
+        two-byte sentinel is enough to represent a provided model file.
+        """
+        yunet_present = tmp_path / "yunet.onnx"
+        sface_present = tmp_path / "sface.onnx"
+        yunet_present.write_bytes(b"probe")
+        sface_present.write_bytes(b"probe")
+        yunet_missing = tmp_path / "no-such-yunet.onnx"
+        sface_missing = tmp_path / "no-such-sface.onnx"
+
+        both_present = live_prerequisites(
+            detector_model_path=yunet_present,
+            embedder_model_path=sface_present,
         )
+        assert both_present.yunet_available is True
+        assert both_present.yunet_path == yunet_present
+        assert both_present.sface_available is True
+        assert both_present.sface_path == sface_present
+
+        both_missing = live_prerequisites(
+            detector_model_path=yunet_missing,
+            embedder_model_path=sface_missing,
+        )
+        assert both_missing.yunet_available is False
+        assert both_missing.yunet_path == yunet_missing
+        assert both_missing.sface_available is False
+        assert both_missing.sface_path == sface_missing
+
+    def test_probe_defaults_to_project_conventional_paths(self) -> None:
+        """With no injection, the probe reports the canonical paths.
+
+        Path identity is asserted (environment-agnostic); *availability*
+        depends on which operator-supplied artifacts actually exist on
+        the machine, so it is asserted only to agree with the file
+        system — never to a hardcoded present/absent expectation.
+        """
+        from src.face_detection import DEFAULT_MODEL_PATH as YUNET_DEFAULT
+        from src.face_embedding import DEFAULT_MODEL_PATH as SFACE_DEFAULT
+
+        prereqs = live_prerequisites()
+        assert prereqs.yunet_path == YUNET_DEFAULT
+        assert prereqs.sface_path == SFACE_DEFAULT
+        assert prereqs.yunet_available == YUNET_DEFAULT.is_file()
+        assert prereqs.sface_available == SFACE_DEFAULT.is_file()
 
     def test_missing_yunet_aborts_before_camera(
         self, settings: AppSettings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
