@@ -20,8 +20,6 @@ as done. Format based on Keep a Changelog.
   and guaranteed resource release on every exit path).
 * `tools/run_integration_demo.py`: CLI entry point (`--smoke` default;
   `--live` opt-in with `--camera-index`, `--no-window`,
-* `tools/run_integration_demo.py`: CLI entry point (`--smoke` default;
-  `--live` opt-in with `--camera-index`, `--no-window`,
   `--max-frames`; optional `--frame-size WIDTHxHEIGHT` camera-frame
   override for `--live`, validated as two positive integer dimensions
   with a clear CLI error otherwise). Verified via `--help` and a

@@ -535,6 +535,140 @@ class TestLiveCameraFailure:
         assert released
 
 
+class TestWindowCapabilityCheck:
+    """``_cv_window_supported`` never mistakes a bug for "no GUI".
+
+    Regression context: the original check referenced ``cv2`` without a
+    local import; the resulting ``NameError`` was swallowed into
+    ``False``, making any environment look headless despite a working
+    WIN32UI highgui. These tests inject a scripted ``cv2`` module via
+    ``sys.modules`` — the real highgui is never touched, no window ever
+    opens, and no camera is involved.
+    """
+
+    @staticmethod
+    def _fake_cv2_module(
+        *,
+        named_window: object,
+        destroy_window: object,
+    ) -> "types.ModuleType":
+        """A scripted ``cv2`` module double with ``error`` and locals."""
+        import sys
+        import types
+
+        fake = types.ModuleType("cv2")
+
+        class FakeCv2Error(Exception):
+            """Stand-in for ``cv2.error`` in the module double."""
+
+        fake.error = FakeCv2Error
+        fake.namedWindow = named_window
+        fake.destroyWindow = destroy_window
+        return fake
+
+    @staticmethod
+    def _install_fake_cv2(
+        monkeypatch: pytest.MonkeyPatch, fake: "types.ModuleType"
+    ) -> None:
+        """Bind the module double so the check's local import sees it."""
+        import sys
+
+        monkeypatch.setitem(sys.modules, "cv2", fake)
+
+    def test_probe_reports_supported_without_module_global_dependency(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A healthy injected cv2 yields True (the old bug yielded False)."""
+        import src.integration_demo as demo_mod
+
+        created: list[str] = []
+        destroyed: list[str] = []
+
+        def ok_named_window(name: str) -> None:
+            created.append(name)
+
+        def ok_destroy_window(name: str) -> None:
+            destroyed.append(name)
+
+        self._install_fake_cv2(
+            monkeypatch,
+            self._fake_cv2_module(
+                named_window=ok_named_window,
+                destroy_window=ok_destroy_window,
+            ),
+        )
+        assert demo_mod._cv_window_supported() is True
+        # The probe owns its lifecycle: created and destroyed exactly once.
+        assert created == ["[probe]"]
+        assert destroyed == ["[probe]"]
+
+    def test_genuine_highgui_failure_reports_unsupported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Real highgui errors (``cv2.error``) still mean "unsupported"."""
+        import src.integration_demo as demo_mod
+
+        def no_op(*_args: object) -> None:
+            return None
+
+        fake = self._fake_cv2_module(
+            named_window=no_op, destroy_window=no_op
+        )
+
+        def failing_named_window(name: str) -> None:
+            raise fake.error("no window subsystem")
+
+        fake.namedWindow = failing_named_window
+        self._install_fake_cv2(monkeypatch, fake)
+        assert demo_mod._cv_window_supported() is False
+
+    def test_cleanup_failure_also_reports_unsupported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A probe that cannot destroy its window is unsupported too."""
+        import src.integration_demo as demo_mod
+
+        def no_op(*_args: object) -> None:
+            return None
+
+        fake = self._fake_cv2_module(
+            named_window=no_op, destroy_window=no_op
+        )
+
+        def failing_destroy_window(name: str) -> None:
+            raise fake.error("destroy failed")
+
+        fake.destroyWindow = failing_destroy_window
+        self._install_fake_cv2(monkeypatch, fake)
+        assert demo_mod._cv_window_supported() is False
+
+    def test_unrelated_errors_are_not_masked_as_unsupported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A programming bug must propagate, never masquerade as headless.
+
+        Under the original broad ``except Exception``, an injected
+        ``RuntimeError`` was swallowed into ``False`` — this test pins
+        the new, discriminating contract.
+        """
+        import src.integration_demo as demo_mod
+
+        def no_op(*_args: object) -> None:
+            return None
+
+        fake = self._fake_cv2_module(
+            named_window=no_op, destroy_window=no_op
+        )
+
+        def buggy_named_window(name: str) -> None:
+            raise RuntimeError("unrelated programming bug")
+
+        fake.namedWindow = buggy_named_window
+        self._install_fake_cv2(monkeypatch, fake)
+        with pytest.raises(RuntimeError, match="unrelated programming bug"):
+            demo_mod._cv_window_supported()
+
+
 class TestDocsExample:
     def test_readme_smoke_snippet_matches_module_api(self) -> None:
         """Keep the README snippet and the module's real signature in sync."""

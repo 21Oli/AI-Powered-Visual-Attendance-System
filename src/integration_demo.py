@@ -954,12 +954,22 @@ class _OpenCvWindow:
 
 
 def _cv_window_supported() -> bool:
-    """Whether OpenCV's highgui window facilty is usable at all."""
+    """Whether OpenCV's highgui window facility is usable at all.
+
+    The probe imports ``cv2`` locally, exactly like every other window
+    function in this module (``cv2`` is deliberately not a module
+    global), so the probe can never mistake a missing import for a
+    missing window subsystem. Only genuine highgui failures
+    (``cv2.error``) report unsupported; any other exception propagates
+    instead of masquerading as "no GUI" — a bug must stay a bug.
+    """
+    import cv2
+
     try:
         probe_name = "[probe]"
         cv2.namedWindow(probe_name)
         cv2.destroyWindow(probe_name)
-    except Exception:
+    except cv2.error:
         return False
     return True
 
