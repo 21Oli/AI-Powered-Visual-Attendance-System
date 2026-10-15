@@ -12,11 +12,16 @@ Two explicitly separated modes:
   attendance event, because identity authorization is impossible
   without the real recognition chain. Nothing is downloaded,
   enrolled, or fabricated automatically.
+* ``--frame-size WIDTHxHEIGHT`` (``--live`` only) — optional camera
+  frame-size override (e.g. ``640x480``; the ``x`` separator is case-
+  insensitive). Omitted → the project's configured default resolution
+  is used unchanged. Dimensions must be positive.
 
 Examples::
 
     python tools/run_integration_demo.py --smoke
     python tools/run_integration_demo.py --live --camera-index 0
+    python tools/run_integration_demo.py --live --camera-index 0 --frame-size 640x480
 """
 
 from __future__ import annotations
@@ -39,6 +44,33 @@ from src.integration_demo import (  # noqa: E402
     run_live,
     run_smoke,
 )
+
+
+def parse_frame_size(raw: str) -> tuple[int, int]:
+    """Parse a ``WIDTHxHEIGHT`` camera frame-size CLI value.
+
+    The ``x`` separator is accepted case-insensitively (``640x480`` and
+    ``640X480``); no internal whitespace is required to be absent, but
+    the separator itself must appear exactly once and both dimensions
+    must be positive integers. Any malformed, zero, or negative value
+    raises :class:`argparse.ArgumentTypeError`, which argparse converts
+    into its standard CLI error (exit code 2 with usage text).
+    """
+    lowered = raw.strip().lower()
+    parts = lowered.split("x")
+    error_message = (
+        "frame-size must be WIDTHxHEIGHT with positive integer "
+        f"dimensions (e.g. 640x480), got {raw!r}"
+    )
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError(error_message)
+    try:
+        width, height = int(parts[0].strip()), int(parts[1].strip())
+    except ValueError:
+        raise argparse.ArgumentTypeError(error_message) from None
+    if width <= 0 or height <= 0:
+        raise argparse.ArgumentTypeError(error_message)
+    return width, height
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -89,6 +121,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "(default: 300; uses this to bound unattended runs)."
         ),
     )
+    parser.add_argument(
+        "--frame-size",
+        type=parse_frame_size,
+        default=None,
+        metavar="WIDTHxHEIGHT",
+        help=(
+            "Optional camera frame-size override for --live (e.g. "
+            "640x480; the x separator is case-insensitive; positive "
+            "dimensions required). Omitted: the project's configured "
+            "default resolution is used unchanged."
+        ),
+    )
     return parser
 
 
@@ -132,13 +176,23 @@ def _run_live_mode(args: argparse.Namespace) -> int:
             "be a partial demo (capture → detect → quality only) and will "
             "not generate attendance events."
         )
+    config: LiveModeConfig
+    if args.frame_size is None:
+        config = LiveModeConfig(
+            camera_index=args.camera_index,
+            open_window=not args.no_window,
+        )
+    else:
+        config = LiveModeConfig(
+            camera_index=args.camera_index,
+            frame_width=args.frame_size[0],
+            frame_height=args.frame_size[1],
+            open_window=not args.no_window,
+        )
     try:
         frames = run_live(
             settings=AppSettings(),
-            config=LiveModeConfig(
-                camera_index=args.camera_index,
-                open_window=not args.no_window,
-            ),
+            config=config,
             max_frames=args.max_frames,
         )
     except Exception as exc:  # noqa: BLE001 - a failed demo is a nonzero exit

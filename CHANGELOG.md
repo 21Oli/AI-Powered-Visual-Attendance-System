@@ -20,7 +20,12 @@ as done. Format based on Keep a Changelog.
   and guaranteed resource release on every exit path).
 * `tools/run_integration_demo.py`: CLI entry point (`--smoke` default;
   `--live` opt-in with `--camera-index`, `--no-window`,
-  `--max-frames`). Verified via `--help` and a `--smoke` run.
+* `tools/run_integration_demo.py`: CLI entry point (`--smoke` default;
+  `--live` opt-in with `--camera-index`, `--no-window`,
+  `--max-frames`; optional `--frame-size WIDTHxHEIGHT` camera-frame
+  override for `--live`, validated as two positive integer dimensions
+  with a clear CLI error otherwise). Verified via `--help` and a
+  `--smoke` run.
 * `tests/test_integration_demo.py`: 20 focused tests covering the
   single-event happy path (exact ID `"007"`), per-stage checkpoint
   coverage, boundary-injection integrity, no-event guarantees for

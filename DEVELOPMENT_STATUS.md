@@ -46,7 +46,8 @@ performance.**
   exceptions shut down with camera/window/capture release in a
   `finally` block.
 * `tools/run_integration_demo.py` — CLI (`--smoke` default,
-  `--live` opt-in with `--camera-index/--no-window/--max-frames`);
+  `--live` opt-in with `--camera-index/--no-window/--max-frames`,
+  optional `--frame-size WIDTHxHEIGHT` override);
   `--help` and `--smoke` verified working.
 * `tests/test_integration_demo.py` — 20 focused tests: happy path
   (one event for exact ID; per-stage checkpoint coverage; 2
