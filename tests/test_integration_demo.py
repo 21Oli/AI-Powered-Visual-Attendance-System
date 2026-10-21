@@ -23,8 +23,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import src.integration_demo as demo_mod
 from src.config import AppSettings
 from src.face_detection import FaceDetection
+from src.quality import FaceQualityDecision, FaceQualityReason
 from src.integration_demo import (
     DemoHeadlessEnvironmentError,
     DemoStageOutcome,
@@ -679,3 +681,72 @@ class TestDocsExample:
         if "run_smoke" in text:
             assert "run_smoke(" in text
             assert "settings=" in text
+
+
+# ---------------------------------------------------------------------------
+# Opt-in sharpness-diagnostic line formatting (pure, hardware-free)
+# ---------------------------------------------------------------------------
+
+
+class TestQualityRejectionLineFormatting:
+    """Exercises ``_format_quality_rejection`` only — no camera, no model,
+    no frame, nothing saved: the formatter receives an already-computed
+    ``FaceQuality`` and returns a string.
+    """
+
+    @staticmethod
+    def _quality(reason: FaceQualityReason, sharpness: float | None):
+        return demo_mod.FaceQuality(
+            decision=FaceQualityDecision.REJECT,
+            reason=reason,
+            sharpness=sharpness,
+            brightness=140.0,
+            pose_yaw_ratio=None,
+            pose_pitch_ratio=None,
+            box=(10, 10, 80, 80),
+        )
+
+    def test_disabled_flag_reproduces_the_undiagnostic_line(self) -> None:
+        quality = self._quality(FaceQualityReason.BLUR, sharpness=18.34)
+        assert demo_mod._format_quality_rejection(
+            12, quality, report_quality_metrics=False
+        ) == "[frame   12] rejected by quality: blur"
+
+    def test_enabled_blur_reports_measured_sharpness_and_threshold(self) -> None:
+        quality = self._quality(FaceQualityReason.BLUR, sharpness=18.34)
+        assert demo_mod._format_quality_rejection(
+            12, quality, report_quality_metrics=True
+        ) == (
+            "[frame   12] rejected by quality: blur "
+            "(sharpness=18.3, threshold=50.0)"
+        )
+
+    def test_enabled_blur_reports_deterministic_one_decimal_values(self) -> None:
+        quality = self._quality(FaceQualityReason.BLUR, sharpness=47.96)
+        assert demo_mod._format_quality_rejection(
+            7, quality, report_quality_metrics=True
+        ) == (
+            "[frame    7] rejected by quality: blur "
+            "(sharpness=48.0, threshold=50.0)"
+        )
+
+    def test_enabled_non_blur_rejection_has_no_metrics_appendix(self) -> None:
+        quality = self._quality(FaceQualityReason.TOO_SMALL, sharpness=400.0)
+        assert demo_mod._format_quality_rejection(
+            33, quality, report_quality_metrics=True
+        ) == "[frame   33] rejected by quality: too_small"
+
+    def test_enabled_blur_without_measured_sharpness_stays_plain(self) -> None:
+        """The formatter never invents a value for an unmeasured check."""
+        quality = self._quality(FaceQualityReason.BLUR, sharpness=None)
+        assert demo_mod._format_quality_rejection(
+            12, quality, report_quality_metrics=True
+        ) == "[frame   12] rejected by quality: blur"
+
+    def test_formatter_emits_no_biometric_content(self) -> None:
+        quality = self._quality(FaceQualityReason.BLUR, sharpness=18.34)
+        line = demo_mod._format_quality_rejection(
+            12, quality, report_quality_metrics=True
+        )
+        for forbidden in ("brightness", "pose", "box", "140"):
+            assert forbidden not in line

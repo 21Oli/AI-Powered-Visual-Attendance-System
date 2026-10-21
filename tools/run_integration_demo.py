@@ -16,6 +16,13 @@ Two explicitly separated modes:
   frame-size override (e.g. ``640x480``; the ``x`` separator is case-
   insensitive). Omitted → the project's configured default resolution
   is used unchanged. Dimensions must be positive.
+* ``--report-quality-metrics`` (``--live``) — explicit opt-in
+  console-only diagnostic: frames rejected specifically for blur
+  additionally report the already-measured sharpness value and the
+  configured threshold (measured numbers only; nothing recalculated,
+  saved to files, or appended to logs). Disabled by default; with the
+  flag absent the output and behavior are exactly the pre-diagnostic
+  ones.
 
 Examples::
 
@@ -133,6 +140,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "default resolution is used unchanged."
         ),
     )
+    parser.add_argument(
+        "--report-quality-metrics",
+        action="store_true",
+        help=(
+            "Opt-in console-only diagnostic for --live: frames rejected "
+            "specifically for blur also report the already-measured "
+            "sharpness value and the configured threshold (numbers "
+            "only; nothing saved to files or logs). Disabled by default."
+        ),
+    )
     return parser
 
 
@@ -176,19 +193,18 @@ def _run_live_mode(args: argparse.Namespace) -> int:
             "be a partial demo (capture → detect → quality only) and will "
             "not generate attendance events."
         )
-    config: LiveModeConfig
-    if args.frame_size is None:
-        config = LiveModeConfig(
-            camera_index=args.camera_index,
-            open_window=not args.no_window,
-        )
-    else:
-        config = LiveModeConfig(
-            camera_index=args.camera_index,
-            frame_width=args.frame_size[0],
-            frame_height=args.frame_size[1],
-            open_window=not args.no_window,
-        )
+    # Config assembly: only operator-chosen overrides reach the config,
+    # so the flag-off CLI keeps the exact pre-diagnostic construction.
+    config_kwargs: dict[str, object] = {
+        "camera_index": args.camera_index,
+        "open_window": not args.no_window,
+    }
+    if args.frame_size is not None:
+        config_kwargs["frame_width"] = args.frame_size[0]
+        config_kwargs["frame_height"] = args.frame_size[1]
+    if args.report_quality_metrics:
+        config_kwargs["report_quality_metrics"] = True
+    config = LiveModeConfig(**config_kwargs)
     try:
         frames = run_live(
             settings=AppSettings(),

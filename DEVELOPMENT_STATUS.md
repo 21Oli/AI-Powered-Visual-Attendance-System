@@ -3,6 +3,242 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 19 — camera frame-size override on the operator enrollment CLI (2026-10-21)
+
+**Fix-record for a measured live-workflow blocker; automated checks
+only (no camera opened, no enrollment run, no store touched).**
+
+**Measured failure that motivated this step.** On the development
+machine, `python tools/enroll_employee.py --employee-id REH-001 …
+--confirm-consent` aborted before any frame ("frames attempted: 0";
+"Nothing was published") and `tools/run_integration_demo.py --live
+--camera-index 0` failed in `CameraService.open()`: the index-0
+camera reports 640×480 while the configured default
+(`src.config.CAMERA`) is 1280×720, so the open-time framing check
+failed — exactly the loud validation behavior it was designed to
+have (never silently accept a different resolution).
+
+**Implemented (composition only; no default or validation change)**
+
+* `tools/enroll_employee.py` gained an optional
+  `--frame-size WIDTHxHEIGHT` override that reuses the live demo's
+  validated parser (imported, not copied) and builds a temporary
+  `CameraConfig` overriding only the requested frame width/height —
+  the device index stays `CAMERA.index`, the configured default
+  1280×720 is unchanged, and camera validation is untouched: the
+  device must actually apply the requested size or acquisition fails
+  with the existing typed `CameraOpenError`.
+* `tests/test_enroll_employee_cli.py` extended with frame-size
+  categories (parser surface incl. malformed/non-positive exit 2,
+  camera-config composition incl. `CAMERA` default immutability, and
+  flow/main wiring including the no-override path and duplicate
+  refusal under the override) — all hardware-free and model-free by
+  the suite's standing discipline.
+* README (operator-enrollment section) and CHANGELOG document the
+  option and its motivating measured failure.
+
+**Honest boundary (unchanged).** This step adds an *explicit* way to
+request a supported resolution; it does not weaken the resolution
+validation, does not change the configured default, and does not
+claim any new live verification — the supervised enroll → recognize
+→ delete rehearsal remains the open live proof, now runnable on this
+camera with `--frame-size 640x480` on both operator commands.
+
+**Follow-up (same day): failure-output rejection-reason tally.**
+After the resolution fix, a measured live enrollment attempt still
+failed 0-samples-out-of-60 — and the CLI's failure line, unlike the
+live demo's per-frame console output, hid *why* frames were rejected
+even though `EnrollmentResult.rejections` already carried each
+attempt's structured reason (log check confirmed no read/detection
+session errors; the split was simply never printed). The failure
+branch now appends a deterministic, biometric-free summary — counts
+by stable reason value, lexicographically sorted (e.g.
+`rejections by reason: blur=1, no_faces=2, too_small=1`) — omitted
+when the session recorded no rejections, and extended with focused
+CLI tests (multi-reason counts + sort, run-to-run determinism,
+no-tally for an empty list, names-and-counts-only output).
+Capture logic, thresholds, camera configuration, persistence, and
+success behavior are unchanged; the tally is diagnostic only. The
+*cause* of the 0/60 failure stays unrecorded until the next measured
+attempt reads its own tally (run the supervised enrollment again now
+that the diagnosis can come from the run itself, not from
+hypotheses).
+
+**Follow-up (same day): opt-in sharpness diagnostic on the live
+demo.** A subsequent live run showed an intermittent `rejected by
+quality: blur` pattern (some frames passing the whole gate and
+reaching `recognition: no_candidates`), with the actual numeric
+sharpness values computed by the real assessor but surfaced nowhere.
+`run_integration_demo.py --live` gained an explicit,
+disabled-by-default, console-only `--report-quality-metrics` flag:
+frames rejected specifically for blur then also print the
+already-measured sharpness and the configured threshold (numbers
+only; never recomputed, never saved, never logged; flag-off output
+byte-identical). Covered by hardware-free tests at both the CLI
+wiring surface and the pure formatting surface, including the
+unmeasured-sharpness invariant. No threshold, camera, recognition,
+or dependency change; the 50.0 value remains uncalibrated until a
+measured real-footage discussion in Phase 2 — the flag only makes
+the values visible.
+
+## Step 18 — status record (2026-10-20)
+
+**Operator deletion CLI green (10 focused categories; full suite green;
+no camera opened and no real biometric data created or deleted by this
+step — all deletion evidence lives in temporary directories).**
+
+**Implemented**
+
+* `tools/delete_enrollment.py` — operator CLI removing exactly one
+  employee's enrollment artifacts (embedding record pair, Step 07
+  manifest directory, face-sample directory) using only public
+  validation APIs (no invented deletion service): ID validated via
+  `safe_dir_name` before anything runs; every removed path derived
+  from the configured `AppSettings` roots with defensive containment
+  checks; preview (default) changes nothing; `--execute` alone
+  refused (exit 2); both separate flags trigger deletion and never
+  bypass validation/target checks; removal order mirrors enrollment's
+  publish order in reverse so a mid-deletion crash leaves only the
+  publish-safe orphaned-samples state; failures report exactly what
+  was removed and what remains; success requires provable absence via
+  the real `EmbeddingStorageService.list_employee_ids()` plus direct
+  artifact checks. Crops/vectors never read, printed, or logged.
+* `tests/test_delete_enrollment.py` — 10 focused categories (tmp-dir
+  artifacts + injected storage double; no camera, no real biometrics):
+  invalid/malicious ID, nonexistent enrollment, preview-is-const,
+  missing individual artifacts, confirmation refusal, full deletion,
+  deletion failure with partial reporting, final-verification
+  failure, neighbor/model isolation, success-only-on-absence.
+* README "Deleting an enrollment" subsection: exact commands,
+  deleted-artifact enumeration, confirmation semantics, crash-safe
+  ordering, recovery limitation (irreversible).
+
+**Verified**
+
+* Focused deletion tests + prior suites (enrollment bridge, CLI,
+  smoke) and the full suite exited 0; counts and exit statuses
+  captured under `pipefail` (recorded in the change history).
+* Live boundary runs against the real (empty) store: preview and the
+  execute-without-confirm refusal both behave as documented on the
+  real `data/` without touching anything real. `git diff --check`
+  clean; nothing staged or committed.
+
+**Known limitations / honest boundaries**
+
+* Deletion is irreversible (no trash/versioning): recovery requires
+  re-enrolling a re-consenting participant — documented.
+* Automated tests prove the tool's filesystem scoping and wiring with
+  synthetic artifacts in temporary directories; no real enrollment has
+  ever been deleted on this machine (the stores were verified empty).
+* The recognizer's candidate list reflects complete records only;
+  final verification therefore checks both the discovery API and the
+  literal files, so a corrupt half-record cannot masquerade as a
+  deleted one.
+
+## Live partial-run measurement (2026-10-20, 17:56–17:57) — log-backed
+
+Supersedes, for the live *acquisition chain* only, the "model loading
+only until a real supervised camera run is recorded" boundary recorded
+at Step 15. Evidence: `data/logs/app.log`, entries 2026-10-20
+17:56:19–17:56:51 and 17:57:11–17:57:37 (quoted facts only; no
+biometric content is ever logged).
+
+**Measured (log-backed):**
+
+* Two real `--live` sessions ran on the development machine.
+* The real YuNet detector loaded both times from the
+  operator-supplied `models/yunet.onnx` (`score_threshold=0.50`, the
+  configured constant).
+* Real camera hardware acquired (index 0, 640×480) and **released
+  cleanly** via the project's guaranteed resource-safety path after
+  ~28 s and ~25 s sessions.
+* The real SFace embedding model loaded in crop-only mode (no
+  landmark alignment) — the same defaults the recognizer uses.
+* **Zero ERROR and zero WARNING log entries** across both sessions:
+  no unexpected exception occurred, both cameras released cleanly.
+
+**Not measured / did not occur in these sessions:**
+
+* **No enrollment was performed** (no `enrollment persisted` or
+  `embedding persisted` log entries; the employee/face-sample/
+  embedding stores were verified still empty immediately after), so
+  **no recognition or attendance decision was possible**: no
+  `no_candidates`/`matched`/`VERIFIED` console line exists in any
+  record, and **real-camera recognition accuracy remains unrecorded**.
+* These sessions therefore verify the live prerequisite and resource
+  chain (operator-supplied models load, real device acquires and
+  releases, no exceptions) — not recognition quality, temporal
+  verification, or attendance behavior.
+* Still open: a supervised consented enroll → bridge → recognize
+  (`VERIFIED` event) → delete cycle, and accuracy evaluation (FAR/FRR
+  on labeled data; spoof resistance; multi-person scenes) — blocked
+  exactly as recorded in Step 14.
+
+## Step 17 — status record (2026-10-20)
+
+**Operator enrollment CLI green (8 focused categories; full suite green;
+no camera opened and no biometric data created by this step; live
+recognition still not exercised — unchanged boundary).**
+
+**Implemented**
+
+* `tools/enroll_employee.py` — operator CLI connecting the existing
+  Step 07 enrollment to the Step 16 embedding bridge (composition
+  only; no new recognition math, thresholds, persistence, camera, or
+  model behavior). Mandatory `--confirm-consent` gate placed *before
+  everything* (no prerequisite probe, no camera, no validation — exit
+  2 without it); prerequisite probing aborts before any capture when
+  the operator-supplied model artifacts are absent; the existing
+  enrollment session's duplicate refusal and typed errors surface
+  unchanged; the bridge creates exactly one embedding under its
+  `replace=False` contract; success is printed only after the employee
+  ID is provably discoverable through
+  `EmbeddingStorageService.list_employee_ids()` — the live
+  recognizer's actual candidate path. Biometric discipline:
+  crops/vectors/embeddings never printed or logged. Failures are
+  reported honestly (duplicate → refused, nothing changed; embedding
+  failure after capture → published enrollment remains on disk with
+  the printed recovery path), never fabricated as success.
+* `tests/test_enroll_employee_cli.py` — 8 focused categories
+  (consent declined runs nothing; consent accepted runs enroll→bridge
+  in order; real-validation ID/name rejection before any camera;
+  duplicate enrollment and duplicate-embedding refusals;
+  capture/enrollment failure yields no embedding work;
+  embedding/storage failure; final candidate-verification failure;
+  success only on discoverable ID) — all injected doubles, no real
+  camera, models, or biometric data.
+* README "Operator enrollment" section: exact command, prerequisites,
+  consent requirement, duplicate behavior, partial-failure recovery,
+  and biometric-output discipline.
+
+**Verified**
+
+* `python -m pytest -q`: **746 passed**, exit 0 — including the 17
+  focused CLI tests, the 16 bridge tests, and the Step 07
+  enrollment suite (54 across both). Exit statuses captured under
+  `pipefail`; the two test-fix cycles this step needed (a
+  probe-shaped test double and a closure-scoped calls recorder in the
+  new test file; no source-code logic changed) were fixed at their
+  causes, no assertion weakened, no test skipped.
+* `git diff --check` clean (exit 0; benign LF→CRLF working-copy
+  warnings on stderr only). No biometric data created; the employee,
+  face-sample, and embedding stores remain empty because no real
+  enrollment was performed during implementation.
+
+**Known limitations / honest boundaries**
+
+* Automated tests exercise wiring with injected doubles; they do not
+  and cannot prove real-model recognition accuracy. The only remaining
+  end-to-end proof is an authorized, consented, supervised live run
+  after a real enrollment.
+* There is no programmatic "delete enrollment" command: duplicate
+  under the same ID requires manual removal of that employee's data
+  directories (documented recovery path; duplicates are never
+  overwritten).
+* Consent is enforced by the operator's `--confirm-consent` flag on
+  the command line; verifying the participant's actual consent remains
+  a human responsibility the flag represents.
+
 ## Step 15 — status record (2026-10-14)
 
 **Integration & automated smoke-test status: green (20 focused tests

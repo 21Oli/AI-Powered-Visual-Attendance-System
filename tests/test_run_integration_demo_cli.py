@@ -151,6 +151,16 @@ class TestParserSurface:
         )
         assert args.frame_size == (640, 480)
 
+    def test_report_quality_metrics_defaults_to_disabled(self) -> None:
+        args = cli._build_parser().parse_args([])
+        assert args.report_quality_metrics is False
+
+    def test_report_quality_metrics_is_an_explicit_opt_in(self) -> None:
+        args = cli._build_parser().parse_args(
+            ["--live", "--report-quality-metrics"]
+        )
+        assert args.report_quality_metrics is True
+
 
 # ---------------------------------------------------------------------------
 # 4. Default behavior is preserved exactly when --frame-size is omitted
@@ -275,6 +285,80 @@ class TestFrameSizePropagation:
         assert handed_over[0].frame_width == 640
         assert handed_over[0].frame_height == 480
         assert handed_over[0].camera_index == 2
+
+    def test_enabled_flag_reaches_live_mode_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--report-quality-metrics`` sets exactly one new config field."""
+        migrated = cli.LiveModeConfig
+
+        constructed: dict[str, Any] = {}
+        real_init = migrated.__init__
+
+        def recording_init(self: Any, **kwargs: Any) -> None:
+            constructed.update(kwargs)
+            real_init(self, **kwargs)
+
+        monkeypatch.setattr(migrated, "__init__", recording_init)
+        _force_full_prereqs(monkeypatch)
+
+        handed_over: list[Any] = []
+
+        def recording_run_live(
+            *, settings: Any, config: Any, max_frames: Any
+        ) -> int:
+            handed_over.append(config)
+            return 0
+
+        monkeypatch.setattr(cli, "run_live", recording_run_live)
+
+        exit_code = cli._run_live_mode(
+            cli._build_parser().parse_args(
+                ["--live", "--frame-size", "640x480", "--report-quality-metrics"]
+            )
+        )
+        assert exit_code == 0
+        assert constructed == {
+            "camera_index": 0,
+            "frame_width": 640,
+            "frame_height": 480,
+            "open_window": True,
+            "report_quality_metrics": True,
+        }
+        assert handed_over[0].report_quality_metrics is True
+
+    def test_absent_flag_builds_the_exact_undiagnostic_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without the flag, the config carries no diagnostic keyword."""
+        migrated = cli.LiveModeConfig
+
+        constructed: dict[str, Any] = {}
+        real_init = migrated.__init__
+
+        def recording_init(self: Any, **kwargs: Any) -> None:
+            constructed.update(kwargs)
+            real_init(self, **kwargs)
+
+        monkeypatch.setattr(migrated, "__init__", recording_init)
+        _force_full_prereqs(monkeypatch)
+
+        handed_over: list[Any] = []
+
+        def recording_run_live(
+            *, settings: Any, config: Any, max_frames: Any
+        ) -> int:
+            handed_over.append(config)
+            return 0
+
+        monkeypatch.setattr(cli, "run_live", recording_run_live)
+
+        exit_code = cli._run_live_mode(
+            cli._build_parser().parse_args(["--live"])
+        )
+        assert exit_code == 0
+        assert constructed == {"camera_index": 0, "open_window": True}
+        assert handed_over[0].report_quality_metrics is False  # class default
 
     def test_override_flows_into_the_real_camera_config(
         self, monkeypatch: pytest.MonkeyPatch

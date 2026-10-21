@@ -82,8 +82,10 @@ import numpy as np
 from src.config import AppSettings
 from src.face_detection import FaceDetection, FaceDetector
 from src.quality import (
+    FaceQuality,
     FaceQualityAssessor,
     FaceQualityDecision,
+    FaceQualityReason,
 )
 from src.logging_setup import get_logger
 
@@ -310,11 +312,17 @@ class LiveModeConfig:
         frame_width: int = 1280,
         frame_height: int = 720,
         open_window: bool = True,
+        report_quality_metrics: bool = False,
     ) -> None:
         self.camera_index = camera_index
         self.frame_width = frame_width
         self.frame_height = frame_height
         self.open_window = open_window
+        # Opt-in console-only diagnostic (default: untouched behavior):
+        # when True, frames rejected specifically for blur also report
+        # the already-measured sharpness value and the configured
+        # threshold — numbers only, nothing saved. Disabled by default.
+        self.report_quality_metrics = report_quality_metrics
 
 
 # ---------------------------------------------------------------------------
@@ -845,9 +853,14 @@ def run_live(
                 detection = detections[0]
                 quality = assessor.assess_face(frame, detection)
                 if quality.decision is not FaceQualityDecision.ACCEPT:
-                    reason = quality.reason.value if quality.reason else "?"
                     print(
-                        f"[frame {frames_processed:4d}] rejected by quality: {reason}"
+                        _format_quality_rejection(
+                            frames_processed,
+                            quality,
+                            report_quality_metrics=(
+                                config.report_quality_metrics
+                            ),
+                        )
                     )
                 elif recognizer is None or verifier is None or attendance is None:
                     print(
@@ -1010,6 +1023,44 @@ def _safe_crop(
     """Extract the measured quality box as a fresh non-negative crop."""
     x, y, w, h = box
     return frame[y : y + h, x : x + w].copy()
+
+
+def _format_quality_rejection(
+    frame_index: int,
+    quality: FaceQuality,
+    *,
+    report_quality_metrics: bool,
+) -> str:
+    """Format the live demo's per-frame quality-rejection console line.
+
+    The base line reproduces the pre-diagnostic format exactly, so the
+    flag-off output is unchanged byte for byte. With the explicit
+    opt-in ``report_quality_metrics`` enabled and the frame rejected
+    **specifically for blur**, the already-measured sharpness value
+    (never recomputed) and the configured threshold are appended in
+    parentheses — measured numbers only. No crops, images, embeddings,
+    employee names, other quality metrics (brightness/pose), frame
+    indices of individual rejections beyond the base line, and nothing
+    is written to files or logs by the formatter.
+
+    When the reason is blur but ``sharpness`` is ``None`` (the check
+    never ran — cannot happen for a blur verdict, kept defensive), the
+    plain base line is printed rather than an invented value.
+    """
+    reason = quality.reason.value if quality.reason else "?"
+    line = f"[frame {frame_index:4d}] rejected by quality: {reason}"
+    if (
+        report_quality_metrics
+        and quality.reason is FaceQualityReason.BLUR
+        and quality.sharpness is not None
+    ):
+        from src.config import QUALITY  # lazy, same convention as run_live
+
+        line += (
+            f" (sharpness={quality.sharpness:.1f}, "
+            f"threshold={QUALITY.min_sharpness:.1f})"
+        )
+    return line
 
 
 def recognizer_embed(
