@@ -32,6 +32,9 @@ data/employees/**
 data/face_samples/**
 data/embeddings/**
 
+# --- Runtime attendance journal (employee IDs + timestamps; not tracked) ---
+data/attendance/**
+
 # --- Runtime logs ---
 data/logs/**
 *.log

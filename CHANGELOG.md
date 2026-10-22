@@ -4,6 +4,20 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [0.20.0] — 2026-10-22 — Phase 2, P2-1: Durable attendance event store (storage only)
+
+### Added
+
+* `src/attendance_store.py`: `AttendanceEventStore` — an append-only JSON Lines journal persisting existing, already-validated `AttendanceEvent` values at `<DATA_DIR>/attendance/events.jsonl` (path derived from `AppSettings` like every other storage root). On-disk record schema is exactly five keys (`schema_version: 1`, `event_id`, `employee_id`, `event_type`, `occurred_at` in UTC ISO-8601); the same five-key envelope is enforced on load, so records carrying extra keys — biometric, diagnostic, or future — are typed errors, never silently reinterpreted. No face images, crops, embeddings, similarity scores, or unknown-person data pass through this module.
+* Torn-tail recovery contract: after an interrupted append, loading excludes an incomplete trailing fragment and reports it (`incomplete_trailing_record=True`) instead of hiding it; corruption anywhere else raises `CorruptAttendanceJournalError` with the exact journal line number and is never silently skipped. Appending over a torn tail repairs it first — a trailing fragment that is a fully valid record is salvaged by appending the missing newline (the record is preserved); otherwise the complete-line prefix is republished via the staged-temp-file → fsync → atomic `os.replace` pattern (the Step 09 precedent), the store's only rewrite path. A failed repair raises and leaves the journal byte-unchanged.
+* Append durability policy: normal appends never rewrite the journal — `open("a")` + `flush()` + `os.fsync()` per record; a record counts as persisted only after fsync returns, and every directory/write/flush/fsync failure raises `AttendanceStorePersistenceError` with the caller told to treat the event as unconfirmed (documented, and pinned by a test, that a record may still physically be present after an fsync failure — appends cannot be retracted).
+* `src/config.py`: additive derived path `AppSettings.attendance_dir` (`data_dir / "attendance"`) mirroring `embeddings_dir`; no existing configuration, validation, or behavior changed.
+* `tests/test_attendance_store.py`: 47 deterministic, hardware-free tests (append/loading/order/per-type round-trips, verbatim IDs and timestamps, load-is-read-only, no-construction side effects, privacy envelope, full load-validation matrix with line numbers, unsupported schema versions, torn-tail salvage/truncate/failed-repair semantics, typed error hierarchy).
+
+### Notes
+
+* Storage only in this step: the store is not wired into the live demo or the attendance engine yet (next phase step), and no existing attendance behavior changed — the full suite passes unchanged (858 tests = 811 prior + 47 new). Honest limits recorded: no cross-process file locking or `event_id` dedup (retry/once-policy belongs to the composition layer), fsync covers the file — not the directory entry — and there is no query/audit API yet; empirical CV evaluation remains separately blocked and untouched.
+
 ## [0.19.0] — 2026-10-22 — Phase 1, Step 20: Unknown-face handling wired into live mode (report-only, real handler)
 
 ### Added

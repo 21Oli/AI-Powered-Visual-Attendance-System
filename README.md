@@ -40,7 +40,8 @@ be recorded. See [ARCHITECTURE.md](ARCHITECTURE.md).
 ```text
 src/          Production code (reusable modules)
 notebooks/    Experimentation and demonstration only
-data/         Employees, face samples, embeddings, logs (all git-ignored)
+data/         Employees, face samples, embeddings, attendance journal,
+              logs (all git-ignored)
 models/       Model weights (git-ignored; downloaded at runtime)
 tests/        Test suite
 reports/      Evaluation reports
@@ -199,6 +200,20 @@ python tools/delete_enrollment.py --employee-id "EMP-0042" --execute --confirm-d
 * **Recovery limitation:** deletion is irreversible — deleted
   biometric artifacts are recoverable only by re-enrolling the
   (re-consenting) participant.
+
+## Attendance event storage
+
+Accepted attendance events are durably journalled as JSON Lines at
+`data/attendance/events.jsonl` (`AttendanceEventStore`, storage only —
+the live demo is not wired to it yet). One record per event carries
+exactly `schema_version`, `event_id`, `employee_id`, `event_type`, and
+`occurred_at` (UTC) — never images, embeddings, scores, or
+unknown-person data. Appends use flush+fsync per record (a failed write
+is reported as an unconfirmed record); an interrupted append can leave
+an incomplete trailing line, which loading excludes *and reports*
+(`incomplete_trailing_record=True`) while corruption anywhere else
+raises a typed error with the exact line number. Details:
+[DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md) Step 21.
 
 ## Environment variables
 

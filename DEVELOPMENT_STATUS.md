@@ -3,6 +3,99 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 21 — durable attendance event store (Phase 2, P2-1) (2026-10-22)
+
+**Storage only — the live demo is NOT wired to the store in this step.
+Focused suite 47 passed, full suite 858 passed (exit 0 each, captured
+under `pipefail`); no camera opened, no enrollment/deletion run,
+no biometric artifact accessed, created, or modified; nothing staged
+or committed.**
+
+**Implemented**
+
+* `src/attendance_store.py` — `AttendanceEventStore`, an append-only
+  JSON Lines journal over the existing frozen `AttendanceEvent` values
+  at `<DATA_DIR>/attendance/events.jsonl` (path derived like every
+  other storage root from `AppSettings`). Record schema is exactly five
+  keys — `schema_version: 1`, `event_id`, `employee_id`,
+  `event_type`, `occurred_at` (ISO-8601, UTC-normalized) — and the
+  five-key envelope is *enforced on load*: extra keys (biometric,
+  diagnostic, or future) are typed errors, never silently reinterpreted.
+  No crops, images, embeddings, similarity scores, or unknown-person
+  data are written or read by this module.
+* Append policy: normal appends never rewrite the journal —
+  `open("a")` + `flush()` + `os.fsync()` per record, so a record counts
+  as persisted only after fsync returns; any directory/app.write/flush/
+  fsync failure raises `AttendanceStorePersistenceError` and the
+  caller must treat the event as **unconfirmed** (the module docstring
+  and a pinned test state honestly that a record may still be present
+  after an fsync failure — append cannot retract buffered data).
+* Torn-tail policy (the documented recovery contract): an interrupted
+  append can leave a final line without its newline. Loading excludes
+  the torn fragment *and reports it* (`incomplete_trailing_record=True`)
+  — corruption anywhere else always raises
+  `CorruptAttendanceJournalError` with the exact line number; mid-file
+  corruption is never silently skipped. Appending over a torn tail
+  repairs it first: a trailing fragment that is a fully valid record
+  is salvaged by a one-byte newline append (pure append; preserved);
+  otherwise the complete-line prefix is republished through staged
+  temp file → fsync → atomic `os.replace` (the Step 09 pattern) — the
+  only rewrite path in the store, touching only the trailing
+  fragment. A failed repair raises and leaves the journal byte
+  unchanged (tested).
+* Validation on load mirrors write: exact key set, integer (non-bool)
+  schema version (`UnsupportedJournalSchemaVersionError` for unknown
+  versions), known `EventType` value, parseable ISO-8601 aware
+  timestamp, non-empty verbatim IDs — then the frozen
+  `AttendanceEvent` constructor re-enforces the full event contract;
+  malformed/older/wrong-typed records are typed errors carrying line
+  numbers. A missing journal normalizes to empty history; a missing
+  *mid-file* line does not exist as a concept — every complete line
+  must validate.
+* `src/config.py` — additive only: `AppSettings.attendance_dir`
+  derived path (`data_dir / "attendance"`), mirroring
+  `embeddings_dir`; no existing config object, validation, or
+  `ensure_directories` entry changed (the store creates its directory
+  lazily inside the first real append, like Step 09's storage).
+* `tests/test_attendance_store.py` — 47 deterministic, hardware-free
+  tests: single/multi append and in-order load; per-`EventType`
+  round-trip; verbatim ID and exact-microsecond timestamp round-trip;
+  offset-timestamp UTC normalization; load is read-only (byte
+  comparison); construction performs no filesystem side effects;
+  missing/empty journal = empty history; non-event append rejection
+  with zero writes; fsync failure → typed persistence error with the
+  unconfirmed-record honesty pinned; real (unmocked)
+  directory-creation failure wrapped; privacy envelope (serialized
+  records carry exactly the five documented keys); load validation
+  matrix (malformed JSON / empty line / mid-file corruption with a
+  torn tail present / unsupported or wrongly typed schema versions /
+  missing or extra keys / unknown event types / naive or unparseable
+  timestamps / empty or wrong-typed identity fields / non-object
+  records / non-UTF-8 journals); incomplete trailing fragment
+  (excluded and flagged on load; salvage-on-append of a
+  complete-record fragment; truncate-on-append of garbage with the
+  garbage provably gone; failed repair leaves journal bytes and
+  staging cleanup verified; a subsequent append never concatenates
+  onto a torn fragment); frozen explicit load result; the typed error
+  hierarchy.
+
+**Known limitations / honest boundaries**
+
+* Not wired to the live demo or the engine in this step (P2-2 does
+  that composition); nothing in the existing attendance behavior
+  changed — all existing tests pass unchanged.
+* No cross-process file locking and no `event_id` uniqueness scan: a
+  retry after an uncertain append failure can produce two
+  identical-ID lines; exactly-once/retry policy belongs to the
+  composition layer. Concurrent appenders' interleaving is decided by
+  the OS, not this store.
+* fsync establishes file durability; no directory-entry fsync is
+  performed (matching the existing storage precedent on the supported
+  environments).
+* No query/audit API yet — the journal is the retrieval source for
+  later P2 steps; empirical CV evaluation remains separately BLOCKED
+  (unchanged).
+
 ## Step 20 — unknown-face handling wired into live mode (2026-10-22)
 
 **Report-only console wiring of the existing Step 12 handler; focused

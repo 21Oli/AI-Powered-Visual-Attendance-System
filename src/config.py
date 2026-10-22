@@ -608,6 +608,10 @@ class AppSettings:
         return self.data_dir / "embeddings"
 
     @property
+    def attendance_dir(self) -> Path:
+        return self.data_dir / "attendance"
+
+    @property
     def models_dir(self) -> Path:
         return PROJECT_ROOT / "models"
 

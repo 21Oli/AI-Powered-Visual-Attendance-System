@@ -545,3 +545,56 @@ only**. This is acceptable for a portfolio/educational project; a
 production deployment would require commercially licensed models or
 self-trained embeddings. Recorded here so the constraint is visible
 before Step 08.
+
+### D18 — Durable attendance event store: append-only JSON Lines journal, enforced five-key envelope, salvage-or-truncate torn-tail recovery (Phase 2, P2-1)
+
+`src/attendance_store.py` (`AttendanceEventStore`) closes the Step 13
+"no durable storage" gap at the storage layer only — it consumes
+already-validated `AttendanceEvent` values and performs no face
+processing, no engine logic, no camera work, and (in this step) no
+live-mode wiring.
+
+* **Format and privacy envelope (enforced, decorative-free).** One
+  UTF-8 JSON object per line at `<DATA_DIR>/attendance/events.jsonl`
+  with exactly `schema_version: 1`, `event_id`, `employee_id`,
+  `event_type`, `occurred_at` (ISO-8601, UTC). The five-key set is
+  enforced symmetrically: appends serialize nothing else, and loads
+  reject extra keys outright — biometric, diagnostic, or merely future
+  fields are typed corruption, never silently reinterpreted. No
+  crops/images, embeddings, similarity scores, or unknown-person data
+  are written or read. IDs stay verbatim (`"007"` stays `"007"`).
+* **Append policy — safe append, not rewrite-per-event.** Normal
+  appends use `open("a")` (O_APPEND) + `flush()` + `os.fsync()`, one
+  record at a time; the whole-list rewrite cost grows with journal
+  size and was explicitly not chosen. A record is "persisted" only
+  after fsync returns; every failure raises
+  `AttendanceStorePersistenceError` and the caller must treat the
+  event as **unconfirmed**. Tested honesty: an fsync failure cannot
+  retract already-buffered data, so the record may still be present —
+  the store reports the uncertainty instead of pretending.
+* **Torn-tail recovery (documented, never silent mid-file
+  discards).** After an interrupted append, loading excludes an
+  incomplete trailing fragment and *reports* it
+  (`incomplete_trailing_record=True`); corruption of any other kind —
+  malformed JSON, unknown schema version, invalid field, empty line —
+  raises with the exact journal line number. Appending over a torn
+  tail repairs it first: a trailing fragment that is a fully valid
+  record is salvaged by appending the missing newline (pure append,
+  record preserved); otherwise the complete-line prefix is
+  republished via staged temp file → fsync → atomic `os.replace`
+  (the Step 09 pattern) — the store's only rewrite path. A failed
+  repair raises and leaves the journal byte-unchanged (tested), so
+  mid-file corruption can never arise from the repair itself.
+* **Validation policy.** Loading re-derives each record through the
+  frozen `AttendanceEvent` constructor after schema checks; naive
+  timestamps, unknown event types, wrong types, empty IDs, missing or
+  duplicate keys are typed errors carrying line numbers. A missing
+  journal is the normalized empty history; empty-but-present content
+  is corruption, not emptiness. Unauthenticated, untrusted stored
+  lines are treated with the same rigor as Step 09's sidecars.
+* **Explicit non-goals (honest scope).** No cross-process file
+  locking, no `event_id` uniqueness scan (retry/once policy belongs
+  to the composition layer), fsync covers the file — not the
+  directory entry — and there is no query/audit API yet (a later P2
+  tool reads the journal read-only). Store touches no thresholds, no
+  engine behavior, and no live-mode wiring in P2-1.
