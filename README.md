@@ -141,6 +141,16 @@ python tools/enroll_employee.py \
   logs). Disabled by default. Use the measured values to inform the
   Phase-2 threshold-calibration discussion — they never auto-tune
   anything.
+* **Unknown-face handling (Step 12, live):** during a `--live` run the
+  real `UnknownFaceHandler` now consumes every full-chain temporal
+  result and prints report-only console lines — `unknown-face outcome
+  observed (…)` for the first unresolved face in an episode,
+  `suppressed (…; suppressed_frames=N)` for repeats inside the
+  30-second cooldown, and `episode_ended (suppressed_frames=N)` when a
+  temporally verified identity resolves the episode. Console lines
+  only: never crops, embeddings, or identities, and nothing is saved
+  to files or logs by this reporting. A single MATCHED frame is still
+  never treated as verified (the Step 11 streak requirement stands).
 
 The `--live` demo itself never enrolls; enrollment is operator-driven and
 consent-gated by design.

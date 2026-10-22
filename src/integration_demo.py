@@ -691,6 +691,7 @@ def run_live(
     config: LiveModeConfig | None = None,
     window_factory: Callable[[str], object] | None = None,
     max_frames: int | None = 300,
+    monotonic: Callable[[], float] | None = None,
 ) -> int:
     """Run the opt-in, real-component live-camera pipeline loop.
 
@@ -724,6 +725,9 @@ def run_live(
             ``cv2.imshow``-based facade.
         max_frames: Hard frame budget (``None`` = unlimited). A natural
             safety valve for CI/automation; humans close the window.
+        monotonic: Injectable ``() -> float`` clock for the unknown-face
+            episode cooldown (same default-resolution convention as
+            ``run_smoke``); ``None`` uses ``time.monotonic``.
 
     Returns:
         The count of frames actually processed (useful to confirm
@@ -804,6 +808,18 @@ def run_live(
             window = _OpenCvWindow(window_name)
 
         assessor = FaceQualityAssessor()  # real thresholds
+        # Real Step 12 handler (the same instance smoke mode uses):
+        # in-memory episode/cooldown state only — no persistence, no
+        # biometric content. Report-only in live mode (console lines).
+        if monotonic is None:
+            import time as _time
+
+            monotonic = _time.monotonic
+        from src.unknown_face_handler import UnknownFaceConfig, UnknownFaceHandler
+
+        unknown_handler = UnknownFaceHandler(
+            config=UnknownFaceConfig(), clock=monotonic
+        )
         embedder = None
         if prereqs.sface_available:
             from src.face_embedding import FaceEmbedder
@@ -894,13 +910,22 @@ def run_live(
                                 f"[frame {frames_processed:4d}] temporal: "
                                 f"{verification.status.value}"
                             )
+                        # Step 12 (authoritative path, as smoke mode): a
+                        # verified identity resolves an active unknown-face
+                        # episode; unresolved temporal states keep it open.
+                        _report_unknown_outcome(
+                            unknown_handler, verification, frames_processed
+                        )
                     else:
                         # Non-matched frames interrupt the streak (the
                         # verifier's conservative rule, unchanged).
-                        verifier.update(recognition)
+                        verification = verifier.update(recognition)
                         print(
                             f"[frame {frames_processed:4d}] recognition: "
                             f"{recognition.status.value}"
+                        )
+                        _report_unknown_outcome(
+                            unknown_handler, verification, frames_processed
                         )
 
             if window is not None:
@@ -1061,6 +1086,55 @@ def _format_quality_rejection(
             f"threshold={QUALITY.min_sharpness:.1f})"
         )
     return line
+
+
+def _format_unknown_outcome(
+    frame_index: int,
+    outcome: object,
+) -> str:
+    """Format one live-mode unknown-face console line.
+
+    Follows the smoke mode's ``flush_unknown`` checkpoint vocabulary
+    exactly (``unknown-face outcome <status>`` plus the observation in
+    parentheses) with the live ``[frame N] `` prefix; frames suppressed
+    within the active episode are reported deterministically as a
+    ``suppressed_frames`` appendix. Numbers and statuses only — never
+    a crop, embedding, identity, or any persisted artifact.
+    """
+    from src.unknown_face_handler import UnknownFaceOutcome
+
+    assert isinstance(outcome, UnknownFaceOutcome)
+    line = f"unknown-face outcome {outcome.status.value}"
+    if outcome.observation is not None:
+        line += f" ({outcome.observation.value}"
+        if outcome.suppressed_frames:
+            line += f"; suppressed_frames={outcome.suppressed_frames}"
+        line += ")"
+    elif outcome.suppressed_frames:
+        line += f" (suppressed_frames={outcome.suppressed_frames})"
+    return f"[frame {frame_index:4d}] {line}"
+
+
+def _report_unknown_outcome(
+    unknown_handler: object,
+    verification: object,
+    frame_index: int,
+) -> None:
+    """Feed one temporal result to the handler and report unknown-face action.
+
+    The authoritative Step 12 surface exactly as smoke mode uses it
+    (:meth:`UnknownFaceHandler.observe_temporal` on every full-chain
+    frame). Prints only when the outcome carries unknown-face action
+    (``OBSERVED``/``SUPPRESSED``/``EPISODE_ENDED``); ``NO_ACTION``
+    (including a verified identity with no active episode) stays
+    silent. Report-only: no biometric content, no persistence.
+    """
+    from src.unknown_face_handler import UnknownFaceOutcome, UnknownFaceStatus
+
+    outcome = unknown_handler.observe_temporal(verification)  # type: ignore[attr-defined]
+    if outcome.status is not UnknownFaceStatus.NO_ACTION:
+        assert isinstance(outcome, UnknownFaceOutcome)
+        print(_format_unknown_outcome(frame_index, outcome))
 
 
 def recognizer_embed(

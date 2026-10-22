@@ -19,6 +19,7 @@ import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -26,7 +27,16 @@ import pytest
 import src.integration_demo as demo_mod
 from src.config import AppSettings
 from src.face_detection import FaceDetection
-from src.quality import FaceQualityDecision, FaceQualityReason
+from src.quality import (
+    FaceQuality,
+    FaceQualityDecision,
+    FaceQualityReason,
+)
+from src.unknown_face_handler import (
+    UnknownFaceConfig,
+    UnknownFaceHandler,
+    UnresolvedObservation,
+)
 from src.integration_demo import (
     DemoHeadlessEnvironmentError,
     DemoStageOutcome,
@@ -750,3 +760,339 @@ class TestQualityRejectionLineFormatting:
         )
         for forbidden in ("brightness", "pose", "box", "140"):
             assert forbidden not in line
+
+
+# ---------------------------------------------------------------------------
+# Live-mode unknown-face wiring (report-only console; real handler, doubles)
+# ---------------------------------------------------------------------------
+
+
+class TestUnknownOutcomeLiveFormatting:
+    """Exercises ``_format_unknown_outcome`` only — pure, hardware-free.
+
+    Vocabulary mirrors the smoke mode's ``flush_unknown`` checkpoint
+    (``unknown-face outcome <status>`` plus the observation in
+    parentheses); suppressed frames are reported as a deterministic
+    appendix. Counts and statuses only — never biometric content.
+    """
+
+    def test_observed_outcome_with_observation(self) -> None:
+        outcome = UnknownFaceOutcome(
+            status=UnknownFaceStatus.OBSERVED,
+            observation=UnresolvedObservation.UNKNOWN,
+        )
+        assert demo_mod._format_unknown_outcome(1, outcome) == (
+            "[frame    1] unknown-face outcome observed (unknown)"
+        )
+
+    def test_suppressed_outcome_reports_running_count(self) -> None:
+        outcome = UnknownFaceOutcome(
+            status=UnknownFaceStatus.SUPPRESSED,
+            observation=UnresolvedObservation.TEMPORAL_UNVERIFIED,
+            suppressed_frames=2,
+        )
+        assert demo_mod._format_unknown_outcome(3, outcome) == (
+            "[frame    3] unknown-face outcome suppressed "
+            "(temporal_unverified; suppressed_frames=2)"
+        )
+
+    def test_episode_ended_reports_resolved_suppressed_count(self) -> None:
+        outcome = UnknownFaceOutcome(
+            status=UnknownFaceStatus.EPISODE_ENDED,
+            observation=None,
+            suppressed_frames=2,
+        )
+        assert demo_mod._format_unknown_outcome(4, outcome) == (
+            "[frame    4] unknown-face outcome episode_ended "
+            "(suppressed_frames=2)"
+        )
+
+    def test_no_suppressed_frames_add_no_appendix(self) -> None:
+        outcome = UnknownFaceOutcome(
+            status=UnknownFaceStatus.EPISODE_ENDED,
+            observation=None,
+            suppressed_frames=0,
+        )
+        assert demo_mod._format_unknown_outcome(7, outcome) == (
+            "[frame    7] unknown-face outcome episode_ended"
+        )
+
+
+class TestReportUnknownOutcomeHelper:
+    """The authoritative ``observe_temporal`` plumbing used by live mode.
+
+    Uses the *real* ``UnknownFaceHandler`` (in-memory, bounded) with a
+    deterministic clock and real ``TemporalVerificationResult`` objects;
+    nothing is opened, loaded, or persisted.
+    """
+
+    @staticmethod
+    def _handler():
+        ticks = [0.0]
+        return (
+            UnknownFaceHandler(
+                config=UnknownFaceConfig(), clock=lambda: ticks[0]
+            ),
+            ticks,
+        )
+
+    def test_first_unresolved_observation_is_reported_once(self, capsys) -> None:
+        handler, _ = self._handler()
+        result = TemporalVerificationResult(
+            status=TemporalVerificationStatus.INTERRUPTED
+        )
+        demo_mod._report_unknown_outcome(handler, result, 1)
+        assert capsys.readouterr().out == (
+            "[frame    1] unknown-face outcome observed (temporal_unverified)\n"
+        )
+
+    def test_repeat_unresolved_observations_are_suppressed(self, capsys) -> None:
+        handler, _ = self._handler()
+        result = TemporalVerificationResult(
+            status=TemporalVerificationStatus.INTERRUPTED
+        )
+        demo_mod._report_unknown_outcome(handler, result, 1)
+        demo_mod._report_unknown_outcome(handler, result, 2)
+        assert capsys.readouterr().out == (
+            "[frame    1] unknown-face outcome observed (temporal_unverified)\n"
+            "[frame    2] unknown-face outcome suppressed "
+            "(temporal_unverified; suppressed_frames=1)\n"
+        )
+
+    def test_verified_identity_ends_the_episode_without_leaking_identity(
+        self, capsys
+    ) -> None:
+        handler, _ = self._handler()
+        unresolved = TemporalVerificationResult(
+            status=TemporalVerificationStatus.INTERRUPTED
+        )
+        demo_mod._report_unknown_outcome(handler, unresolved, 1)
+        verified = TemporalVerificationResult(
+            status=TemporalVerificationStatus.VERIFIED,
+            employee_id="REH-001",
+            streak_frames=3,
+        )
+        demo_mod._report_unknown_outcome(handler, verified, 4)
+        out = capsys.readouterr().out
+        assert "episode_ended" in out
+        assert "REH-001" not in out
+        assert handler.active_episode_count() == 0
+
+    def test_no_action_is_silent(self, capsys) -> None:
+        handler, _ = self._handler()
+        verified = TemporalVerificationResult(
+            status=TemporalVerificationStatus.VERIFIED,
+            employee_id="REH-001",
+            streak_frames=3,
+        )
+        demo_mod._report_unknown_outcome(handler, verified, 9)
+        assert capsys.readouterr().out == ""
+
+
+class TestLiveUnknownFaceWiring:
+    """Full live-loop wiring with injected doubles — no camera, no model.
+
+    The real ``UnknownFaceHandler`` runs inside ``run_live`` on scripted
+    recognition/verification sequences: an unresolved observation opens
+    an episode (OBSERVED), repeats inside the cooldown suppress it
+    (SUPPRESSED with the running count), a verified identity resolves
+    it (EPISODE_ENDED, exactly once), attendance fires only for the
+    verified frame, and the camera releases cleanly.
+    """
+
+    def _run(self, monkeypatch: pytest.MonkeyPatch, capsys) -> int:
+        output = capsys.readouterr()  # clear the buffer
+
+        monkeypatch.setattr(
+            demo_mod,
+            "live_prerequisites",
+            lambda: SimpleNamespace(
+                yunet_available=True,
+                yunet_path=Path("models/yunet.onnx"),
+                sface_available=True,
+                sface_path=Path("models/sface.onnx"),
+            ),
+        )
+
+        class FakeDetector:
+            def load(self) -> None:
+                pass
+
+            def detect(self, frame: object) -> list[object]:
+                return [object()]  # content unused (assessor is faked)
+
+        monkeypatch.setattr(demo_mod, "FaceDetector", FakeDetector)
+
+        accept_quality = FaceQuality(
+            decision=FaceQualityDecision.ACCEPT,
+            reason=None,
+            sharpness=200.0,
+            brightness=128.0,
+            pose_yaw_ratio=None,
+            pose_pitch_ratio=None,
+            box=(0, 0, 32, 32),
+        )
+
+        class FakeAssessor:
+            def assess_frame_faces(self, detections: object) -> None:
+                return None  # exactly one face: policy satisfied
+
+            def assess_face(self, frame: object, detection: object) -> FaceQuality:
+                return accept_quality
+
+        monkeypatch.setattr(demo_mod, "FaceQualityAssessor", FakeAssessor)
+
+        frames = [np.zeros((48, 48, 3), dtype=np.uint8) for _ in range(5)]
+        released = []
+
+        class FakeCameraService:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                self._idx = 0
+
+            def open(self) -> None:
+                pass
+
+            @property
+            def is_open(self) -> bool:
+                return True
+
+            def read_frame(self):
+                if self._idx >= len(frames):
+                    return False, None
+                self._idx += 1
+                return True, frames[self._idx - 1]
+
+            def release(self) -> None:
+                released.append(True)
+
+        monkeypatch.setattr("src.camera.CameraService", FakeCameraService)
+
+        class FakeEmbedder:
+            def load(self) -> None:
+                pass
+
+        monkeypatch.setattr("src.face_embedding.FaceEmbedder", FakeEmbedder)
+
+        def matched(employee_id: str) -> RecognitionResult:
+            return RecognitionResult(
+                status=RecognitionStatus.MATCHED,
+                employee_id=employee_id,
+                best_score=0.5,
+                runner_up_score=None,
+                margin=None,
+                reason="scripted",
+            )
+
+        unrecognized = RecognitionResult(
+            status=RecognitionStatus.UNKNOWN,
+            employee_id=None,
+            best_score=0.1,
+            runner_up_score=None,
+            margin=None,
+            reason="scripted",
+        )
+        recognitions = [
+            unrecognized,
+            matched("REH-001"),
+            matched("REH-001"),
+            matched("REH-001"),
+            unrecognized,
+        ]
+
+        class FakeRecognizer:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def recognize(self, crop: object) -> RecognitionResult:
+                return recognitions.pop(0)
+
+        monkeypatch.setattr(
+            "src.face_recognition.FaceRecognitionService", FakeRecognizer
+        )
+
+        verifications = [
+            TemporalVerificationResult(
+                status=TemporalVerificationStatus.INTERRUPTED
+            ),
+            TemporalVerificationResult(
+                status=TemporalVerificationStatus.COLLECTING
+            ),
+            TemporalVerificationResult(
+                status=TemporalVerificationStatus.COLLECTING
+            ),
+            TemporalVerificationResult(
+                status=TemporalVerificationStatus.VERIFIED,
+                employee_id="REH-001",
+                streak_frames=3,
+            ),
+            TemporalVerificationResult(
+                status=TemporalVerificationStatus.INTERRUPTED
+            ),
+        ]
+
+        class FakeVerifier:
+            def update(self, result: object) -> TemporalVerificationResult:
+                return verifications.pop(0)
+
+        monkeypatch.setattr(
+            "src.temporal_verification.TemporalVerifier", FakeVerifier
+        )
+
+        attendance_calls = []
+
+        class FakeAttendance:
+            def update(self, verification: object) -> SimpleNamespace:
+                attendance_calls.append(verification)
+                return SimpleNamespace(status=SimpleNamespace(value="check_in"))
+
+        monkeypatch.setattr("src.attendance.AttendanceEngine", FakeAttendance)
+
+        frames_done = run_live(
+            settings=AppSettings(),
+            config=LiveModeConfig(open_window=False),
+            max_frames=5,
+            monotonic=lambda: 1000.0,  # cooldown never expires mid-script
+        )
+        assert frames_done == 5
+        assert released == [True]
+        # Exactly one attendance decision — for the verified frame only.
+        assert len(attendance_calls) == 1
+        assert attendance_calls[0].employee_id == "REH-001"
+
+        out = capsys.readouterr().out
+        assert (
+            "[frame    1] unknown-face outcome observed (temporal_unverified)\n"
+            in out
+        )
+        assert (
+            "[frame    2] unknown-face outcome suppressed "
+            "(temporal_unverified; suppressed_frames=1)\n" in out
+        )
+        assert (
+            "[frame    3] unknown-face outcome suppressed "
+            "(temporal_unverified; suppressed_frames=2)\n" in out
+        )
+        assert (
+            "[frame    4] unknown-face outcome episode_ended "
+            "(suppressed_frames=2)\n" in out
+        )
+        assert (
+            "[frame    5] unknown-face outcome observed (temporal_unverified)\n"
+            in out
+        )
+        # The verified frame's identity is printed by the existing
+        # temporal/attendance lines; the unknown-face line never carries it.
+        ended_line = [
+            l for l in out.splitlines()
+            if "episode_ended" in l
+        ]
+        assert ended_line == [
+            "[frame    4] unknown-face outcome episode_ended "
+            "(suppressed_frames=2)"
+        ]
+        return frames_done
+
+    def test_live_wiring_transitions_and_bounded_attendance(
+        self, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        self._run(monkeypatch, capsys)

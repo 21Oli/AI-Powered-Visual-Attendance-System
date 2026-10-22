@@ -3,6 +3,68 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 20 — unknown-face handling wired into live mode (2026-10-22)
+
+**Report-only console wiring of the existing Step 12 handler; focused
+suite 42 passed, full suite 811 passed (exit 0 each, captured under
+`pipefail`); no camera opened, no live demo run, no biometric artifact
+accessed, created, or modified; nothing staged or committed.**
+
+**Implemented (composition only — no new policy, threshold, config, or
+persistence)**
+
+* `src/integration_demo.py` (`run_live`): the live loop now constructs
+  the real `UnknownFaceHandler` once per session (frozen default
+  `UnknownFaceConfig`: 30 s non-refreshing cooldown, `max_sessions` LRU
+  bound, in-memory only) and feeds it every full-chain frame's temporal
+  verification result through the authoritative `observe_temporal`
+  contract — the exact pattern `run_smoke` already uses. Deterministic
+  report-only console lines follow the smoke checkpoint vocabulary
+  (`flush_unknown`): `unknown-face outcome observed (…)` on the first
+  unresolved observation of an episode, `suppressed (…;
+  suppressed_frames=N)` inside the cooldown, and `episode_ended
+  (suppressed_frames=N)` when a temporally verified identity resolves
+  the episode. `NO_ACTION` stays silent (including a verified identity
+  with no active episode); the employee ID never appears on an
+  unknown-face line.
+* Scope boundary preserved honestly: frames that never reach the full
+  chain (no faces, multiple faces, quality-rejected, or the partial
+  no-sface demo) are not fed to the handler and never have temporal
+  evidence fabricated for them — the live loop did not run the
+  recognizer on such frames before this step and still does not, so
+  existing streak semantics across skipped frames are unchanged.
+* `run_live` gained a keyword-only `monotonic` clock parameter (same
+  default-resolution convention as `run_smoke`) so hardware-free tests
+  pin cooldown boundaries deterministically; production default is
+  unchanged (`time.monotonic`).
+* `tests/test_integration_demo.py`: 9 focused additions — the pure
+  line formatter (observed/suppressed/episode-ended exact strings,
+  count appendix, no-appendix case), the report helper against the
+  real handler with a deterministic clock (observed once, repeats
+  suppressed with the running count, verified identity resolves the
+  episode with EPISODE_ENDED and without leaking the ID, NO_ACTION
+  silence), and a full live-loop wiring test with injected doubles
+  (no camera, no real model inference) asserting the exact console
+  sequence OBSERVED → SUPPRESSED → SUPPRESSED → EPISODE_ENDED → fresh
+  OBSERVED, exactly one attendance decision (verified frame only;
+  unresolved observations can never authorize an event), and clean
+  camera release. Attendance, recognition, temporal, quality,
+  duplicate-suppression, and cleanup behavior are otherwise unchanged.
+* README (live-mode section) and CHANGELOG (0.19.0 entry) document the
+  live unknown-face reporting and its biometric discipline.
+
+**Known limitations / honest boundaries**
+
+* The wiring is verified by automated hardware-free tests only; a real
+  supervised live run of the unknown-person episode remains the open
+  operator rehearsal (consented, bounded `--max-frames`, empty store
+  not required — a non-empty store with REH-001 is preferred so an
+  unknown face is judged as UNKNOWN/AMBIGUOUS rather than
+  NO_CANDIDATES). Nothing was run this step.
+* Episode state is handler-instance lifetime (Step 12 semantics
+  unchanged); there is no durable store, by design (Phase 2 owns
+  durable unknown-face/attendance storage).
+
 ## Step 19 — camera frame-size override on the operator enrollment CLI (2026-10-21)
 
 **Fix-record for a measured live-workflow blocker; automated checks
@@ -1236,13 +1298,17 @@ is **not** an attendance event — recording arrives in Step 13.
 | 06 | Face quality assessment | ✅ Complete | Verified 2026-10-10 — 271/271 tests pass (56 new quality tests + 4 landmark regression tests). Details below. |
 | 07 | Multi-image face enrollment | ✅ Complete | Verified 2026-10-11 — 309/309 tests pass (38 new enrollment tests); new `max_capture_attempts` constant in `EnrollmentConfig`. Details below. |
 | 08 | Face embedding generation | ✅ Complete | Verified 2026-10-11 — 342/342 tests pass (33 new embedding tests); SFace backend via injectable `FaceEmbedder`, real model artifact pending. Details below. |
-| 09 | Embedding storage | ⬜ Not started | |
-| 10 | Face recognition | ⬜ Not started | |
-| 11 | Temporal / multi-frame verification | ⬜ Not started | |
-| 12 | Unknown-face handling | ⬜ Not started | |
-| 13 | Attendance event engine | ⬜ Not started | |
-| 14 | Testing & evaluation | ⬜ Not started | |
-| 15 | Phase 1 integration demo | ⬜ Not started | |
+| 09 | Embedding storage | ✅ Complete | Verified 2026-10-12 — 421/421 tests pass (79 new embedding-storage tests). Details below. |
+| 10 | Face recognition | ✅ Complete | Verified 2026-10-12 — 495/495 tests pass (74 new recognition tests); real SFace inference remains, by recorded honesty, in-suite-unverified. Details below. |
+| 11 | Temporal / multi-frame verification | ✅ Complete | Verified 2026-10-13 — 546/546 tests pass (51 new temporal-verification tests). Details below. |
+| 12 | Unknown-face handling | ✅ Complete | Verified 2026-10-13 — 602/602 tests pass (56 new unknown-face-handler tests). Details below. |
+| 13 | Attendance event engine | ✅ Complete | Verified 2026-10-13 — 654/654 tests pass (52 new attendance tests). Details below. |
+| 14 | Testing & evaluation | ◐ Software regression green; empirical CV eval BLOCKED | Regression suite green and all 11 notebook code cells executed clean (2026-10-13); detection/recognition accuracy on real footage NOT RUN / NOT MEASURED (no annotated dataset, no sface.onnx at recording time) — recorded honestly, not a code failure. Status record below. |
+| 15 | Phase 1 integration demo | ◐ Integration & smoke green; real-camera demo not exercised at recording time | Verified 2026-10-14 — 674/674 full suite (root + external CWD), 20 focused smoke tests; the live acquisition chain was later log-backed 2026-10-20 (models load, camera acquires/releases — record above). Status record below. |
+
+(Rows 09–15 above were reconciled on 2026-10-22 from the authoritative
+per-step records below; a stale snapshot had erroneously shown them
+"Not started".)
 
 ## Phases 2–7
 

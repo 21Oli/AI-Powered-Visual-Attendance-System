@@ -4,6 +4,18 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [0.19.0] — 2026-10-22 — Phase 1, Step 20: Unknown-face handling wired into live mode (report-only, real handler)
+
+### Added
+
+* `src/integration_demo.py` (`run_live`): the live pipeline now integrates the existing `UnknownFaceHandler` (Step 12) through its authoritative `observe_temporal` contract — the same pattern smoke mode already uses. The real handler is constructed once per live session (default frozen `UnknownFaceConfig` with the bounded 30 s non-refreshing cooldown and `max_sessions` LRU cap; in-memory only, no persistence). On every full-chain frame (single face, quality-accepted, recognizer available) the frame's temporal verification result is fed to the handler, and live console output gains deterministic report-only lines: `unknown-face outcome observed (…)` for the first unresolved observation of an episode, `suppressed (…; suppressed_frames=N)` for repeats inside the cooldown, and `episode_ended (suppressed_frames=N)` when a temporally verified identity resolves the episode. `NO_ACTION` (nothing unknown, or a verified identity with no active episode) stays silent. Frames without detection/quality rejection never fabricate temporal evidence (the live loop never ran the recognizer on them before and still does not); single MATCHED frames remain non-verified per the Step 11 streak contract; recognition, temporal verification, attendance decisions, duplicate suppression, and camera cleanup are unchanged.
+* `run_live` gained a keyword-only `monotonic` injectable clock (same default-resolution convention as `run_smoke`; default `time.monotonic`) solely so the episode-cooldown boundaries stay deterministic in hardware-free tests.
+* `tests/test_integration_demo.py`: 9 focused hardware-free tests — pure `unknown-face outcome` formatting (observed/suppressed/episode-ended, count appendix, no-appendix cases); the report helper against the real `UnknownFaceHandler` with a deterministic clock (first unresolved observation reported once, repeats suppressed with the running count, a verified identity resolving the episode with EPISODE_ENDED and without leaking the employee ID into the unknown-face line, and NO_ACTION silence); and a full live-loop wiring test with injected camera/detector/assessor/embedder/recognizer/verifier/attendance doubles asserting the exact OBSERVED → SUPPRESSED → SUPPRESSED → EPISODE_ENDED → fresh OBSERVED console sequence, exactly one attendance decision (verified frame only), and clean camera release.
+
+### Notes
+
+* Report-only: the unknown-face lines print statuses and suppressed-frame counts only — never crops, embeddings, identities, or other quality metrics, and nothing is written to files or logs by this wiring. The live demo's attendance semantics are untouched: an unresolved observation can never authorize an event.
+
 ## [0.18.0] — 2026-10-20 — Phase 1, Step 18: Operator deletion CLI (preview → two-stage confirmation → derived-path scoped removal → verified absence)
 
 ### Added
