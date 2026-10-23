@@ -92,6 +92,26 @@ class TestConstructionAndPaths:
         assert result.events == ()
         assert result.incomplete_trailing_record is False
 
+    def test_load_zero_byte_journal_is_empty_history(
+        self, tmp_path: Path
+    ) -> None:
+        _write_journal(tmp_path, "")
+        result = _make_store(tmp_path).load_events()
+        assert result.events == ()
+        assert result.incomplete_trailing_record is False
+
+    def test_load_journal_path_directory_is_empty_history(
+        self, tmp_path: Path
+    ) -> None:
+        # Documented boundary: a directory at the journal path is not a
+        # journal file; loading normalizes it to the empty history
+        # exactly like a missing file (and appending raises typed —
+        # pinned in TestAppendFailures).
+        (tmp_path / "attendance" / JOURNAL_FILENAME).mkdir(parents=True)
+        result = _make_store(tmp_path).load_events()
+        assert result.events == ()
+        assert result.incomplete_trailing_record is False
+
 
 # ---------------------------------------------------------------------------
 # Append basics and round-trip
@@ -234,6 +254,48 @@ class TestAppendFailures:
         store = _make_store(tmp_path)
         with pytest.raises(AttendanceStorePersistenceError):
             store.append(_event())
+
+    @pytest.mark.parametrize("field", ["employee_id", "event_id"])
+    def test_append_rejects_lone_surrogate_id_with_typed_error(
+        self, tmp_path: Path, field: str
+    ) -> None:
+        # A lone surrogate passes frozen event construction (any
+        # non-empty str) but cannot be encoded as UTF-8 JSON Lines. The
+        # store must raise the documented typed *input* error, preserve
+        # the encoding failure as the cause, and leave the journal —
+        # including previously persisted records — byte-identical (no
+        # partial data may reach the file).
+        store = _make_store(tmp_path)
+        store.append(_event())
+        journal = tmp_path / "attendance" / JOURNAL_FILENAME
+        before = journal.read_bytes()
+        kwargs = {field: "a\udcffb"}
+        target = _event(
+            event_id=kwargs.get("event_id", _EVENT_ID_B),
+            employee_id=kwargs.get("employee_id", _EMPLOYEE),
+        )
+        with pytest.raises(AttendanceStoreInputError) as excinfo:
+            store.append(target)
+        assert "UTF-8 journal encoding" in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, UnicodeEncodeError)
+        assert journal.read_bytes() == before
+        # The journal still loads cleanly with exactly the prior record.
+        result = store.load_events()
+        assert [event.event_id for event in result.events] == [_EVENT_ID_A]
+        assert result.incomplete_trailing_record is False
+
+    def test_append_to_journal_path_directory_raises_typed_error(
+        self, tmp_path: Path
+    ) -> None:
+        # A directory at the journal path is not a journal (documented
+        # boundary): appends fail typed, nothing is written, and the
+        # directory is left untouched.
+        journal = tmp_path / "attendance" / JOURNAL_FILENAME
+        journal.mkdir(parents=True)
+        store = _make_store(tmp_path)
+        with pytest.raises(AttendanceStorePersistenceError):
+            store.append(_event())
+        assert journal.is_dir()
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +491,21 @@ class TestIncompleteTrailingFragment:
         _write_journal(tmp_path, _valid_record(_EVENT_ID_A) + "\n")
         result = _make_store(tmp_path).load_events()
         assert result.incomplete_trailing_record is False
+
+    def test_load_valid_record_missing_only_newline_is_excluded_and_flagged(
+        self, tmp_path: Path
+    ) -> None:
+        # The load-side boundary of the salvage policy: a trailing
+        # fragment that is a *fully valid* record (missing only its
+        # newline) is still excluded from the events and reported —
+        # the leniency boundary is the newline, never the content.
+        _write_journal(
+            tmp_path,
+            _valid_record(_EVENT_ID_A) + "\n" + _valid_record(_EVENT_ID_B),
+        )
+        result = _make_store(tmp_path).load_events()
+        assert [event.event_id for event in result.events] == [_EVENT_ID_A]
+        assert result.incomplete_trailing_record is True
 
     def test_append_salvages_complete_fragment_missing_only_newline(
         self, tmp_path: Path

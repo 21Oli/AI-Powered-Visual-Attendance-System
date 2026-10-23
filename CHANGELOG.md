@@ -17,6 +17,7 @@ as done. Format based on Keep a Changelog.
 ### Notes
 
 * Storage only in this step: the store is not wired into the live demo or the attendance engine yet (next phase step), and no existing attendance behavior changed — the full suite passes unchanged (858 tests = 811 prior + 47 new). Honest limits recorded: no cross-process file locking or `event_id` dedup (retry/once-policy belongs to the composition layer), fsync covers the file — not the directory entry — and there is no query/audit API yet; empirical CV evaluation remains separately blocked and untouched.
+* Post-audit fix (same day): an ID carrying a lone Unicode surrogate passes event construction but cannot be UTF-8 encoded — `append()` now raises the documented typed `AttendanceStoreInputError` (cause preserved, journal verified byte-identical, no partial data) instead of an unwrapped `UnicodeEncodeError`; four new boundary tests pin surrogate rejection, zero-byte-journal loading, directory-at-journal-path behavior in both directions, and load of a complete valid trailing fragment missing only its newline (full suite now 864 tests).
 
 ## [0.19.0] — 2026-10-22 — Phase 1, Step 20: Unknown-face handling wired into live mode (report-only, real handler)
 

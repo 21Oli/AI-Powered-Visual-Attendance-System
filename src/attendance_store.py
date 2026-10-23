@@ -264,8 +264,12 @@ class AttendanceEventStore:
 
         Raises:
             AttendanceStoreInputError: ``event`` is not an
-                ``AttendanceEvent`` (nothing is written, nothing is
-                repaired).
+                ``AttendanceEvent``, or the event's fields cannot be
+                represented in the store's UTF-8 journal encoding (for
+                example an ID carrying a lone Unicode surrogate — such
+                strings pass event construction but cannot be encoded).
+                In both cases nothing is written and nothing is
+                repaired.
             AttendanceStorePersistenceError: directory creation, torn-tail
                 repair, the append write, flush, or fsync failed (see the
                 module docstring for the unconfirmed-record honesty note).
@@ -294,6 +298,18 @@ class AttendanceEventStore:
                 os.fsync(handle.fileno())
         except AttendanceStoreError:
             raise
+        except UnicodeEncodeError as exc:
+            # Invalid input, not persistence: the event passed frozen
+            # event construction, but its fields cannot be represented
+            # in the store's UTF-8 journal encoding (e.g. an ID carrying
+            # a lone surrogate — Python encodes before buffering, so no
+            # partial bytes reached the journal). Raise the documented
+            # typed input error with the original cause preserved; never
+            # swallow, never mislabel as an I/O failure.
+            raise AttendanceStoreInputError(
+                "event fields are not representable in the UTF-8 journal "
+                f"encoding for event {event.event_id!r}: {exc}"
+            ) from exc
         except OSError as exc:  # noqa: BLE001 - wrap filesystem failure
             raise AttendanceStorePersistenceError(
                 f"attendance journal append failed for event "
@@ -327,6 +343,12 @@ class AttendanceEventStore:
                 schema versions — the typed subclass names it).
             UnsupportedJournalSchemaVersionError: a record carries a
                 future/unknown ``schema_version``.
+
+        Documented boundary: a *directory* (or any non-regular file) at
+        the journal path is not a journal — loading normalizes it to
+        the empty history exactly like a missing file; a later append
+        raises the typed persistence error (the path cannot be opened)
+        without writing anything.
         """
         journal = self.journal_path
         if not journal.is_file():

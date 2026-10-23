@@ -5,6 +5,19 @@ Updated after every verified step — never ahead of implementation.
 
 ## Step 21 — durable attendance event store (Phase 2, P2-1) (2026-10-22)
 
+**Post-audit error-contract fix (2026-10-22):** an event ID carrying a
+lone Unicode surrogate passes frozen event construction but fails UTF-8
+encoding at write time, previously escaping as an unwrapped
+`UnicodeEncodeError`. `append()` now raises the documented typed
+`AttendanceStoreInputError` (cause preserved; invalid input, not a
+persistence failure — Python encodes before buffering, so verified
+byte-identical journal, no partial data). New boundary tests: surrogate
+ID rejection (both ID fields), zero-byte journal load, directory at the
+journal path (load = empty history; append = typed persistence error,
+pinned in both directions), and a *complete valid* trailing fragment
+missing only its newline excluded-and-flagged on load. Focused suite 53
+passed, full suite 864 passed (exit 0 each, captured under `pipefail`).
+
 **Storage only — the live demo is NOT wired to the store in this step.
 Focused suite 47 passed, full suite 858 passed (exit 0 each, captured
 under `pipefail`); no camera opened, no enrollment/deletion run,
