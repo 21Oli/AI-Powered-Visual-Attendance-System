@@ -204,10 +204,15 @@ python tools/delete_enrollment.py --employee-id "EMP-0042" --execute --confirm-d
 ## Attendance event storage
 
 Accepted attendance events are durably journalled as JSON Lines at
-`data/attendance/events.jsonl` (`AttendanceEventStore`, storage only —
-the live demo is not wired to it yet). One record per event carries
-exactly `schema_version`, `event_id`, `employee_id`, `event_type`, and
-`occurred_at` (UTC) — never images, embeddings, scores, or
+`data/attendance/events.jsonl` (`AttendanceEventStore`). A composition
+service (`DurableAttendanceService`) feeds engine decisions to the
+store and reports exactly four outcomes — no event, durably persisted,
+persistence rejected before any write (confirmed failure), or
+persistence unconfirmed (original error preserved; no automatic
+retry). The live demo is not wired to persistence yet. One record per
+event carries exactly `schema_version`, `event_id`, `employee_id`,
+`event_type`, and `occurred_at` (UTC) — never images, embeddings,
+scores, or
 unknown-person data. Appends use flush+fsync per record (a failed write
 is reported as an unconfirmed record); an interrupted append can leave
 an incomplete trailing line, which loading excludes *and reports*

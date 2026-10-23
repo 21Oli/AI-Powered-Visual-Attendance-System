@@ -537,6 +537,46 @@ reason when evidence is unavailable.
   tests; duplicate-suppression correctness is in-software and
   explicitly not a durable/cross-process exactly-once claim (D16).
 
+### D19 — Durable attendance composition: engine and store stay authoritative, four explicit outcome states, no automatic retry (Phase 2, P2-2)
+
+`src/attendance_persistence.py` (`DurableAttendanceService`) composes
+the Step 13 engine and the P2-1 store without changing either. The
+single new decision is what to do when a created event fails to
+persist — answered explicitly, never by presenting an uncertain write
+as a durable check-in.
+
+* **Composition, not duplication.** The temporal result is passed to
+  the engine unmodified and the decision is consumed as produced; the
+  event object, if any, is appended exactly once via the store's
+  public `append`. No decision logic, cooldown, threshold, or schema
+  logic is re-implemented here. Collaborators are validated
+  structurally (callable `update`/`append` — the engine's injectable
+  pattern), so doubles can replace them in tests; construction does
+  no filesystem work.
+* **Four explicit outcome states** on the frozen
+  `DurableAttendanceOutcome`: `NO_EVENT` (engine decided without an
+  event — nothing appended, decision carried verbatim), `PERSISTED`
+  (append returned; fsync confirmed), `PERSISTENCE_REJECTED`
+  (append raised `AttendanceStoreInputError` — a **confirmed**
+  failure: the store's input rejections occur before any write, so
+  the journal is provably unchanged and the record is definitively
+  absent), and `PERSISTENCE_UNCONFIRMED` (any other store error — an
+  **uncertain** outcome: bytes may or may not have reached the
+  journal). Both failure states carry the original exception object
+  unmodified alongside the exact event and a short reason.
+* **No automatic retry (deliberate).** After an uncertain append the
+  journal may already hold the record (appends cannot be retracted),
+  so a silent re-append could duplicate it; reconciliation by
+  `event_id` belongs to the caller/operator layer. Engine input
+  errors propagate unchanged (no append); only the store's documented
+  error family maps to the unconfirmed state — other store exceptions
+  propagate unlabeled as programming errors.
+* **Scope honesty.** Live mode, smoke mode, and the CLIs are not
+  wired to this service in P2-2 (no caller yet); cooldown anchors
+  remain engine-instance-lifetime in P2-2 (restart recovery arrived
+  in P2-3, D20); check-out/daily-dedup business rules remain future
+  Phase 2 steps.
+
 ### D4 — Dependency licensing note
 
 `insightface`'s library code is MIT, but its pretrained model packages
@@ -598,3 +638,59 @@ live-mode wiring.
   directory entry — and there is no query/audit API yet (a later P2
   tool reads the journal read-only). Store touches no thresholds, no
   engine behavior, and no live-mode wiring in P2-1.
+
+### D20 — Restart recovery of cooldown anchors: read-only replay, wall-to-wall ages, explicit clock-skew policy (Phase 2, P2-3)
+
+`src/attendance_recovery.py` (`recover_cooldown_anchors`) replays
+persisted attendance events into a fresh engine's cooldown state so
+duplicate suppression survives a restart. Replay is read-only and the
+engine stays the single cooldown authority; the journal schema, the
+P2-1 store, and the P2-2 outcome contract are unchanged.
+
+* **Additive engine API only.**
+  `AttendanceEngine.restore_suppression_anchor(employee_id,
+  *, elapsed_seconds)` places one anchor at
+  `monotonic_now - elapsed_seconds` in the *current run's* monotonic
+  domain and returns `False` when the age already meets or exceeds
+  the configured cooldown (expired — equivalent to no anchor, nothing
+  stored). Validation, bounded-state (LRU eviction beyond
+  `max_tracked_employees`), and the cooldown constant are exactly the
+  engine's own; a wall timestamp is never stored as or compared as a
+  monotonic value.
+* **Replay semantics (deterministic).** The journal is loaded in full
+  through the store's `load_events()` **before** any engine mutation,
+  so a failed load can never leave a partially recovered engine;
+  `CorruptAttendanceJournalError` /
+  `UnsupportedJournalSchemaVersionError` propagate unchanged (a failed
+  load is never treated as an empty journal). Only `CHECK_IN` records
+  count (explicit allowlist — future event types never silently
+  affect check-in suppression); per employee the latest record by UTC
+  `occurred_at` wins, ties resolved by journal position (later wins) —
+  deterministic under out-of-order timestamps and under the store's
+  documented duplicate-`event_id` retry limitation (duplicates carry
+  identical timestamps and collapse to one anchor). Restores apply in
+  first-seen journal order. A torn trailing fragment is excluded by
+  the store's documented load semantics and never restores an anchor;
+  the `incomplete_trailing_record` flag is passed through on the
+  frozen `CooldownRecoveryReport` (restored IDs, expired and clamped
+  counts, records scanned). No event is created and nothing is
+  appended; the journal bytes are never modified.
+* **Clock-skew policy (explicit, conservative).** Ages are measured
+  wall-to-wall (`wall_now - occurred_at`, both UTC-aware; `wall_now`
+  is supplied by the caller — recovery reads no hidden clock) and
+  translated once into the monotonic domain. Wall clock moved
+  **backward** across a restart (event dated after `wall_now`): the
+  negative age is clamped to zero — the employee is suppressed for
+  the full cooldown from the recovery instant, erring on the
+  no-duplicate side (worst case one *delayed* legitimate check-in,
+  never a duplicate) and preserving the engine's anchor≤now
+  invariant. Wall clock moved **forward**: the age inflates and an
+  expired cooldown is simply not restored — worst case one additional
+  check-in, exactly the engine's documented bounded-state worst case;
+  no invented compensation is applied. Honest limit: cross-run
+  cooldown precision is bounded by wall-clock reliability between
+  runs; within a run, suppression remains monotonic-exact.
+* **Scope honesty.** Recovery is not wired into live mode (no
+  caller); it neither retries writes nor appends anything, and its
+  log lines carry counts only — never employee IDs, never biometric
+  content.

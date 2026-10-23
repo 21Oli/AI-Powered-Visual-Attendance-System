@@ -426,17 +426,7 @@ class AttendanceEngine:
                 )
 
         # -- Duplicate suppression (monotonic; boundary exact) ---------
-        now_monotonic = self._monotonic_clock()
-        if (
-            not isinstance(now_monotonic, (int, float))
-            or isinstance(now_monotonic, bool)
-            or not math.isfinite(now_monotonic)
-        ):
-            raise AttendanceInputError(
-                "monotonic_clock must return a real finite number of "
-                f"seconds, got {now_monotonic!r}"
-            )
-        now_monotonic = float(now_monotonic)
+        now_monotonic = self._monotonic_now()
         anchor = self._anchors.get(employee_id)
         if anchor is not None:
             elapsed = now_monotonic - anchor
@@ -518,9 +508,106 @@ class AttendanceEngine:
         """Number of employees currently holding a suppression anchor."""
         return len(self._anchors)
 
+    def restore_suppression_anchor(
+        self, employee_id: str, *, elapsed_seconds: float
+    ) -> bool:
+        """Restore one cooldown anchor from a previous run (P2-3 only).
+
+        Restart recovery translates a persisted wall-clock event
+        timestamp into this run's monotonic domain **once**, here: the
+        anchor is placed at ``monotonic_now - elapsed_seconds`` so a
+        suppressed decision expires exactly
+        ``check_in_cooldown_seconds - elapsed_seconds`` from now. A
+        wall timestamp is never stored as, or compared as, a monotonic
+        value — the age is measured wall-to-wall by the caller and
+        handed over as an elapsed-seconds quantity.
+
+        This is deliberately additive to :meth:`update`: the engine
+        remains the single cooldown authority (its configured
+        ``check_in_cooldown_seconds`` decides expiry here too), the
+        anchor dict is never bypassed, and the bounded-state policy is
+        identical (restoring beyond ``max_tracked_employees`` evicts
+        the least-recently-anchored employee, exactly as a new event
+        would).
+
+        Args:
+            employee_id: Exact employee identifier (never transformed).
+            elapsed_seconds: Wall-clock seconds elapsed since the
+                persisted event being restored. Must be a real, finite,
+                **non-negative** number — a negative value would place
+                the anchor in the future of the monotonic domain and is
+                rejected (callers clamp future-dated records before
+                calling; see ``src/attendance_recovery.py`` for the
+                documented clock-skew policy).
+
+        Returns:
+            ``True`` when an (unexpired) anchor was restored;
+            ``False`` when ``elapsed_seconds`` is already at or beyond
+            the configured cooldown — the cooldown has deterministically
+            expired across the restart, there is nothing left to
+            restore, and the engine state is left untouched.
+
+        Raises:
+            AttendanceInputError: invalid employee ID or elapsed value.
+                Validation happens **before** any state change.
+        """
+        if not isinstance(employee_id, str) or not employee_id.strip():
+            raise AttendanceInputError(
+                "employee_id must be a non-empty str, got "
+                f"{type(employee_id).__name__}"
+            )
+        if (
+            not isinstance(elapsed_seconds, (int, float))
+            or isinstance(elapsed_seconds, bool)
+            or not math.isfinite(elapsed_seconds)
+            or elapsed_seconds < 0
+        ):
+            raise AttendanceInputError(
+                "elapsed_seconds must be a real finite non-negative "
+                f"number of seconds, got {elapsed_seconds!r}"
+            )
+        age = float(elapsed_seconds)
+        if age >= self._cooldown:
+            # Expired across the restart (deterministic): a restored
+            # anchor older than the cooldown is indistinguishable from
+            # no anchor — nothing is stored, nothing evicted.
+            _logger.debug(
+                "anchor restore skipped: %.1f s >= cooldown %.1f s "
+                "(expired across the restart)",
+                age,
+                self._cooldown,
+            )
+            return False
+        now_monotonic = self._monotonic_now()
+        if len(self._anchors) >= self._config.max_tracked_employees:
+            if employee_id not in self._anchors:
+                self._evict_lru_anchor()
+        self._anchors[employee_id] = now_monotonic - age
+        _logger.debug(
+            "suppression anchor restored (%.1f s of %.1f s cooldown "
+            "remaining)",
+            self._cooldown - age,
+            self._cooldown,
+        )
+        return True
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _monotonic_now(self) -> float:
+        """Read and validate the injected monotonic clock (no state)."""
+        value = self._monotonic_clock()
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+        ):
+            raise AttendanceInputError(
+                "monotonic_clock must return a real finite number of "
+                f"seconds, got {value!r}"
+            )
+        return float(value)
 
     def _build_event(self, employee_id: str) -> AttendanceEvent:
         """Materialize one validated event (no state mutation here).

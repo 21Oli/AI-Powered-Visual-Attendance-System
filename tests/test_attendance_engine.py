@@ -493,3 +493,85 @@ class TestBoundedStateAndHygiene:
         )
         assert completed.returncode == 0
         assert "clean" in completed.stdout
+
+
+# ---------------------------------------------------------------------------
+# P2-3: restore_suppression_anchor (restart recovery, additive API)
+# ---------------------------------------------------------------------------
+
+
+class TestRestoreSuppressionAnchor:
+    def test_restores_anchor_in_current_monotonic_domain(self, clocks) -> None:
+        h = engine(clocks, cooldown=10.0)
+        clocks.mono = 100.0
+        # Age 4 s of a 10 s cooldown → anchor at 96 → expires at 106.
+        assert h.restore_suppression_anchor("007", elapsed_seconds=4.0)
+        assert h.tracked_employee_count() == 1
+        clocks.mono = 105.0
+        assert h.update(verified()).status is AttendanceDecisionStatus.SUPPRESSED
+        clocks.mono = 106.0
+        assert h.update(verified()).status is AttendanceDecisionStatus.EVENT_CREATED
+
+    def test_expired_age_returns_false_and_touches_nothing(self, clocks) -> None:
+        h = engine(clocks, cooldown=10.0)
+        clocks.mono = 100.0
+        assert h.restore_suppression_anchor("007", elapsed_seconds=10.0) is False
+        assert h.restore_suppression_anchor("007", elapsed_seconds=99.0) is False
+        assert h.tracked_employee_count() == 0
+        # No anchor → immediate fresh event, exactly as after expiry.
+        assert h.update(verified()).status is AttendanceDecisionStatus.EVENT_CREATED
+
+    @pytest.mark.parametrize(
+        "elapsed",
+        [-1.0, float("nan"), float("inf"), float("-inf"), True, "5", None],
+    )
+    def test_invalid_elapsed_rejected_before_any_state(
+        self, clocks, elapsed
+    ) -> None:
+        h = engine(clocks, cooldown=10.0)
+        with pytest.raises(AttendanceInputError):
+            h.restore_suppression_anchor("007", elapsed_seconds=elapsed)
+        assert h.tracked_employee_count() == 0
+
+    @pytest.mark.parametrize("employee_id", ["", "   ", None, 7])
+    def test_invalid_employee_id_rejected(self, clocks, employee_id) -> None:
+        h = engine(clocks, cooldown=10.0)
+        with pytest.raises(AttendanceInputError):
+            h.restore_suppression_anchor(employee_id, elapsed_seconds=1.0)
+
+    def test_restore_beyond_capacity_evicts_least_recently_anchored(
+        self, clocks
+    ) -> None:
+        h = engine(clocks, cooldown=100.0, max_tracked=2)
+        clocks.mono = 0.0
+        assert h.update(verified("A")).status is AttendanceDecisionStatus.EVENT_CREATED
+        clocks.mono = 10.0
+        assert h.update(verified("B")).status is AttendanceDecisionStatus.EVENT_CREATED
+        # Restoring C (age 1) at mono 20 evicts A (oldest anchor).
+        clocks.mono = 20.0
+        assert h.restore_suppression_anchor("C", elapsed_seconds=1.0)
+        assert h.tracked_employee_count() == 2
+        clocks.mono = 30.0
+        assert h.update(verified("A")).status is AttendanceDecisionStatus.EVENT_CREATED
+        clocks.mono = 40.0
+        assert h.update(verified("C")).status is AttendanceDecisionStatus.SUPPRESSED
+
+    def test_double_restore_is_a_deterministic_overwrite(self, clocks) -> None:
+        h = engine(clocks, cooldown=10.0)
+        clocks.mono = 100.0
+        h.restore_suppression_anchor("007", elapsed_seconds=8.0)
+        h.restore_suppression_anchor("007", elapsed_seconds=1.0)
+        # Age 8 anchor replaced by age 1 → expires at 109, not 102.
+        clocks.mono = 105.0
+        assert h.update(verified()).status is AttendanceDecisionStatus.SUPPRESSED
+        clocks.mono = 109.0
+        assert h.update(verified()).status is AttendanceDecisionStatus.EVENT_CREATED
+
+    def test_restore_creates_no_event_and_reads_no_wall_clock(self, clocks) -> None:
+        def exploding_wall() -> datetime:
+            raise AssertionError("restore must not read the wall clock")
+
+        h = engine(clocks, cooldown=10.0, clock_wall=exploding_wall)
+        clocks.mono = 100.0
+        assert h.restore_suppression_anchor("007", elapsed_seconds=2.0)
+        assert h.tracked_employee_count() == 1

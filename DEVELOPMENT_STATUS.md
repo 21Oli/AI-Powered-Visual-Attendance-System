@@ -3,6 +3,143 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 23 — restart recovery of attendance cooldown anchors (Phase 2, P2-3) (2026-10-23)
+
+**Read-only replay only — the live demo is still NOT wired to the
+store or to recovery; no decision logic, journal schema, threshold,
+or store contract changed; the P2-2 four-state outcome contract is
+unchanged. Focused suites 46 passed, relevant suites 212 passed, full
+suite 929 passed (exit 0 each, captured under `pipefail`); no camera
+opened, no biometric artifact accessed; nothing staged or committed.**
+
+**Implemented**
+
+* `src/attendance_recovery.py` — `recover_cooldown_anchors(engine,
+  store, *, wall_now)`: loads the journal in full via the P2-1
+  `load_events()` before any engine mutation (load failures propagate
+  unchanged — never treated as empty), selects per employee the
+  latest persisted `CHECK_IN` by UTC `occurred_at` (ties by journal
+  position; deterministic under out-of-order records and duplicate
+  `event_id`s), and restores unexpired anchors read-only. Nothing is
+  appended; no event is created; torn-tail flag passed through on the
+  frozen `CooldownRecoveryReport`.
+* `src/attendance.py` (additive) —
+  `AttendanceEngine.restore_suppression_anchor(employee_id, *,
+  elapsed_seconds)`: anchor at `monotonic_now - elapsed_seconds` in
+  the current run's monotonic domain; `False` when already expired;
+  the engine's own cooldown, validation, and LRU bounded-state policy
+  apply unchanged (wall timestamps are never treated as monotonic).
+* Clock-skew policy (explicit, conservative): backward wall clock →
+  negative age clamped to zero (full cooldown from recovery; worst
+  case one delayed legitimate check-in, never a duplicate); forward
+  wall clock → expired anchors not restored (worst case one extra
+  check-in, the engine's documented bounded-state worst case).
+  Honest limit recorded: cross-run cooldown precision is bounded by
+  wall-clock reliability between runs; within a run, suppression is
+  monotonic-exact.
+* Tests: `tests/test_attendance_recovery.py` (28) +
+  `TestRestoreSuppressionAnchor` in `tests/test_attendance_engine.py`
+  (16) — empty journal, exact boundary, independence, latest-event
+  selection, real-chain replay (suppressed frames never become
+  events), expiry, out-of-order/duplicate determinism, torn tail,
+  corrupt/unsupported-schema all-or-nothing, byte-identical journal
+  after replay, clock-skew policy, replay-then-process equivalence.
+
+**Not done (explicit)**
+
+* No live-mode or CLI wiring (recovery has no caller); no check-out,
+  daily dedup, multi-person tracking, unknown-face persistence,
+  database, or API work; no writes or retries during replay.
+
+## Step 22 — durable attendance composition (Phase 2, P2-2) (2026-10-23)
+
+**Composition only — the live demo is still NOT wired to the store;
+no decision logic, schema, threshold, or store contract changed.
+Focused suite 19 passed, relevant suites 166 passed, full suite 883
+passed (exit 0 each, captured under `pipefail`); no camera opened, no
+enrollment/deletion run, no biometric artifact accessed; nothing
+staged or committed.**
+
+**Implemented**
+
+* `src/attendance_persistence.py` — `DurableAttendanceService`
+  composing the unchanged Step 13 `AttendanceEngine` (decision
+  authority) with the unchanged P2-1 `AttendanceEventStore`
+  (persistence/validation authority). `process(result)` passes the
+  temporal result to the engine unmodified; when the decision carries
+  no event **nothing is appended**; when it does, that exact event
+  object is appended exactly once. Zero decision logic added; zero
+  storage semantics added.
+* Outcome contract — frozen `DurableAttendanceOutcome` with exactly
+  four `DurableAttendanceStatus` states: `NO_EVENT` (decision carried
+  verbatim; nothing appended), `PERSISTED` (append returned; fsync
+  confirmed), `PERSISTENCE_REJECTED` (append raised
+  `AttendanceStoreInputError` — a **confirmed** failure: by the
+  store's documented contract its input rejections occur before any
+  write, so the journal is provably unchanged and the record is
+  definitively absent), and `PERSISTENCE_UNCONFIRMED` (any other
+  `AttendanceStoreError` — an **uncertain** outcome: bytes may or may
+  not have reached the journal; the **original exception object** is
+  carried unmodified on `store_error` with cause chain intact, plus
+  the exact event and a short reason naming the case). A persistence
+  failure can never be presented as a durable check-in, and **no
+  automatic retry** is attempted in either failure state — after an
+  uncertain I/O failure the journal may already contain the record,
+  so retries are the caller's decision.
+* Failure classification (never mislabeled): the store's documented
+  error family splits by its own semantics — pre-write input
+  rejections are confirmed (`PERSISTENCE_REJECTED`), all other store
+  errors are uncertain (`PERSISTENCE_UNCONFIRMED`); any other store
+  exception propagates unchanged (a programming error is not a
+  persistence outcome); engine `AttendanceInputError` propagates
+  unchanged with nothing appended. Collaborators are validated
+  structurally (callable `update`/`append` — the engine's injectable
+  pattern), so injected doubles work; construction performs no
+  filesystem work.
+* Privacy: outcomes carry decisions, events (IDs/types/timestamps),
+  statuses, and short reasons only; log lines carry statuses and
+  exception class names — never employee IDs, never biometric data.
+* `tests/test_attendance_persistence.py` — 21 deterministic,
+  hardware-free tests: outcome matrix (no-event ×3 decision
+  statuses with zero appends and verbatim decision carriage; persisted
+  with exactly-once same-object append; confirmed rejection vs
+  uncertain persistence with the distinct classifications and the
+  original exception preserved by identity in both); no automatic
+  retry across two failed processes (exactly one append attempt
+  each); non-store `ValueError` propagates unlabeled; engine
+  exception propagation with zero appends; frozen outcome dataclass;
+  construction validation (doubles accepted, non-callable rejected)
+  and no filesystem side effects; real-engine integration with
+  injected fake clocks (VERIFIED → exactly one event with exact
+  fields; same-instant repeat SUPPRESSED → no additional append; exact
+  300 s cooldown boundary → second event); and a real-chain
+  integration test — real `AttendanceEngine` + real
+  `AttendanceEventStore` + temporary journal (no real `data/`):
+  `PERSISTED` with exactly one journal record matching the
+  engine-created event, and a suppressed repeat leaving the record
+  count unchanged.
+* Follow-up clarification (2026-10-23): the former single
+  `PERSISTENCE_UNCONFIRMED` mapping for every store error was split
+  into the confirmed `PERSISTENCE_REJECTED` (input rejections,
+  pre-write) and the uncertain `PERSISTENCE_UNCONFIRMED` (all other
+  store errors), so the public outcome now accurately distinguishes
+  "failed, journal unchanged, safe to correct and retry" from
+  "uncertain, reconcile by event_id before retrying". No decision,
+  schema, or store-contract change; the fix-iteration itself caught a
+  missing import before any pass was claimed.
+
+**Known limitations / honest boundaries**
+
+* Live mode, the smoke demo, and the CLI tools are untouched — the
+  service has no caller yet; wiring it into `run_live` is the next
+  step's explicit work, not done here.
+* No retry/reconciliation policy is implemented (deliberately): after
+  an uncertain append the caller must consult the journal (by
+  `event_id`) before deciding to re-append; nothing in this service
+  checks for it.
+* Engine cooldown anchors remain engine-instance-lifetime; durable
+  anchor recovery across restarts is future work (P2-3).
+
 ## Step 21 — durable attendance event store (Phase 2, P2-1) (2026-10-22)
 
 **Post-audit error-contract fix (2026-10-22):** an event ID carrying a
