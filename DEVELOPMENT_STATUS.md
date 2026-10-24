@@ -8,7 +8,10 @@ Updated after every verified step — never ahead of implementation.
 **Read-only replay only — the live demo is still NOT wired to the
 store or to recovery; no decision logic, journal schema, threshold,
 or store contract changed; the P2-2 four-state outcome contract is
-unchanged. Focused suites 46 passed, relevant suites 212 passed, full
+unchanged. Focused suites 96 passed (`pytest
+tests/test_attendance_recovery.py tests/test_attendance_engine.py -q`;
+28 recovery + 16 new engine tests plus those modules' existing tests),
+relevant suites 212 passed, full
 suite 929 passed (exit 0 each, captured under `pipefail`); no camera
 opened, no biometric artifact accessed; nothing staged or committed.**
 
