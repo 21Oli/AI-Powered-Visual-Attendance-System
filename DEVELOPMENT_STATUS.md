@@ -3,6 +3,79 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 25 — opt-in durable composition wired into live and smoke modes (Phase 2, P2-5) (2026-10-24)
+
+**Owner-approved wiring milestone only: P2-1 through P2-4 components
+were real, tested, and deliberately unwired; Step 25 wires them into
+OPT-IN paths (`--durable` shared by `--smoke` and `--live`, default
+OFF) and touches no component contract. Default-off behavior and
+output are byte-identical to the pre-P2-5 ones (probe-tested: nothing
+constructed, nothing loaded, nothing written). Full suite 994 passed
+(965 prior + 29 new = 13 CLI + 16 durable-mode), focused durable suites
+65 passed, relevant suites 260 passed (exit 0 each, `pipefail`
+captured); camera never opened during automated work; no real
+biometric/enrollment/journal data accessed; nothing staged or
+committed.**
+
+**Implemented**
+
+* `tools/run_integration_demo.py` — one `--durable` flag (not
+  mode-specific, default off; parsing/help do not touch hardware);
+  smoke-mode propagation plus a clearly labeled durable summary
+  (recovered anchors, the four persistence-outcome counts, journal
+  location note); live-mode propagation via `LiveModeConfig(durable=…)`
+  with the other live options provably unaffected; a durable smoke run
+  halted by a journal-load/recovery error exits `1` with the typed
+  error surfaced — no traceback, no silent degradation.
+* `src/integration_demo.py` — `run_smoke(…, durable=False,
+  wall_clock=None)`: durable runs compose the real engine with the
+  P2-1 store through the unchanged P2-2 service, and the P2-3 replay
+  runs **before any frame is processed**; the exact four outcome
+  states are reported verbatim (never redefined); engine decisions,
+  statuses, thresholds, and the no-event-honesty path are unchanged;
+  `SmokeRunResult` carries additive default fields
+  (`durable_outcomes`, `durable_recovered_anchors`). Default runs keep
+  the exact pre-P2-5 engine construction (wall clock untouched).
+* `src/integration_demo.py` — `run_live`: durable composition and
+  recovery happen **before** the detector load and camera open (the
+  ordering is enforced by construction and probe-tested with recording
+  doubles: a corrupt journal raises before any hardware load); a
+  journal-load or recovery error fails closed — the run stops before
+  processing frames in smoke and before anything opens in live;
+  verified frames print the unchanged `VERIFIED …` line plus one
+  `durable:` line for PERSISTED / REJECTED / UNCONFIRMED outcomes
+  (`NO_EVENT` silent); uncertain appends are never retried;
+  unknown-face handling, recognition, temporal policy, and cleanup are
+  exactly as before; the flag-off path never constructs a store.
+* `tests/test_durable_live_mode.py` (new, 16 tests) + 13 new CLI tests:
+  parsing/default-off/propagation; happy-path persistence (exact
+  outcome sequence, timestamp agreement, five-key journal privacy
+  envelope); restart simulation (journal replayed into a fresh run →
+  suppression restored, nothing re-appended); cooldown boundary (299 s
+  suppressed; exact 300 s expired → fresh event); rejected/unconfirmed
+  failures surfaced with exactly one append attempt and provably
+  unchanged/empty journals; corrupt journal and unsupported schema
+  failing closed; live durable ordering and flag-off journal purity
+  under injected camera/detector doubles.
+
+**Explicit limitations (never overclaimed)**
+
+* Real-camera durable behavior is NOT verified — no owner `--live
+  --durable` session has been recorded; automated verification was
+  hardware-free (injected doubles only).
+* Durable smoke journals inside the run's temporary directory (removed
+  with it); durable live journals to the configured
+  `data/attendance/events.jsonl` (UTC only, unchanged schema).
+* Empirical CV accuracy evaluation remains BLOCKED pending the required
+  consented labeled dataset and a real `models/sface.onnx` evaluation
+  run (Step 14) — untouched by this milestone.
+* Explicit non-goals held: no check-out/shift/lateness/daily-dedup
+  business rules (separate milestone, sequence unchanged); no
+  thresholds lowered or auto-tuned; no unknown-face biometrics stored;
+  no frames, crops, embeddings, or similarity scores logged; the
+  report CLI (P2-4) remains an on-demand operator tool, not part of
+  any run loop.
+
 ## Step 24 — read-only attendance report CLI (Phase 2, P2-4) (2026-10-24)
 
 **Read-only operator inspection only — the live demo is still NOT wired
@@ -1607,10 +1680,29 @@ per-step records below; a stale snapshot had erroneously shown them
 
 ## Phases 2–7
 
-Not started (intentionally blocked until Phase 1 is stable):
+*(Reconciled 2026-10-24: this summary previously stated the phases had
+not started; the authoritative per-step records below it show otherwise
+for Phase 2's durable track. Corrected to match Step 25.)*
 
-Attendance/business rules · PostgreSQL + FastAPI · Web dashboard ·
-Security/RBAC/audit · Docker/deployment · Advanced liveness + optimization.
+**Phase 2 (attendance/business rules) — partially started** as an
+approved, narrower durable-storage + inspection + wiring track:
+
+* ✅ Completed and verified: Step 21 / P2-1 durable event store,
+  Step 22 / P2-2 durable composition, Step 23 / P2-3 restart recovery,
+  Step 24 / P2-4 read-only report CLI, and Step 25 / P2-5 opt-in
+  durable live/smoke wiring — the authoritative per-step records below
+  document each with its verification evidence.
+* ✅ Still NOT started (separate milestone, sequence unchanged):
+  check-out events, shift rules, lateness, daily deduplication, and
+  wider business rules — no documented design and no implementation
+  yet, by explicit owner decision.
+* ◐ Step 14 (empirical CV evaluation) remains BLOCKED on consented
+  labeled data and a real `models/sface.onnx` run.
+
+Remaining phases — all not started (intentionally, sequentially):
+
+PostgreSQL + FastAPI · Web dashboard · Security/RBAC/audit ·
+Docker/deployment · Advanced liveness + optimization.
 
 ## Step 01 — completion record
 

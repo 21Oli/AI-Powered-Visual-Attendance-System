@@ -209,16 +209,17 @@ service (`DurableAttendanceService`) feeds engine decisions to the
 store and reports exactly four outcomes — no event, durably persisted,
 persistence rejected before any write (confirmed failure), or
 persistence unconfirmed (original error preserved; no automatic
-retry). The live demo is not wired to persistence yet. One record per
-event carries exactly `schema_version`, `event_id`, `employee_id`,
+retry). The integration demo wires this composition into **opt-in**
+live and smoke paths behind `--durable` (default off — see below);
+without that flag no journal is loaded or written anywhere. One record
+per event carries exactly `schema_version`, `event_id`, `employee_id`,
 `event_type`, and `occurred_at` (UTC) — never images, embeddings,
-scores, or
-unknown-person data. Appends use flush+fsync per record (a failed write
+scores, or unknown-person data. Appends use flush+fsync per record (a failed write
 is reported as an unconfirmed record); an interrupted append can leave
 an incomplete trailing line, which loading excludes *and reports*
 (`incomplete_trailing_record=True`) while corruption anywhere else
 raises a typed error with the exact line number. Details:
-[DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md) Step 21.
+[DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md) Steps 21–25.
 
 ### Inspecting the journal (read-only report CLI)
 
@@ -235,6 +236,37 @@ record — the torn tail is reported on stderr while valid rows print),
 `2` corrupt/unsupported journal data (typed error, no rows printed),
 `3` invalid arguments or dates. Site-local timezone display/filtering
 is intentionally not supported yet — the journal stores UTC only.
+
+### Durable live/smoke runs (opt-in, `--durable`)
+
+One opt-in flag wires the journal into the integration demo for both
+modes; without it, nothing is loaded or written and behavior is exactly
+as before:
+
+```bash
+python tools/run_integration_demo.py --smoke --durable   # journal inside the run's temporary directory
+python tools/run_integration_demo.py --live --durable    # journals to data/attendance/events.jsonl
+```
+
+* **What is persisted:** only check-in events the real attendance
+  engine authorizes (verified identity + cooldown eligibility) — one
+  record, the exact `schema_version`/`event_id`/`employee_id`/
+  `event_type`/`occurred_at` (UTC) envelope, appended with per-record
+  `fsync`. Repeat check-ins are suppressed by recovering previously
+  journaled cooldown anchors *before* any event is processed.
+* **Failure behavior (fail closed):** corrupt or unreadable journal
+  data stops durable mode before any event is processed (smoke: exit
+  `1` with the typed error; live: the run aborts before the camera
+  opens). An uncertain append is reported as
+  `persistence unconfirmed` and is **never** automatically retried.
+* **What is never persisted or logged:** check-out attempts (unknown
+  rules, deferred), unknown faces, crops, embeddings, similarity
+  scores, or frames of any kind.
+* **Real-camera status:** automated verification of the durable live
+  path used injected camera/detector doubles; a supervised owner-run
+  `--live --durable` session is the remaining evidence for real-camera
+  behavior. Empirical CV accuracy evaluation remains blocked pending
+  consented labeled data.
 
 ## Environment variables
 

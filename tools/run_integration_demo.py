@@ -23,6 +23,19 @@ Two explicitly separated modes:
   saved to files, or appended to logs). Disabled by default; with the
   flag absent the output and behavior are exactly the pre-diagnostic
   ones.
+* ``--durable`` (both modes) — Phase 2 P2-5 opt-in durable attendance
+  journal: cooldown-eligible check-in events the real engine creates
+  are composed through the P2-2 ``DurableAttendanceService`` and
+  appended (``fsync`` per record) to the P2-1 journal, and the P2-3
+  cooldown recovery is replayed from the journal *before* any event
+  is processed. Default is **off**: without the flag both modes keep
+  their exact pre-P2-5 behavior (journal untouched — smoke uses a
+  temporary directory, live never opens ``data/attendance`` outside
+  the durable path). Smoke mode's journal lives inside that
+  temporary directory (removed with it); live mode journals to the
+  configured ``data/attendance`` directory. Recovery or journal-load
+  failures stop durable mode with a nonzero exit — never silently
+  degraded processing.
 
 Examples::
 
@@ -141,6 +154,18 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--durable",
+        action="store_true",
+        help=(
+            "Opt-in durable attendance journal (Phase 2 P2-5), supported "
+            "for both modes: created check-in events are persisted with "
+            "per-record fsync and previously journaled cooldown anchors "
+            "are recovered before any event is processed. Default: off "
+            "(no journal is loaded or written; existing behavior is "
+            "unchanged)."
+        ),
+    )
+    parser.add_argument(
         "--report-quality-metrics",
         action="store_true",
         help=(
@@ -153,13 +178,35 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run_smoke_mode() -> int:
-    """Run the smoke demo in isolated temporary directories (exit 0)."""
+def _run_smoke_mode(durable: bool = False) -> int:
+    """Run the smoke demo in isolated temporary directories (exit 0).
+
+    With ``durable=True`` (the ``--durable`` opt-in) the smoke run also
+    journals its events through the Phase 2 persistence composition;
+    a clearly-labeled durable summary is printed after the regular
+    smoke output. Default-off invocations keep the exact pre-P2-5
+    behavior and output.
+    """
     with tempfile.TemporaryDirectory(prefix="attendance-smoke-") as tmp:
         settings = AppSettings(
             data_dir=Path(tmp) / "data", log_dir=Path(tmp) / "logs"
         )
-        result = run_smoke(settings=settings)
+        if durable:
+            # Fail closed, cleanly: a journal-load or recovery error
+            # stops durable mode before any event is processed —
+            # reported as a nonzero exit, never degraded silently.
+            from src.attendance_store import AttendanceStoreError
+
+            try:
+                result = run_smoke(settings=settings, durable=True)
+            except AttendanceStoreError as exc:
+                print(
+                    f"[cli] durable smoke mode stopped before any event "
+                    f"processing: {exc}"
+                )
+                return 1
+        else:
+            result = run_smoke(settings=settings, durable=False)
         print("=== Phase 1 integration demo (smoke mode) ===")
         if result.event_created:
             print(f"attendance event created for employee '{result.event_employee_id}'")
@@ -174,6 +221,31 @@ def _run_smoke_mode() -> int:
             "note: smoke mode uses synthetic vectors; it demonstrates "
             "pipeline correctness, never real-model recognition accuracy."
         )
+        if durable:
+            counts: dict[str, int] = {}
+            for status in result.durable_outcomes:
+                counts[status] = counts.get(status, 0) + 1
+            print("durable mode summary (opt-in attendance journal):")
+            print(
+                "  cooldown anchors recovered from journal: "
+                f"{result.durable_recovered_anchors}"
+            )
+            print(
+                "  persistence outcomes: "
+                + " ".join(
+                    f"{name}={counts.get(name, 0)}"
+                    for name in (
+                        "persisted",
+                        "persistence_rejected",
+                        "persistence_unconfirmed",
+                        "no_event",
+                    )
+                )
+            )
+            print(
+                "  journal location: the smoke temporary directory "
+                "(removed with it on exit)"
+            )
     return 0
 
 
@@ -204,6 +276,8 @@ def _run_live_mode(args: argparse.Namespace) -> int:
         config_kwargs["frame_height"] = args.frame_size[1]
     if args.report_quality_metrics:
         config_kwargs["report_quality_metrics"] = True
+    if args.durable:
+        config_kwargs["durable"] = True
     config = LiveModeConfig(**config_kwargs)
     try:
         frames = run_live(
@@ -222,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.live:
         return _run_live_mode(args)
-    return _run_smoke_mode()
+    return _run_smoke_mode(durable=args.durable)
 
 
 if __name__ == "__main__":

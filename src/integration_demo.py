@@ -73,6 +73,7 @@ Known limitations, carried honestly
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Protocol, Sequence
@@ -199,6 +200,15 @@ class SmokeRunResult:
         suppressions: How many repeat verified frames were suppressed
             by the engine's cooldown (demonstrating Step 13's
             duplicate policy).
+        durable_outcomes: P2-5 opt-in durable composition: the exact
+            persistence-status values (``"persisted"``,
+            ``"persistence_rejected"``, ``"persistence_unconfirmed"``,
+            ``"no_event"``) observed for every frame the durable
+            service processed, in frame order; empty in default
+            (flag-off) runs.
+        durable_recovered_anchors: P2-5 opt-in: how many cooldown
+            anchors the recovery replayed from the journal before any
+            event was processed; ``0`` in flag-off runs.
         outcomes: Per-checkpoint outcomes in pipeline order.
     """
 
@@ -208,6 +218,8 @@ class SmokeRunResult:
     flow_event: object | None
     suppressions: int
     outcomes: tuple[DemoStageOutcome, ...]
+    durable_outcomes: tuple[str, ...] = ()
+    durable_recovered_anchors: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +325,7 @@ class LiveModeConfig:
         frame_height: int = 720,
         open_window: bool = True,
         report_quality_metrics: bool = False,
+        durable: bool = False,
     ) -> None:
         self.camera_index = camera_index
         self.frame_width = frame_width
@@ -323,6 +336,14 @@ class LiveModeConfig:
         # the already-measured sharpness value and the configured
         # threshold — numbers only, nothing saved. Disabled by default.
         self.report_quality_metrics = report_quality_metrics
+        # Phase 2 P2-5 opt-in durable attendance journal (default: off,
+        # exact pre-P2-5 behavior): when True, the live run composes its
+        # real attendance engine with the P2-1 durable event store via
+        # the P2-2 ``DurableAttendanceService`` and replays P2-3 cooldown
+        # recovery *before* the camera is opened or any frame is
+        # processed. Journal-load or recovery errors fail closed before
+        # any acquisition; no thresholds or business rules change.
+        self.durable = durable
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +359,8 @@ def run_smoke(
     embedder: FaceCropsSource | None = None,
     frame_source: FrameSource | None = None,
     monotonic: Callable[[], float] | None = None,
+    durable: bool = False,
+    wall_clock: Callable[[], datetime] | None = None,
 ) -> SmokeRunResult:
     """Run one deterministic, side-effect-free smoke-demo pipeline pass.
 
@@ -373,10 +396,26 @@ def run_smoke(
         monotonic: Injectable monotonic-seconds callable for the
             temporal-verifier's deterministic clock (default:
             ``time.monotonic``).
+        durable: Phase 2 P2-5 opt-in durable composition (default
+            ``False`` — exact pre-P2-5 behavior, no journal is loaded
+            or written). When ``True``, the real engine is composed
+            with the P2-1 ``AttendanceEventStore`` via the P2-2
+            ``DurableAttendanceService``, and ``recover_cooldown_anchors``
+            replays previously journaled cooldown anchors from the
+            ``settings``-scoped journal **before** any frame is
+            processed. Engine events are appended exactly when the
+            engine creates them (per-record fsync); the documented
+            four outcome states are reported verbatim, uncertainty is
+            never retried, and default-mode output is unchanged apart
+            from the added durable detail segments.
+        wall_clock: Injectable timezone-aware UTC wall clock shared by
+            the engine's event timestamps and the durable recovery's
+            age computation (default ``datetime.now(UTC)``); validate
+            inputs exactly as the engine's ``clock_wall`` contract.
 
     Returns:
         :class:`SmokeRunResult` with the real accepted event, the
-        measured suppression count, and per-stage outcomes — exactly
+        measured suppression count, per-stage outcomes — exactly
         one checkpoint per :class:`SmokeStage`.
 
     Raises:
@@ -432,9 +471,38 @@ def run_smoke(
     unknown_handler = UnknownFaceHandler(
         config=UnknownFaceConfig(), clock=monotonic
     )
-    attendance = AttendanceEngine(
-        config=AttendanceConfig(), monotonic_clock=monotonic
-    )
+    wall = wall_clock if wall_clock is not None else (lambda: datetime.now(UTC))
+    durable_store = None
+    durable_service = None
+    recovered_anchors = 0
+    if durable:
+        from src.attendance_persistence import DurableAttendanceService
+        from src.attendance_recovery import recover_cooldown_anchors
+        from src.attendance_store import AttendanceEventStore
+
+        attendance = AttendanceEngine(
+            config=AttendanceConfig(),
+            monotonic_clock=monotonic,
+            clock_wall=wall,
+        )
+        # P2-5 composition: the P2-1 journal is scoped to the smoke
+        # run's isolated settings. Recovery (P2-3) replays persisted
+        # cooldown anchors BEFORE any frame is processed; any
+        # journal-load or recovery error propagates (typing errors
+        # included) so durable mode stops before processing events and
+        # never silently degrades to non-durable processing.
+        durable_store = AttendanceEventStore(settings=settings)
+        recovery_report = recover_cooldown_anchors(
+            attendance, durable_store, wall_now=wall()
+        )
+        durable_service = DurableAttendanceService(attendance, durable_store)
+        recovered_anchors = len(recovery_report.anchors_restored)
+    else:
+        # Flag-off: exact pre-P2-5 engine construction (wall clock
+        # untouched, no journal loaded or written anywhere).
+        attendance = AttendanceEngine(
+            config=AttendanceConfig(), monotonic_clock=monotonic
+        )
 
     # -- Fixture (manifests only; no embedding files are touched beyond
     #    Engines' input requirements — this is the manifest-existence
@@ -450,6 +518,7 @@ def run_smoke(
     created_event = None
     suppressed_frames = 0
 
+    durable_outcome_statuses: list[str] = []
     for i in (1, 2, 3, 4, 5):
         # -- Step 04 — capture -----------------------------------------
         ok, captured = source.read_frame()
@@ -522,7 +591,11 @@ def run_smoke(
             # semantics — no identity, no streak progress).
             verification = verifier.update(_no_candidates_result())
             unknown_outcome = unknown_handler.observe_temporal(verification)
-            attendance.update(verification)
+            if durable_service is not None:
+                durable_outcome = durable_service.process(verification)
+                durable_outcome_statuses.append(durable_outcome.status.value)
+            else:
+                attendance.update(verification)
             if i == 1:
                 outcomes.append(
                     DemoStageOutcome(
@@ -537,7 +610,14 @@ def run_smoke(
                 DemoStageOutcome(
                     stage=SmokeStage.ATTENDANCE,
                     frame_index=i,
-                    detail="no event: quality/face-count rejected the frame",
+                    detail=(
+                        "no event: quality/face-count rejected the frame"
+                        + (
+                            f"; durable: {durable_outcome.status.value}"
+                            if durable_service is not None
+                            else ""
+                        )
+                    ),
                 )
             )
             continue
@@ -587,7 +667,12 @@ def run_smoke(
         unknown_outcome = unknown_handler.observe_temporal(verification)
 
         # -- Step 13 — attendance (real engine, full trust boundary) ----
-        decision = attendance.update(verification)
+        if durable_service is not None:
+            durable_outcome = durable_service.process(verification)
+            decision = durable_outcome.decision
+            durable_outcome_statuses.append(durable_outcome.status.value)
+        else:
+            decision = attendance.update(verification)
         event = decision.event
         if decision.status is AttendanceDecisionStatus.SUPPRESSED:
             suppressed_frames += 1
@@ -620,6 +705,11 @@ def run_smoke(
                 detail=(
                     f"attendance decision {decision.status.value}"
                     + (f" (event_id={event.event_id})" if event else "")
+                    + (
+                        f"; durable: {durable_outcome.status.value}"
+                        if durable_service is not None
+                        else ""
+                    )
                 ),
             )
         )
@@ -634,6 +724,8 @@ def run_smoke(
             flow_event=created_event,
             suppressions=suppressed_frames,
             outcomes=tuple(outcomes),
+            durable_outcomes=tuple(durable_outcome_statuses),
+            durable_recovered_anchors=recovered_anchors,
         )
     # A run with no event is a valid, honest outcome (e.g. every frame
     # was rejected by quality / no face was present): report it, never
@@ -645,6 +737,8 @@ def run_smoke(
         flow_event=None,
         suppressions=suppressed_frames,
         outcomes=tuple(outcomes),
+        durable_outcomes=tuple(durable_outcome_statuses),
+        durable_recovered_anchors=recovered_anchors,
     )
 
 
@@ -692,6 +786,7 @@ def run_live(
     window_factory: Callable[[str], object] | None = None,
     max_frames: int | None = 300,
     monotonic: Callable[[], float] | None = None,
+    wall_clock: Callable[[], datetime] | None = None,
 ) -> int:
     """Run the opt-in, real-component live-camera pipeline loop.
 
@@ -728,6 +823,11 @@ def run_live(
         monotonic: Injectable ``() -> float`` clock for the unknown-face
             episode cooldown (same default-resolution convention as
             ``run_smoke``); ``None`` uses ``time.monotonic``.
+        wall_clock: Injectable timezone-aware UTC wall clock shared by
+            the engine's event timestamps and the durable recovery's
+            age computation (used when ``config.durable`` is set;
+            default ``datetime.now(UTC)``). No journal is touched while
+            it stays unset or ``config.durable`` is off.
 
     Returns:
         The count of frames actually processed (useful to confirm
@@ -737,6 +837,10 @@ def run_live(
         DemoHeadlessEnvironmentError: no usable window subsystem
             exists and windowing was requested (remedy: headless run
             via ``open_window=False`` or the ``--smoke`` mode).
+        AttendanceStoreError: (``config.durable`` only, Phase 2
+            P2-5) a journal load or recovery failure — raised **before**
+            the camera is opened or any frame is processed (fail
+            closed; never silently degraded to non-durable processing).
     """
     import cv2
 
@@ -768,6 +872,41 @@ def run_live(
             "recognition/attendance are BLOCKED (no attendance event can "
             "ever be generated without the real recognition chain). "
             "Running the capture → detect → quality stages only."
+        )
+
+    # -- P2-5 opt-in durable composition (before ANY hardware acquisition) --
+    # Recovery and journal load happen here so a durable failure can
+    # stop the run before the camera or window is ever acquired.
+    durable_service = None
+    wall = wall_clock if wall_clock is not None else (lambda: datetime.now(UTC))
+    if config.durable:
+        from src.attendance import AttendanceEngine
+        from src.attendance_persistence import (
+            DurableAttendanceService,
+            DurableAttendanceStatus,
+        )
+        from src.attendance_recovery import recover_cooldown_anchors
+        from src.attendance_store import AttendanceEventStore
+
+        if monotonic is None:
+            import time as _time
+
+            monotonic = _time.monotonic
+        attendance = AttendanceEngine(
+            monotonic_clock=monotonic, clock_wall=wall
+        )
+        durable_store = AttendanceEventStore(settings=settings)
+        recovery_report = recover_cooldown_anchors(
+            attendance, durable_store, wall_now=wall()
+        )
+        durable_service = DurableAttendanceService(attendance, durable_store)
+        print(
+            "[live-demo] durable mode: cooldown recovery replayed before "
+            "any event processing "
+            f"({len(recovery_report.anchors_restored)} anchor(s) restored, "
+            f"{recovery_report.expired_anchors} expired, "
+            f"{recovery_report.future_timestamps_clamped} clamped, torn "
+            f"tail: {'yes' if recovery_report.incomplete_trailing_record else 'no'})"
         )
 
     camera: CameraService | None = None
@@ -843,7 +982,7 @@ def run_live(
 
             verifier = TemporalVerifier()
         attendance = None
-        if verifier is not None:
+        if verifier is not None and durable_service is None:
             from src.attendance import AttendanceEngine
 
             attendance = AttendanceEngine()
@@ -899,12 +1038,27 @@ def run_live(
                             verification.status
                             is TemporalVerificationStatus.VERIFIED
                         ):
-                            decision = attendance.update(verification)
+                            if durable_service is not None:
+                                durable_outcome = durable_service.process(
+                                    verification
+                                )
+                                decision = durable_outcome.decision
+                            else:
+                                decision = attendance.update(verification)
                             print(
                                 f"[frame {frames_processed:4d}] VERIFIED "
                                 f"{verification.employee_id}: "
                                 f"{decision.status.value}"
                             )
+                            if (
+                                durable_service is not None
+                                and durable_outcome.status
+                                is not DurableAttendanceStatus.NO_EVENT
+                            ):
+                                print(
+                                    f"[frame {frames_processed:4d}] durable: "
+                                    f"{durable_outcome.status.value}"
+                                )
                         else:
                             print(
                                 f"[frame {frames_processed:4d}] temporal: "

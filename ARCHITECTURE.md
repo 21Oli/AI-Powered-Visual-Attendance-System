@@ -762,3 +762,56 @@ workflow** (the live demo remains unconnected to persistence).
   business rules (a separate milestone, sequence unchanged); no
   stateful rendering, export formats, or cross-run history beyond the
   journal itself.
+
+### D22 — Opt-in durable composition in the integration demo: one default-off flag, recovery before any event, fail-closed, unchanged default behavior (Phase 2, P2-5)
+
+Step 25 wires the existing Phase 2 components (P2-1 store, P2-2
+`DurableAttendanceService`, P2-3 recovery, P2-4 report CLI stays an
+on-demand tool) into the integration demo's two execution paths behind
+**one explicit `--durable` flag shared by `--smoke` and `--live`** —
+default **off**. This is wiring only: no decision logic, threshold,
+schema, store contract, outcome state, or unknown-face behavior
+changed, and nothing in Phase 2 gained a new caller in the default
+paths.
+
+* **Default-off byte discipline (probe-tested).** Without the flag no
+  store is ever constructed, `recover_cooldown_anchors` is never
+  called, no journal directory is created, and smoke/CLI output is
+  exactly the pre-P2-5 output. The flag is not mode-specific and its
+  parsing never touches the camera or biometric models; live mode's
+  other options are provably unaffected by its presence.
+* **Recovery before any event (P2-3 ordering, enforced by
+  construction).** Durable runs replay persisted cooldown anchors
+  **before** the first attendance-processing call — before any frame
+  is processed in smoke mode and before the detector loads or the
+  camera opens in live mode. A journal-load or recovery error
+  (`CorruptAttendanceJournalError`, unsupported schema versions, any
+  store failure) therefore fails closed: smoke exits `1` with the
+  typed error surfaced cleanly, live raises before anything is
+  acquired. Durable mode never silently degrades to non-durable
+  processing, and uncertain appends (`PERSISTENCE_UNCONFIRMED`) are
+  reported and never automatically retried — the P2-2 four-state
+  contract is consumed verbatim, never redefined. Recovery/report
+  summary lines carry counts and statuses only — never employee IDs,
+  never biometric content.
+* **Deterministic where testable, honest where not.** `run_smoke` and
+  `run_live` accept an injectable timezone-aware `wall_clock` (default
+  `datetime.now(UTC)`) shared by the engine's event timestamps and the
+  recovery age computation; the smoke journal is scoped to the run's
+  temporary settings (removed with it), the live journal is the
+  configured `data/attendance/events.jsonl`. Smoke-mode durable
+  behavior is fully covered hardware-free (exactly one persisted
+  event, positional-and-timestamp agreement, coupon boundary 299 s
+  vs. exact 300 s, one-attempt persistence failures, restart
+  simulation); live durable behavior is verified only through injected
+  camera/detector doubles (recovery-before-hardware ordering, clean
+  run writes nothing) and requires a real owner-supervised
+  `--live --durable` session before any real-camera durability claim.
+* **Privacy unchanged.** No unknown-face biometrics are stored (the
+  unknown-face path is untouched); no frames, crops, embeddings, or
+  similarity scores are logged; journal records keep the exact
+  five-key envelope; live durable console lines add persistence
+  statuses for already-verified frames only. Empirical CV accuracy
+  evaluation remains BLOCKED pending consented labeled data; the
+  check-out/shift/daily-dedup business-rules milestone remains
+  explicitly future work.

@@ -453,3 +453,170 @@ class TestCliErrorSurface:
         ):
             parser.parse_args(["--live", "--frame-size", raw])
         assert excinfo.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# 7. --durable flag (P2-5): parsing, default-off behavior, and propagation
+# ---------------------------------------------------------------------------
+
+
+class TestDurableFlagParsing:
+    """The P2-5 opt-in flag: parsing surfaces only; no hardware, no I/O."""
+
+    def test_default_is_off_for_both_modes(self) -> None:
+        """Without the flag both mode namespaces parse durable=False."""
+        assert cli._build_parser().parse_args([]).durable is False
+        assert (
+            cli._build_parser().parse_args(["--live"]).durable is False
+        )
+
+    def test_flag_sets_durable_true_in_smoke_mode(self) -> None:
+        args = cli._build_parser().parse_args(["--durable"])
+        assert args.durable is True
+
+    def test_flag_combines_with_live(self) -> None:
+        args = cli._build_parser().parse_args(["--live", "--durable"])
+        assert args.live is True
+        assert args.durable is True
+
+    def test_flag_is_position_independent(self) -> None:
+        assert cli._build_parser().parse_args(
+            ["--durable", "--live"]
+        ).durable is True
+
+
+class TestDurableFlagPropagationSmoke:
+    """The flag value reaches run_smoke exactly as parsed (smoke mode)."""
+
+    @pytest.fixture()
+    def captured_calls(self, monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+        """Replace run_smoke with a stub returning a minimal real result."""
+        from src.integration_demo import DemoStageOutcome, SmokeRunResult, SmokeStage
+
+        stub_result = SmokeRunResult(
+            event_employee_id=None,
+            event_created=False,
+            event_occurred_at_iso=None,
+            flow_event=None,
+            suppressions=0,
+            outcomes=(
+                DemoStageOutcome(
+                    stage=SmokeStage.CAPTURE, frame_index=1, detail="stub"
+                ),
+            ),
+        )
+        calls: list[dict] = []
+
+        def recording_run_smoke(**kwargs):
+            calls.append(kwargs)
+            return stub_result
+
+        monkeypatch.setattr(cli, "run_smoke", recording_run_smoke)
+        return calls
+
+    def test_default_off_reaches_run_smoke_as_false(
+        self, captured_calls: list[dict]
+    ) -> None:
+        exit_code = cli._run_smoke_mode()
+        assert exit_code == 0
+        assert captured_calls[0]["durable"] is False
+
+    def test_flag_reaches_run_smoke_as_true(
+        self, captured_calls: list[dict]
+    ) -> None:
+        exit_code = cli._run_smoke_mode(durable=True)
+        assert exit_code == 0
+        assert captured_calls[0]["durable"] is True
+
+    def test_main_smoke_without_flag_propagates_default_off(
+        self, monkeypatch: pytest.MonkeyPatch, captured_calls: list[dict]
+    ) -> None:
+        assert cli.main([]) == 0
+        assert captured_calls[0]["durable"] is False
+
+    def test_main_smoke_with_flag_propagates_true(
+        self, monkeypatch: pytest.MonkeyPatch, captured_calls: list[dict]
+    ) -> None:
+        assert cli.main(["--durable"]) == 0
+        assert captured_calls[0]["durable"] is True
+
+    def test_durable_summary_printed_only_when_enabled(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        captured_calls: list[dict],
+    ) -> None:
+        """The durable summary lines are additive default-mode output."""
+        from io import StringIO
+        from contextlib import redirect_stdout
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            cli.main([])  # flag-off
+        assert "durable mode summary" not in buf.getvalue()
+
+        buf = StringIO()
+        with redirect_stdout(buf):  # type: ignore[assignment]
+            cli.main(["--durable"])
+        assert "durable mode summary" in buf.getvalue()
+
+    def test_durable_smoke_journal_failure_fails_closed_cleanly(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Corrupt journal under --durable: clear message, exit 1, no run."""
+        from src.attendance_store import CorruptAttendanceJournalError
+
+        def failing_run_smoke(**kwargs):
+            raise CorruptAttendanceJournalError("journal corrupt: line 1")
+
+        monkeypatch.setattr(cli, "run_smoke", failing_run_smoke)
+        exit_code = cli.main(["--durable"])
+        assert exit_code == 1
+        out = capsys.readouterr().out
+        assert (
+            "durable smoke mode stopped before any event processing" in out
+        )
+        assert "journal corrupt" in out
+
+
+class TestDurableFlagPropagationLive:
+    """The flag reaches LiveModeConfig for the live mode (no hardware)."""
+
+    @pytest.fixture()
+    def live_setup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> list[Any]:
+        """Full prereqs + recording run_live; no camera/model ever runs."""
+        _force_full_prereqs(monkeypatch)
+        handed_over: list[Any] = []
+
+        def recording_run_live(
+            *, settings: Any, config: Any, max_frames: Any
+        ) -> int:
+            handed_over.append(config)
+            return 0
+
+        monkeypatch.setattr(cli, "run_live", recording_run_live)
+        return handed_over
+
+    def test_default_off_builds_nondurable_config(self, live_setup) -> None:
+        exit_code = cli._run_live_mode(cli._build_parser().parse_args(["--live"]))
+        assert exit_code == 0
+        assert live_setup[0].durable is False
+
+    def test_flag_builds_durable_config(self, live_setup) -> None:
+        exit_code = cli._run_live_mode(
+            cli._build_parser().parse_args(["--live", "--durable"])
+        )
+        assert exit_code == 0
+        assert live_setup[0].durable is True
+
+    def test_other_live_flags_untouched_by_durable(self, live_setup) -> None:
+        """--durable alone must not silently flip any other live option."""
+        exit_code = cli._run_live_mode(
+            cli._build_parser().parse_args(["--live", "--durable"])
+        )
+        assert exit_code == 0
+        config = live_setup[0]
+        assert config.camera_index == 0
+        assert config.open_window is True
+        assert config.report_quality_metrics is False
