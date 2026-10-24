@@ -694,3 +694,71 @@ P2-1 store, and the P2-2 outcome contract are unchanged.
   caller); it neither retries writes nor appends anything, and its
   log lines carry counts only — never employee IDs, never biometric
   content.
+
+### D21 — Read-only attendance report CLI: deterministic operator inspection, three-exit contract, UTC half-open filters (Phase 2, P2-4)
+
+`tools/attendance_report.py` is an on-demand, **strictly read-only**
+inspection utility over the P2-1 journal. It reuses
+`AttendanceEventStore.load_events()` and the event model unchanged,
+adds zero decision logic, and never appends, truncates, repairs,
+rewrites, or locks the journal (byte-identity asserted in every
+journal-touching test). It is **not wired into the live attendance
+workflow** (the live demo remains unconnected to persistence).
+
+* **Deterministic presentation.** Listing is chronological by default
+  with `(occurred_at, original_index)` as the stable sort key — equal
+  timestamps resolve by journal position, the same documented
+  tie-break the recovery selection uses. `--journal-order` is the
+  explicit append-order alternative. Duplicate `event_id` records
+  print as-is (the store's documented retry limitation is reported,
+  not silently hidden by de-duplication).
+* **UTC half-open date filters.** `--since D` is inclusive at D's
+  00:00:00Z; `--until D` covers D's whole day, ending exclusive at
+  the next midnight (so fractional seconds such as 23:59:59.999999Z
+  are covered without `<=` microsecond edge arithmetic); `--day D` is
+  `[midnight, next midnight)`, exclusive with the pair. The cached
+  bound covers all events through the day, removing `-1 microsecond`
+  fragility. Site-local timezone display/filtering is intentionally
+  unsupported in this first version (the journal stores UTC only) —
+  a documented limitation, not an oversight. Employee filtering is
+  verbatim (IDs never normalized, `"007"` stays `"007"`), repeatable,
+  exact-match only.
+* **Three-value exit contract (argparse's default exit overridden;
+  only `error()` is subclassed so `--help` keeps the ordinary
+  `SystemExit(0)` path).** `0` success — including an empty journal
+  (a normal status, never an error) and an incomplete trailing
+  record (the loader's excluded-fragment decision is *surfaced* as a
+  stderr warning while valid rows print; the CLI repairs nothing).
+  `2` journal read failure — corrupt mid-file lines, unsupported
+  schema versions, unreadable data: the store's typed error is
+  reported on stderr and NO event rows print (a failed load is never
+  presented as an empty report — mirroring the P2-3 recovery
+  principle). `3` invalid arguments or dates, all validated before
+  any journal access (`YYYY-MM-DD` shape is enforced strictly so only
+  one canonical spelling parses; `--day` cannot combine with
+  `--since`/`--until`; an `--until` before `--since` is rejected)
+  — the journal is never opened on that path.
+* **Import/execution hygiene (enforced, tested).** The tool module
+  imports no `src` modules at module level: the P2-1 store import is
+  deferred into `main()` because the store's module graph
+  transitively includes recognition-layer types (via the attendance
+  engine's temporal-verification import). Executing a report imports
+  the store — **necessary to reuse its loader unchanged — but never
+  constructs a camera, detector, or recognizer model**, proven by a
+  test that turns `cv2.VideoCapture` / `cv2.FaceDetectorYN` /
+  `cv2.FaceRecognizerSF` / `onnxruntime.InferenceSession` into hard
+  failures for the duration of a full report run, plus a subprocess
+  assertion that plain import places no `cv2`/biometric module in
+  `sys.modules` and creates no data-directory tree. Importing has no
+  filesystem side effects; stdlib-only (no new dependencies; no
+  `src/`, `requirements.txt`, or `pytest.ini` changes).
+* **Summary and privacy.** `--summary` reports per-employee × per-day
+  check-in counts in day order, then verbatim employee ID. Output
+  carries exactly the four schema fields (UTC timestamp, event type,
+  employee ID verbatim, event ID verbatim) — no scores, names,
+  embeddings, or biometric content exist in the journal to print.
+* **Scope honesty.** Not wired into the live attendance demo (which
+  remains unconnected to persistence); no check-out/shift/daily-dedup
+  business rules (a separate milestone, sequence unchanged); no
+  stateful rendering, export formats, or cross-run history beyond the
+  journal itself.

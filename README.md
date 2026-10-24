@@ -220,6 +220,22 @@ an incomplete trailing line, which loading excludes *and reports*
 raises a typed error with the exact line number. Details:
 [DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md) Step 21.
 
+### Inspecting the journal (read-only report CLI)
+
+A on-demand, read-only operator utility inspects the journal:
+`python tools/attendance_report.py` lists events (chronological by
+default, `--journal-order` for append order), filterable by verbatim
+employee ID (`--employee`, repeatable) and by UTC date half-open
+intervals (`--since`/`--until`/`--day`), with `--summary` for
+per-employee × per-day check-in counts. It never appends, repairs, or
+rewrites the journal; it is **not wired into the live attendance
+workflow** (the live demo remains unconnected to persistence). Exit
+codes: `0` success (including an empty journal and a torn trailing
+record — the torn tail is reported on stderr while valid rows print),
+`2` corrupt/unsupported journal data (typed error, no rows printed),
+`3` invalid arguments or dates. Site-local timezone display/filtering
+is intentionally not supported yet — the journal stores UTC only.
+
 ## Environment variables
 
 Copy `.env.example` to `.env` and adjust as needed. `.env` is git-ignored;

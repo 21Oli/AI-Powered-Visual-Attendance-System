@@ -3,6 +3,55 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 24 — read-only attendance report CLI (Phase 2, P2-4) (2026-10-24)
+
+**Read-only operator inspection only — the live demo is still NOT wired
+to persistence or to this CLI; no journal schema, store behavior,
+recovery API, threshold, or `src/` file changed; the P2-2 four-state
+outcome contract is unchanged; stdlib only (no new dependencies).
+Focused CLI suite 36 passed, full suite 965 passed (929 prior + 36
+new), `git diff --check` clean (exit 0 each, captured under
+`pipefail`); no camera opened, no real biometric/enrollment/attendance
+data accessed; nothing staged or committed.**
+
+**Implemented**
+
+* `tools/attendance_report.py` — read-only listing/filter/summary over
+  the P2-1 journal via the unchanged `load_events()`. Deterministic
+  chronological default order (`occurred_at`, ties by journal
+  position) with `--journal-order` alternative; verbatim repeatable
+  `--employee`; UTC half-open date filtering (`--since`/`--until`/
+  `--day`, fractional seconds covered by the next-midnight exclusive
+  bounds); `--summary` per-employee × per-day counts. Duplicate
+  `event_id` records display as-is (never de-duplicated, never warned
+  about). Nothing is ever appended, truncated, repaired, rewritten, or
+  locked; journal bytes are asserted byte-identical after every
+  journal-touching test run.
+* Exit contract (argparse default exit overridden so bad arguments are
+  `3`, `--help` untouched at 0): `0` success — including empty journal
+  and torn trailing record (valid rows print, a stderr warning
+  surfaces the loader's excluded-fragment flag, never repaired); `2`
+  corrupt/unsupported/unreadable journal — typed store error on
+  stderr, NO rows (a failed load is never presented as an empty
+  report); `3` invalid arguments/dates, validated before any journal
+  access.
+* Import/execution hygiene (tested): importing the tool module loads
+  no `src` modules (store imports deferred into `main()` — the store
+  module graph transitively includes recognition-layer types);
+  executing a report imports the store but never constructs a camera,
+  detector, or recognizer model (constructor-failure guard test);
+  importing creates no data-directory tree.
+
+**Explicit limitations (never overclaimed)**
+
+* Not wired into the live attendance workflow (no caller; the live
+  demo remains unconnected to persistence).
+* UTC-only display and filtering; site-local timezone support is
+  deliberately deferred (the journal stores UTC only).
+* Explicit non-goals held: no check-out/shift/daily-dedup business
+  rules (separate milestone, sequence unchanged), no CSV/JSON export,
+  no recovery invocation, no live-mode wiring, no journal repair.
+
 ## Step 23 — restart recovery of attendance cooldown anchors (Phase 2, P2-3) (2026-10-23)
 
 **Read-only replay only — the live demo is still NOT wired to the
