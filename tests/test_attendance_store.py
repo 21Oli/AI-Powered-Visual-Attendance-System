@@ -412,7 +412,11 @@ class TestLoadValidation:
         assert "similarity_score" in str(excinfo.value)
 
     def test_unknown_event_type_raises(self, tmp_path: Path) -> None:
-        _write_journal(tmp_path, _valid_record(event_type="check_out") + "\n")
+        # P2-6: "check_out" became a real EventType value; the fixture
+        # must stay genuinely unknown to keep exercising the rejected path.
+        _write_journal(
+            tmp_path, _valid_record(event_type="check_pause") + "\n"
+        )
         with pytest.raises(CorruptAttendanceJournalError):
             _make_store(tmp_path).load_events()
 

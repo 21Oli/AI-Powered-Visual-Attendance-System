@@ -9,9 +9,10 @@ event when the configured policy permits it — and never otherwise.
 Identity / recognition / attendance stay three separate components:
 this engine performs **no** face matching, no similarity computation,
 no embedding or manifest reads, no camera work, and no persistence.
-It adds exactly one new decision — whether the attendance policy
-(currently: a finite check-in cooldown per employee) permits emitting
-a ``CHECK_IN`` event — and returns an explicit, structured decision.
+It adds exactly one new decision per event type — whether the
+attendance policy (a finite cooldown per employee per event type, plus
+an open session for check-out) permits emitting the event — and
+returns an explicit, structured decision.
 
 Trust boundary (documented, enforced)
 -------------------------------------
@@ -42,10 +43,17 @@ Duplicate-suppression policy (in-memory, bounded, documented)
   ``AttendanceConfig.check_in_cooldown_seconds``: the first eligible
   verified result creates the event and pins a non-refreshing
   suppression anchor (an injectable **monotonic** clock instant).
+* P2-6 adds ``CHECK_OUT`` with the symmetric, fully independent
+  bounded state described in the engine class documentation
+  (``check_out_cooldown_seconds``, open-session markers; the same
+  LRU/eviction policy per map).
 * Repeated verified results for the same employee with elapsed
   monotonic time **strictly below** the cooldown are ``SUPPRESSED``
   (no event exposed). Boundary is exact and documented: at
-  elapsed == cooldown a new event is created again.
+  ``elapsed == cooldown`` a new event is created again. For
+  ``CHECK_OUT`` decisions the same status is the explicit "policy
+  declined this check-out" outcome (no open session, or within the
+  check-out cooldown) — the ``reason`` field names the exact cause.
 * Suppression anchors are **NOT refreshed** by repeated frames — the
   interval expires deterministically even under a continuous stream,
   so another event can occur after each full cooldown.
@@ -82,7 +90,7 @@ Privacy: decisions and events carry IDs, types, timestamps, and
 short reasons only — no crops, frames, embeddings, scores, names, or
 unnecessary personal data. Logs record outcome counts and statuses
 only, never employee IDs or biometric details. No audit trail, no
-check-out/shift/lateness logic (Phase 2), no persistence.
+shift/lateness logic, no persistence.
 """
 
 from __future__ import annotations
@@ -153,11 +161,13 @@ def default_event_id_factory() -> str:
 
 
 class EventType(Enum):
-    """Attendance event type. Step 13 defines only ``CHECK_IN`` — no
-    check-out, shift, lateness, overtime, leave, or payroll logic
-    belongs to this step."""
+    """Attendance event type. Step 13 defined ``CHECK_IN``; P2-6 adds
+    ``CHECK_OUT`` (bathroom/symmetric serialized-value style — the
+    lowercase ``str`` value is the journal encoding). No shift,
+    lateness, overtime, leave, or payroll logic belongs here."""
 
     CHECK_IN = "check_in"
+    CHECK_OUT = "check_out"
 
 
 @dataclass(frozen=True)
@@ -170,7 +180,8 @@ class AttendanceEvent:
             validated as a non-empty ``str``).
         employee_id: Exact verified employee identifier (no coercion;
             ``"007"`` and ``"EMP-0042"`` stay verbatim).
-        event_type: :class:`EventType` — ``CHECK_IN`` in Step 13.
+        event_type: :class:`EventType` — ``CHECK_IN`` (Step 13) or
+            ``CHECK_OUT`` (P2-6).
         occurred_at: A timezone-aware ``datetime``, normalized to UTC
             at construction. Naive datetimes are rejected (fail
             fast) — the field is always comparable across events.
@@ -270,12 +281,41 @@ _UTC_NOW: Callable[[], datetime] = lambda: datetime.now(UTC)
 
 
 class AttendanceEngine:
-    """Turn verified temporal identities into bounded check-in events.
+    """Turn verified temporal identities into bounded attendance events.
 
     Construction performs no side effects (no camera, model, files,
-    network, threads). Per-employee suppression anchors are the only
-    state; decisions for different employees are independent and
-    instances share nothing.
+    network, threads). Per-employee bounded maps are the only state;
+    decisions for different employees are independent and instances
+    share nothing.
+
+    P2-6 bounded-state layout (three physically separate dicts, each
+    independently bounded by ``max_tracked_employees`` and evicted by
+    its own LRU rule of the smallest stored monotonic instant):
+
+    * ``_check_in_anchors`` — last accepted ``CHECK_IN`` (check-in
+      duplicate suppression; byte-for-byte semantics of the pre-P2-6
+      ``_anchors`` map).
+    * ``_check_out_anchors`` — last accepted ``CHECK_OUT`` (check-out
+      duplicate suppression). An accepted check-out never clears or
+      resets the check-in anchor, and a check-out cooldown rejection
+      never closes the session nor refreshes the anchor.
+    * ``_open_sessions`` — the open session's latest accepted
+      ``CHECK_IN`` instant. An accepted check-in opens/refreshes the
+      marker (last-writer-wins); an accepted check-out closes it.
+
+    Eviction in one map is physically incapable of touching the others
+    (separate dicts). A missed open-session marker is treated purely as
+    a bounded-memory miss, never as evidence a session is closed:
+    with a configured ``open_session_lookup`` the hook adjudicates; in
+    flag-off in-memory operation a later check-out is honestly rejected
+    (``SUPPRESSED`` with a reason naming the eviction limitation) and
+    no closed-session conclusion is ever drawn.
+
+    Decision-time state ownership (unchanged engine convention):
+    state changes only when a decision is accepted, immediately before
+    persistence is attempted by the caller — a rejected decision (no
+    open session, cooldown suppression, inactive, unverified) never
+    mutates any map, and an event-ID factory failure mutates nothing.
 
     Args:
         config: ``AttendanceConfig`` (defaults to the project-wide
@@ -283,12 +323,22 @@ class AttendanceEngine:
         clock_wall: Injectable timezone-aware UTC wall clock used for
             event timestamps (default ``datetime.now`` UTC).
         monotonic_clock: Injectable monotonically non-decreasing
-            elapsed-seconds callable used **only** for duplicate
-            suppression (default ``time.monotonic``).
+            elapsed-seconds callable used for duplicate suppression
+            (default ``time.monotonic``).
         active_lookup: Optional authoritative hook delegating "is this
             verified employee currently active?" (same injectable
             pattern as the Step 10 recognition service). ``None``
             delegates active gating upward — nothing is invented.
+        open_session_lookup: Optional authoritative hook adjudicating
+            "does this employee hold a currently open session?" for
+            check-out decisions when the in-memory marker is absent or
+            previously evicted. Contract: ``True`` — a session is open;
+            ``False`` — no open session; a non-``bool`` return raises
+            :class:`AttendanceInputError` with no state change; hook
+            exceptions propagate. Not called while the marker is in
+            memory, and never mutated into ``False``. This is an
+            injectable interface for later durable integration (S3/S4);
+            no journal access belongs to this engine.
         event_id_factory: Injectable unique-ID producer (default
             ``uuid.uuid4().hex``); its output is validated.
 
@@ -304,6 +354,7 @@ class AttendanceEngine:
         clock_wall: Callable[[], datetime] = _UTC_NOW,
         monotonic_clock: Callable[[], float] = time.monotonic,
         active_lookup: Callable[[str], bool] | None = None,
+        open_session_lookup: Callable[[str], bool] | None = None,
         event_id_factory: Callable[[], str] = default_event_id_factory,
     ) -> None:
         if not isinstance(config, AttendanceConfig):
@@ -331,21 +382,48 @@ class AttendanceEngine:
                 "active_lookup must be a callable taking the employee ID "
                 f"and returning a bool, got {type(active_lookup).__name__}"
             )
+        if (
+            open_session_lookup is not None
+            and not callable(open_session_lookup)
+        ):
+            raise AttendanceInputError(
+                "open_session_lookup must be a callable taking the employee "
+                f"ID and returning a bool, got "
+                f"{type(open_session_lookup).__name__}"
+            )
         self._config = config
         self._clock_wall = clock_wall
         self._monotonic_clock = monotonic_clock
         self._active_lookup = active_lookup
+        self._open_session_lookup = open_session_lookup
         self._event_id_factory = event_id_factory
         self._cooldown = float(config.check_in_cooldown_seconds)
-        # employee_id (exact) -> monotonic instant of the accepted event.
-        self._anchors: dict[str, float] = {}
+        self._out_cooldown = float(config.check_out_cooldown_seconds)
+        # P2-6: three physically separate bounded maps. Eviction in one
+        # map can never touch the others; each is LRU-evicted by the
+        # smallest stored monotonic instant, independently, at
+        # max_tracked_employees.
+        # employee_id (exact) -> monotonic instant of the last accepted
+        # CHECK_IN (check-in duplicate suppression; non-refreshing).
+        self._check_in_anchors: dict[str, float] = {}
+        # employee_id -> monotonic instant of the last accepted
+        # CHECK_OUT (check-out duplicate suppression; non-refreshing).
+        self._check_out_anchors: dict[str, float] = {}
+        # employee_id -> monotonic instant of the open session's latest
+        # accepted CHECK_IN (last-writer-wins refresh; closed by the
+        # next accepted CHECK_OUT). Its absence means "consult the
+        # open_session_lookup hook if configured", never "no session".
+        self._open_sessions: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
 
     def update(
-        self, result: TemporalVerificationResult
+        self,
+        result: TemporalVerificationResult,
+        *,
+        event_type: EventType = EventType.CHECK_IN,
     ) -> AttendanceDecision:
         """Decide one attendance event from one temporal result.
 
@@ -354,22 +432,41 @@ class AttendanceEngine:
                 TemporalVerificationResult` from the approved Step 11
                 verifier. Raw recognition results must **not** be fed
                 here — they never authorize events.
+            event_type: The intent of this decision (keyword-only,
+                P2-6). ``EventType.CHECK_IN`` (default) keeps the
+                original Step 13 policy unchanged; ``EventType.CHECK_OUT``
+                requests a check-out: the same verified/active gates
+                apply, then — in order — the open-session adjudication
+                (in-memory marker first; the ``open_session_lookup``
+                hook only when the marker is absent; honest rejection
+                without the hook) and the independent
+                ``check_out_cooldown_seconds`` gate. An accepted
+                check-out pins the check-out anchor and closes the
+                in-memory session without touching the check-in
+                anchor; a rejected check-out creates no event and
+                mutates no map.
 
         Returns:
             A frozen :class:`AttendanceDecision`; ``decision.event``
             is non-``None`` only for ``EVENT_CREATED``.
 
         Raises:
-            AttendanceInputError: malformed result/status, ``VERIFIED``
-                without a valid employee ID, an invalid clock output,
-                an invalid ``active_lookup`` return, or an event-ID
+            AttendanceInputError: malformed result/status or ``event_type``,
+                ``VERIFIED`` without a valid employee ID, an invalid
+                clock output, an invalid ``active_lookup`` or
+                ``open_session_lookup`` return, or an event-ID
                 factory failure — in every case no event is created
-                and no suppression state changes.
+                and no suppression/session state changes.
         """
         if not isinstance(result, TemporalVerificationResult):
             raise AttendanceInputError(
                 "result must be a TemporalVerificationResult, got "
                 f"{type(result).__name__}"
+            )
+        if not isinstance(event_type, EventType):
+            raise AttendanceInputError(
+                "event_type must be an EventType, got "
+                f"{type(event_type).__name__}"
             )
         if not isinstance(result.status, TemporalVerificationStatus):
             # Step 11's dataclass does not type-check the status field;
@@ -425,9 +522,16 @@ class AttendanceEngine:
                     "authoritative active-status hook",
                 )
 
-        # -- Duplicate suppression (monotonic; boundary exact) ---------
+        # -- Policy gates (monotonic; boundary exact) -------------------
         now_monotonic = self._monotonic_now()
-        anchor = self._anchors.get(employee_id)
+        if event_type is EventType.CHECK_OUT:
+            # P2-6: open-session + independent out-cooldown gates; the
+            # decision body is symmetric to the check-in policy but
+            # touches only their own bounded maps.
+            return self._decide_check_out(employee_id, now_monotonic)
+
+        # -- Check-in duplicate suppression (unchanged policy) ----------
+        anchor = self._check_in_anchors.get(employee_id)
         if anchor is not None:
             elapsed = now_monotonic - anchor
             if elapsed < self._cooldown:
@@ -453,16 +557,23 @@ class AttendanceEngine:
             # now be created below.
 
         # -- Create the event (all validation BEFORE any state change) --
-        event = self._build_event(employee_id)
-        if len(self._anchors) >= self._config.max_tracked_employees:
-            if employee_id not in self._anchors:
-                self._evict_lru_anchor()
-        self._anchors[employee_id] = now_monotonic
+        event = self._build_event(employee_id, EventType.CHECK_IN)
+        if len(self._check_in_anchors) >= self._config.max_tracked_employees:
+            if employee_id not in self._check_in_anchors:
+                self._evict_lru_anchor(self._check_in_anchors)
+        self._check_in_anchors[employee_id] = now_monotonic
+        # P2-6: the accepted check-in opens/last-writer-wins refreshes
+        # the bounded open-session marker. Its map is independently
+        # LRU-bounded; its eviction never touches the anchor maps.
+        if len(self._open_sessions) >= self._config.max_tracked_employees:
+            if employee_id not in self._open_sessions:
+                self._evict_lru_marker(self._open_sessions)
+        self._open_sessions[employee_id] = now_monotonic
         _logger.info(
             "attendance %s event created (site totals: %d tracked "
             "employees)",
             event.event_type.value,
-            len(self._anchors),
+            len(self._check_in_anchors),
         )
         return AttendanceDecision(
             status=AttendanceDecisionStatus.EVENT_CREATED,
@@ -470,12 +581,133 @@ class AttendanceEngine:
             reason="verified identity accepted by the check-in policy",
         )
 
+    def _decide_check_out(
+        self, employee_id: str, now_monotonic: float
+    ) -> AttendanceDecision:
+        """Apply the P2-6 check-out policy after the shared gates.
+
+        Order: open-session adjudication first, then the independent
+        check-out cooldown, then acceptance. Every rejection below
+        creates no event and mutates no map. Rejections reuse the
+        ``SUPPRESSED`` status (documented "policy declined this
+        check-out" outcome) with a ``reason`` naming the exact cause —
+        no new status vocabulary was added this phase.
+        """
+
+        # -- Open-session adjudication ---------------------------------
+        if employee_id in self._open_sessions:
+            # In-memory marker present: the hook is never consulted and
+            # the session identity is authoritative here.
+            session_open = True
+        elif self._open_session_lookup is None:
+            # Honest in-memory miss: without the durable lookup the
+            # engine cannot distinguish "never checked in" from "the
+            # bounded session map evicted the marker" — an eviction is
+            # a memory miss, never evidence that a durable session is
+            # closed. Reject; no journal access belongs to the engine.
+            _logger.debug(
+                "check-out withheld: no in-memory open-session marker "
+                "and no open_session_lookup hook (bounded-memory miss "
+                "cannot be reconstructed in this configuration)"
+            )
+            return AttendanceDecision(
+                status=AttendanceDecisionStatus.SUPPRESSED,
+                event=None,
+                reason=(
+                    "no in-memory open-session marker for this employee; "
+                    "without an open_session_lookup hook the bounded "
+                    "session state cannot be reconstructed, so the "
+                    "check-out is rejected (in-memory eviction is not "
+                    "treated as evidence a durable session is closed)"
+                ),
+            )
+        else:
+            # Missing marker + configured hook: adjudicate upward.
+            # Hook exceptions propagate untouched; a non-bool return
+            # raises a typed error and nothing is mutated.
+            hook_result = self._open_session_lookup(employee_id)
+            if not isinstance(hook_result, bool):
+                raise AttendanceInputError(
+                    f"employee {employee_id!r}: open_session_lookup "
+                    f"returned {type(hook_result).__name__}, expected bool"
+                )
+            if not hook_result:
+                _logger.debug(
+                    "check-out withheld: no open session per the "
+                    "authoritative open_session_lookup hook"
+                )
+                return AttendanceDecision(
+                    status=AttendanceDecisionStatus.SUPPRESSED,
+                    event=None,
+                    reason=(
+                        "no open session for this employee per the "
+                        "authoritative open_session_lookup hook; a "
+                        "check-out requires an open check-in"
+                    ),
+                )
+
+        # -- Check-out cooldown (independent of the check-in gate) ------
+        out_anchor = self._check_out_anchors.get(employee_id)
+        if out_anchor is not None:
+            out_elapsed = now_monotonic - out_anchor
+            if out_elapsed < self._out_cooldown:
+                # Non-refreshing anchor; a rejection here closes no
+                # session and refreshes no anchor.
+                _logger.debug(
+                    "check-out suppressed within cooldown (elapsed %.1f "
+                    "of %.1f seconds)",
+                    out_elapsed,
+                    self._out_cooldown,
+                )
+                return AttendanceDecision(
+                    status=AttendanceDecisionStatus.SUPPRESSED,
+                    event=None,
+                    reason=(
+                        "a check-out exists within the suppression "
+                        "interval (%.1f < %.1f seconds elapsed)"
+                        % (out_elapsed, self._out_cooldown)
+                    ),
+                )
+            # elapsed >= out cooldown: deterministically expired.
+
+        # -- Create the event (all validation BEFORE any state change) --
+        event = self._build_event(employee_id, EventType.CHECK_OUT)
+        if (
+            len(self._check_out_anchors) >= self._config.max_tracked_employees
+        ):
+            if employee_id not in self._check_out_anchors:
+                self._evict_lru_anchor(self._check_out_anchors)
+        self._check_out_anchors[employee_id] = now_monotonic
+        # Closing the session is part of accepting the check-out (the
+        # hook may have adjudicated the marker, so removal is guarded):
+        self._open_sessions.pop(employee_id, None)
+        # The check-in anchor is deliberately untouched: a check-out
+        # never clears or resets check-in suppression.
+        _logger.info(
+            "attendance %s event created (site totals: %d tracked "
+            "check-outs)",
+            event.event_type.value,
+            len(self._check_out_anchors),
+        )
+        return AttendanceDecision(
+            status=AttendanceDecisionStatus.EVENT_CREATED,
+            event=event,
+            reason=(
+                "verified identity accepted by the check-out policy; "
+                "open session closed"
+            ),
+        )
+
     # ------------------------------------------------------------------
     # State management
     # ------------------------------------------------------------------
 
     def reset(self, employee_id: str | None = None) -> int:
-        """Clear duplicate-suppression anchors explicitly.
+        """Clear check-in duplicate-suppression anchors explicitly.
+
+        Scoped to the check-in anchor map (the P2-3 recovery contract
+        and every existing caller); open-session markers and check-out
+        anchors are separate bounded maps and are not cleared here.
 
         Args:
             employee_id: Clear one employee's anchor (exact match), or
@@ -489,8 +721,8 @@ class AttendanceEngine:
                 when one is provided.
         """
         if employee_id is None:
-            cleared = len(self._anchors)
-            self._anchors.clear()
+            cleared = len(self._check_in_anchors)
+            self._check_in_anchors.clear()
             _logger.debug("all suppression anchors cleared (%d)", cleared)
             return cleared
         if not isinstance(employee_id, str) or not employee_id:
@@ -498,15 +730,17 @@ class AttendanceEngine:
                 "employee_id must be a non-empty str or None, got "
                 f"{type(employee_id).__name__}"
             )
-        if employee_id in self._anchors:
-            del self._anchors[employee_id]
+        if employee_id in self._check_in_anchors:
+            del self._check_in_anchors[employee_id]
             _logger.debug("suppression anchor cleared for one employee")
             return 1
         return 0
 
     def tracked_employee_count(self) -> int:
-        """Number of employees currently holding a suppression anchor."""
-        return len(self._anchors)
+        """Number of employees currently holding a check-in
+        suppression anchor (the check-out anchors and open-session
+        markers are separate bounded maps, not counted here)."""
+        return len(self._check_in_anchors)
 
     def restore_suppression_anchor(
         self, employee_id: str, *, elapsed_seconds: float
@@ -579,15 +813,150 @@ class AttendanceEngine:
             )
             return False
         now_monotonic = self._monotonic_now()
-        if len(self._anchors) >= self._config.max_tracked_employees:
-            if employee_id not in self._anchors:
-                self._evict_lru_anchor()
-        self._anchors[employee_id] = now_monotonic - age
+        if len(self._check_in_anchors) >= self._config.max_tracked_employees:
+            if employee_id not in self._check_in_anchors:
+                self._evict_lru_anchor(self._check_in_anchors)
+        self._check_in_anchors[employee_id] = now_monotonic - age
         _logger.debug(
             "suppression anchor restored (%.1f s of %.1f s cooldown "
             "remaining)",
             self._cooldown - age,
             self._cooldown,
+        )
+        return True
+
+    def restore_check_out_anchor(
+        self, employee_id: str, *, elapsed_seconds: float
+    ) -> bool:
+        """Restore one check-out cooldown anchor from a previous run
+        (P2-6 S3, additive; P2-3 contract untouched).
+
+        Exact mirror of :meth:`restore_suppression_anchor` for the
+        independent P2-6 check-out state: the wall-clock age measured
+        by the caller is translated **once** into this run's monotonic
+        domain (``anchor = monotonic_now - age``) and expiry is decided
+        here against the engine's configured
+        ``check_out_cooldown_seconds`` — never against the check-in
+        cooldown. A wall timestamp is never stored as, or compared as,
+        a monotonic value.
+
+        Args:
+            employee_id: Exact employee identifier (never transformed).
+            elapsed_seconds: Wall-clock seconds elapsed since the
+                persisted ``CHECK_OUT`` being restored. Must be real,
+                finite, and **non-negative** (callers clamp future-
+                dated records first, per the documented skew policy).
+
+        Returns:
+            ``True`` when an (unexpired) anchor was restored; ``False``
+            when the age already reached the configured check-out
+            cooldown (nothing is stored, nothing evicted, no state
+            change).
+
+        Raises:
+            AttendanceInputError: invalid employee ID or elapsed value;
+                validation happens before any state change.
+        """
+        if not isinstance(employee_id, str) or not employee_id.strip():
+            raise AttendanceInputError(
+                "employee_id must be a non-empty str, got "
+                f"{type(employee_id).__name__}"
+            )
+        if (
+            not isinstance(elapsed_seconds, (int, float))
+            or isinstance(elapsed_seconds, bool)
+            or not math.isfinite(elapsed_seconds)
+            or elapsed_seconds < 0
+        ):
+            raise AttendanceInputError(
+                "elapsed_seconds must be a real finite non-negative "
+                f"number of seconds, got {elapsed_seconds!r}"
+            )
+        age = float(elapsed_seconds)
+        if age >= self._out_cooldown:
+            # Expired across the restart (deterministic): nothing is
+            # stored, nothing is evicted, state is untouched.
+            _logger.debug(
+                "check-out anchor restore skipped: %.1f s >= cooldown "
+                "%.1f s (expired across the restart)",
+                age,
+                self._out_cooldown,
+            )
+            return False
+        now_monotonic = self._monotonic_now()
+        if (
+            len(self._check_out_anchors) >= self._config.max_tracked_employees
+        ):
+            if employee_id not in self._check_out_anchors:
+                self._evict_lru_anchor(self._check_out_anchors)
+        self._check_out_anchors[employee_id] = now_monotonic - age
+        _logger.debug(
+            "check-out anchor restored (%.1f s of %.1f s cooldown "
+            "remaining)",
+            self._out_cooldown - age,
+            self._out_cooldown,
+        )
+        return True
+
+    def restore_open_session(
+        self, employee_id: str, *, elapsed_seconds: float
+    ) -> bool:
+        """Restore one open-session marker from a previous run (P2-6
+        S3, additive).
+
+        The folded journal authority says the employee's latest event
+        is ``CHECK_IN`` — i.e. an open session survives the restart.
+        This method places the bounded open-session marker, translated
+        once into this run's monotonic domain (``marker = monotonic_now
+        - age``) so the marker's LRU eviction ordering stays aligned
+        with the actual session-start recency. A wall timestamp is
+        never stored as a monotonic value.
+
+        Sessions never expire inside the engine (an open session stays
+        open until an accepted ``CHECK_OUT``), so unlike the anchor
+        restores this has no elapsed-at-recovery ``False`` case: the
+        marker is always placed and ``True`` is returned.
+
+        Args:
+            employee_id: Exact employee identifier (never transformed).
+            elapsed_seconds: Wall-clock seconds elapsed since the open
+                session's latest persisted ``CHECK_IN``. Real, finite,
+                non-negative (callers clamp future-dated records).
+
+        Returns:
+            ``True`` — the marker was placed (restoring beyond
+            ``max_tracked_employees`` evicts the least-recently-opened
+            session, exactly as an accepted check-in would).
+
+        Raises:
+            AttendanceInputError: invalid employee ID or elapsed value;
+                validation happens before any state change.
+        """
+        if not isinstance(employee_id, str) or not employee_id.strip():
+            raise AttendanceInputError(
+                "employee_id must be a non-empty str, got "
+                f"{type(employee_id).__name__}"
+            )
+        if (
+            not isinstance(elapsed_seconds, (int, float))
+            or isinstance(elapsed_seconds, bool)
+            or not math.isfinite(elapsed_seconds)
+            or elapsed_seconds < 0
+        ):
+            raise AttendanceInputError(
+                "elapsed_seconds must be a real finite non-negative "
+                f"number of seconds, got {elapsed_seconds!r}"
+            )
+        age = float(elapsed_seconds)
+        now_monotonic = self._monotonic_now()
+        if len(self._open_sessions) >= self._config.max_tracked_employees:
+            if employee_id not in self._open_sessions:
+                self._evict_lru_marker(self._open_sessions)
+        self._open_sessions[employee_id] = now_monotonic - age
+        _logger.debug(
+            "open-session marker restored (age %.1f s at the recovery "
+            "instant)",
+            age,
         )
         return True
 
@@ -609,7 +978,9 @@ class AttendanceEngine:
             )
         return float(value)
 
-    def _build_event(self, employee_id: str) -> AttendanceEvent:
+    def _build_event(
+        self, employee_id: str, event_type: EventType
+    ) -> AttendanceEvent:
         """Materialize one validated event (no state mutation here).
 
         Every input to the event — wall timestamp, event ID — is
@@ -642,16 +1013,35 @@ class AttendanceEngine:
         return AttendanceEvent(
             event_id=event_id,
             employee_id=employee_id,
-            event_type=EventType.CHECK_IN,
+            event_type=event_type,
             occurred_at=wall_now,
         )
 
-    def _evict_lru_anchor(self) -> None:
-        """Drop the least-recently-anchored employee (bounded state)."""
-        oldest = min(self._anchors, key=lambda key: self._anchors[key])
-        del self._anchors[oldest]
+    def _evict_lru_anchor(self, anchors: dict[str, float]) -> None:
+        """Drop the least-recently-anchored employee from one bounded
+        anchor map (bounded state; never touches the other maps)."""
+        oldest = min(anchors, key=lambda key: anchors[key])
+        del anchors[oldest]
         _logger.debug(
             "suppression anchor evicted (bounded memory; "
+            "max_tracked_employees=%d)",
+            self._config.max_tracked_employees,
+        )
+
+    def _evict_lru_marker(self, sessions: dict[str, float]) -> None:
+        """Drop the least-recently-opened session marker from the
+        bounded open-session map (its own eviction policy).
+
+        Documented semantics: the evicted marker becomes a pure
+        in-memory miss for the open-session lookup path; it is never
+        treated as evidence that the employee has no open session, and
+        eviction here never removes entries from the anchor maps.
+        """
+        oldest = min(sessions, key=lambda key: sessions[key])
+        del sessions[oldest]
+        _logger.debug(
+            "open-session marker evicted (bounded memory; "
+            "open-session state is a miss until adjudicated upstream; "
             "max_tracked_employees=%d)",
             self._config.max_tracked_employees,
         )

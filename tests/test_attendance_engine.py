@@ -64,17 +64,25 @@ def engine(
     clocks: FakeClocks,
     *,
     cooldown: float = 10.0,
+    cooldown_out: float = 10.0,
     max_tracked: int = 64,
     **kwargs,
 ) -> AttendanceEngine:
     return AttendanceEngine(
         config=AttendanceConfig(
             check_in_cooldown_seconds=cooldown,
+            check_out_cooldown_seconds=cooldown_out,
             max_tracked_employees=max_tracked,
         ),
         monotonic_clock=clocks.mono_now,
         clock_wall=kwargs.pop("clock_wall", clocks.utc_now),
         **kwargs,
+    )
+
+
+def checkout(engine: AttendanceEngine, employee_id: str = "007"):
+    return engine.update(
+        verified(employee_id), event_type=EventType.CHECK_OUT
     )
 
 
@@ -575,3 +583,448 @@ class TestRestoreSuppressionAnchor:
         clocks.mono = 100.0
         assert h.restore_suppression_anchor("007", elapsed_seconds=2.0)
         assert h.tracked_employee_count() == 1
+
+
+# ---------------------------------------------------------------------------
+# P2-6: CHECK_OUT event type, open-session policy, independent bounded maps
+# ---------------------------------------------------------------------------
+
+
+class TestP26EventTypes:
+    def test_check_out_is_valid_and_check_in_value_unchanged(self) -> None:
+        """CHECK_OUT supplements the enum; CHECK_IN's serialized value
+        ("check_in") is byte-for-byte unchanged."""
+        assert EventType.CHECK_IN.value == "check_in"
+        assert EventType.CHECK_OUT.value == "check_out"
+        assert {t.value for t in EventType} == {"check_in", "check_out"}
+
+    def test_check_out_decision_uses_same_event_schema(self, clocks) -> None:
+        h = engine(clocks)
+        h.update(verified("007"))
+        decision = h.update(verified("007"), event_type=EventType.CHECK_OUT)
+        assert decision.status is AttendanceDecisionStatus.EVENT_CREATED
+        assert decision.event is not None
+        assert decision.event.event_type is EventType.CHECK_OUT
+        assert decision.event.employee_id == "007"
+        assert decision.event.occurred_at.utcoffset() == timedelta(0)
+
+
+class RecordingHook:
+    """Authoritative open-session lookup that records each employee."""
+
+    def __init__(self, answer: bool = True) -> None:
+        self.calls: list[str] = []
+        self.answer = answer
+
+    def __call__(self, employee_id: str) -> bool:
+        self.calls.append(employee_id)
+        return self.answer
+
+
+class TestP26OpenSessionPolicy:
+    def test_checkout_succeeds_after_valid_open_session(self, clocks) -> None:
+        h = engine(clocks)
+        assert h.update(verified("007")).status is (
+            AttendanceDecisionStatus.EVENT_CREATED
+        )
+        out = checkout(h)
+        assert out.status is AttendanceDecisionStatus.EVENT_CREATED
+        assert out.event is not None
+        assert out.event.event_type is EventType.CHECK_OUT
+        assert h._open_sessions == {}  # session closed by acceptance
+        assert h._check_out_anchors["007"] == 0.0
+
+    def test_independent_checkin_and_checkout_cooldowns(self, clocks) -> None:
+        """The check-out gate never consults the check-in anchor."""
+        h = engine(clocks, cooldown=10.0, cooldown_out=10.0)
+        h.update(verified("007"))  # in anchor @0
+        clocks.advance(5.0)
+        assert h.update(verified("007")).status is (
+            AttendanceDecisionStatus.SUPPRESSED  # check-in still cooled down
+        )
+        assert checkout(h).status is AttendanceDecisionStatus.EVENT_CREATED
+
+    def test_checkout_without_open_session_rejected_no_event_no_state(
+        self, clocks
+    ) -> None:
+        h = engine(clocks)
+        decision = checkout(h)
+        assert decision.status is AttendanceDecisionStatus.SUPPRESSED
+        assert decision.event is None
+        assert decision.reason is not None
+        assert "no open session" in decision.reason or (
+            "no in-memory open-session marker" in decision.reason
+        )
+        assert h._open_sessions == {}
+        assert h._check_out_anchors == {}
+        assert h._check_in_anchors == {}
+
+    def test_rejected_checkout_via_hook_leaves_all_maps_unchanged(
+        self, clocks
+    ) -> None:
+        """Ghost employee (marker absent) + hook False: nothing is
+        created or mutated — including the other employee's maps."""
+        h = engine(clocks, open_session_lookup=RecordingHook(answer=False))
+        h.update(verified("A"))  # A: in anchor + session marker
+        decision = checkout(h, "GHOST")
+        assert decision.status is AttendanceDecisionStatus.SUPPRESSED
+        assert decision.event is None
+        assert len(h._check_in_anchors) == 1  # A's anchor untouched
+        assert len(h._open_sessions) == 1  # A's marker untouched
+        assert h._check_out_anchors == {}
+
+    def test_failed_event_id_factory_leaves_session_intact(self, clocks) -> None:
+        """A factory failure on check-out must not close the session."""
+        calls = {"n": 0}
+
+        def flaky() -> str:
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("rng failure")  # only the check-out fails
+            return uuid.uuid4().hex
+
+        h = engine(clocks, event_id_factory=flaky)
+        h.update(verified("007"))
+        with pytest.raises(Exception):
+            checkout(h)
+        assert h._open_sessions != {}  # marker survived the failure
+        out = checkout(h)  # third factory call succeeds
+        assert out.status is AttendanceDecisionStatus.EVENT_CREATED
+        assert h._open_sessions == {}  # closed exactly once, by acceptance
+
+    def test_checkout_cooldown_rejection_preserves_session_and_anchor(
+        self, clocks
+    ) -> None:
+        h = engine(clocks, cooldown=10.0, cooldown_out=100.0)
+        h.update(verified("007"))  # in @0, marker @0
+        clocks.advance(1.0)
+        assert checkout(h).status is AttendanceDecisionStatus.EVENT_CREATED
+        assert h._check_out_anchors == {"007": 1.0}
+        assert h._open_sessions == {}
+        clocks.advance(9.0)  # mono 10: new check-in re-opens the session
+        assert h.update(verified("007")).status is (
+            AttendanceDecisionStatus.EVENT_CREATED
+        )
+        clocks.advance(2.0)  # mono 12: out elapsed 11 < 100
+        again = checkout(h)
+        assert again.status is AttendanceDecisionStatus.SUPPRESSED
+        assert again.event is None
+        assert h._open_sessions["007"] == 10.0  # session preserved
+        assert h._check_out_anchors == {"007": 1.0}  # anchor not refreshed
+        clocks.mono = 101.0  # out elapsed 100 == cooldown
+        assert checkout(h).status is AttendanceDecisionStatus.EVENT_CREATED
+
+    def test_checkout_does_not_clear_check_in_anchor(self, clocks) -> None:
+        h = engine(clocks, cooldown=10.0, cooldown_out=10.0)
+        h.update(verified("007"))  # in @0
+        clocks.advance(5.0)
+        assert checkout(h).status is AttendanceDecisionStatus.EVENT_CREATED
+        clocks.advance(4.5)  # mono 9.5 < in cooldown
+        assert h.update(verified("007")).status is (
+            AttendanceDecisionStatus.SUPPRESSED  # in anchor untouched
+        )
+        clocks.advance(0.5)  # exactly 10.0 since the check-in
+        assert h.update(verified("007")).status is (
+            AttendanceDecisionStatus.EVENT_CREATED
+        )
+
+    def test_new_checkin_refreshes_reopens_session_marker(self, clocks) -> None:
+        """Accepted new check-in re-opens (last-writer-wins) the session."""
+        h = engine(clocks, cooldown=10.0, cooldown_out=10.0)
+        h.update(verified("007"))
+        clocks.advance(1.0)
+        assert checkout(h).status is AttendanceDecisionStatus.EVENT_CREATED
+        assert h._open_sessions == {}
+        clocks.advance(9.0)  # mono 10: re-check-in after in cooldown
+        assert h.update(verified("007")).status is (
+            AttendanceDecisionStatus.EVENT_CREATED
+        )
+        assert h._open_sessions == {"007": 10.0}  # marker replaced
+        clocks.advance(1.0)  # mono 11: out anchor @1, elapsed 10
+        assert checkout(h).status is AttendanceDecisionStatus.EVENT_CREATED
+        assert h._open_sessions == {}
+
+    @pytest.mark.parametrize(
+        "bad_result",
+        [
+            TemporalVerificationResult(
+                status=TemporalVerificationStatus.COLLECTING, employee_id=None
+            ),
+        ],
+    )
+    def test_nonverified_checkout_never_creates(self, clocks, bad_result) -> None:
+        decision = engine(clocks).update(
+            bad_result, event_type=EventType.CHECK_OUT
+        )
+        assert decision.status is AttendanceDecisionStatus.NOT_VERIFIED
+        assert decision.event is None
+
+    def test_inactive_employee_checkout_rejected_like_checkin(self, clocks) -> None:
+        h = engine(clocks, active_lookup=lambda emp: emp != "IDLE-1")
+        decision = checkout(h, "IDLE-1")
+        assert decision.status is AttendanceDecisionStatus.INACTIVE_EMPLOYEE
+        assert decision.event is None
+        assert h._open_sessions == {}
+        assert h._check_out_anchors == {}
+
+    def test_invalid_event_type_argument_rejected(self, clocks) -> None:
+        h = engine(clocks)
+        with pytest.raises(AttendanceInputError):
+            h.update(verified("007"), event_type="check_out")  # type: ignore
+        assert h.tracked_employee_count() == 0
+        assert h._open_sessions == {}
+
+    def test_flag_off_evicted_session_rejected_honestly(self, clocks) -> None:
+        """Without a hook, an evicted marker is a bounded-memory miss:
+        check-out is rejected, never claimed as a closed session."""
+        h = engine(clocks, cooldown=10.0, cooldown_out=10.0, max_tracked=1)
+        h.update(verified("A"))  # marker A@0
+        clocks.advance(1.0)
+        h.update(verified("B"))  # evicts A's marker (bounded state)
+        decision = checkout(h, "A")
+        assert decision.status is AttendanceDecisionStatus.SUPPRESSED
+        assert decision.event is None
+        assert decision.reason is not None
+        assert "eviction" in decision.reason
+        assert "bounded" in decision.reason
+        assert h._check_out_anchors == {}  # rejection created nothing
+        assert h._open_sessions == {"B": 1.0}
+
+
+class TestP26HookContract:
+    def test_hook_true_adjudicates_missing_marker(self, clocks) -> None:
+        hook = RecordingHook()
+        h = engine(clocks, open_session_lookup=hook)
+        h.update(verified("007"))
+        clocks.advance(1.0)  # marker present: hook stays silent
+        assert h.update(verified("007")).status is (
+            AttendanceDecisionStatus.SUPPRESSED
+        )
+        h._open_sessions.clear()  # simulate bounded eviction
+        out = checkout(h)
+        assert out.status is AttendanceDecisionStatus.EVENT_CREATED
+        assert hook.calls == ["007"]  # adjudicated exactly once, exact ID
+
+    def test_hook_not_called_when_marker_in_memory(self, clocks) -> None:
+        hook = RecordingHook()
+        h = engine(clocks, open_session_lookup=hook)
+        h.update(verified("007"))
+        assert checkout(h).status is AttendanceDecisionStatus.EVENT_CREATED
+        assert hook.calls == []  # in-memory hit is authoritative
+
+    def test_non_boolean_hook_return_raises_typed_error(self, clocks) -> None:
+        h = engine(clocks, open_session_lookup=lambda e: "yes")
+        h.update(verified("007"))
+        # 007's marker is in memory (hook would not run); the ghost
+        # employee's missing marker triggers the hook return validation:
+        with pytest.raises(AttendanceInputError):
+            checkout(h, "GHOST")
+        # No state mutation from the invalid return:
+        assert h._open_sessions == {"007": 0.0}
+        assert h._check_out_anchors == {}
+        assert h._check_in_anchors == {"007": 0.0}
+
+    def test_hook_exception_propagates_without_state(self, clocks) -> None:
+        def exploding(employee_id: str) -> bool:
+            raise RuntimeError("journal unavailable")
+
+        h = engine(clocks, open_session_lookup=exploding)
+        h.update(verified("007"))
+        with pytest.raises(RuntimeError):
+            checkout(h, "GHOST")  # missing marker → hook consulted
+        assert h._open_sessions == {"007": 0.0}
+        assert h._check_out_anchors == {}
+        assert h._check_in_anchors == {"007": 0.0}
+
+    def test_non_callable_open_session_lookup_rejected(self) -> None:
+        with pytest.raises(AttendanceInputError):
+            AttendanceEngine(open_session_lookup="bools-only")
+
+
+class TestP26IndependentBoundedMaps:
+    """Each map is bounded by max_tracked_employees and LRU-evicted by
+    its own smallest stored instant; eviction in one map never removes
+    entries from the others. Sequencing uses explicit mono advances so
+    every map's LRU order is independently observable.
+    """
+
+    def test_eviction_is_isolated_per_map(self, clocks) -> None:
+        h = engine(clocks, cooldown=10.0, cooldown_out=10.0, max_tracked=2)
+        h.update(verified("A"))  # in{A:0} sess{A:0}
+        clocks.advance(1.0)
+        h.update(verified("B"))  # in{A:0,B:1} sess{A:0,B:1}
+        clocks.advance(1.0)
+        assert checkout(h, "A").status is (
+            AttendanceDecisionStatus.EVENT_CREATED
+        )  # out{A:2}; A's session closed legitimately
+        clocks.advance(1.0)
+        h.update(verified("C"))  # in evicts A ->{B:1,C:3}; sess inserts C
+        assert h._check_in_anchors == {"B": 1.0, "C": 3.0}
+        assert h._open_sessions == {"B": 1.0, "C": 3.0}
+        assert h._check_out_anchors == {"A": 2.0}  # untouched by C's insert
+        clocks.advance(1.0)
+        assert checkout(h, "C").status is (
+            AttendanceDecisionStatus.EVENT_CREATED
+        )  # sess{B:1}; out{A:2,C:4}
+        clocks.advance(1.0)
+        h.update(verified("D"))  # in evicts B; sess{B:1}+D insert (no evict)
+        assert h._check_in_anchors == {"C": 3.0, "D": 5.0}
+        assert h._open_sessions == {"B": 1.0, "D": 5.0}
+        # B's in-anchor was evicted by capacity, but B's session marker
+        # survived: in-map eviction never touches the session map.
+        clocks.advance(1.0)
+        assert checkout(h, "B").status is (
+            AttendanceDecisionStatus.EVENT_CREATED  # marker hit, no hook
+        )
+        # B's out acceptance evicted the least-recent out anchor (A):
+        assert h._check_out_anchors == {"C": 4.0, "B": 6.0}
+        assert h._open_sessions == {"D": 5.0}  # untouched by out eviction
+        assert h._check_in_anchors == {"C": 3.0, "D": 5.0}  # untouched
+
+    def test_session_map_eviction_keeps_checkin_anchors(self, clocks) -> None:
+        h = engine(clocks, cooldown=10.0, cooldown_out=10.0, max_tracked=2)
+        h.update(verified("A"))
+        clocks.advance(1.0)
+        h.update(verified("B"))  # both maps full: {A:0, B:1}
+        clocks.advance(1.0)
+        h.update(verified("C"))  # session map evicts A; in map evicts A
+        assert h._open_sessions == {"B": 1.0, "C": 2.0}
+        assert h._check_in_anchors == {"B": 1.0, "C": 2.0}
+        # B's check-in anchor survived the session-map insert of C:
+        assert h.update(verified("B")).status is (
+            AttendanceDecisionStatus.SUPPRESSED
+        )
+
+    def test_checkout_rejection_kernels_do_not_refresh_out_anchor(
+        self, clocks
+    ) -> None:
+        h = engine(clocks, cooldown=10.0, cooldown_out=6.0)
+        h.update(verified("007"))
+        clocks.advance(1.0)
+        assert checkout(h).status is AttendanceDecisionStatus.EVENT_CREATED
+        # Missing marker admitted by the hook, then blocked by cooldown:
+        hook = RecordingHook()
+        h = engine(clocks, cooldown_out=6.0, open_session_lookup=hook)
+        assert checkout(h).status is (
+            AttendanceDecisionStatus.EVENT_CREATED  # hook True @5: out anchor
+        )
+        assert h._check_out_anchors == {"007": 1.0}
+        clocks.advance(4.0)  # mono 9: out elapsed 4 < 6
+        decision = checkout(h)  # marker still absent: hook adjudicates again
+        assert decision.status is AttendanceDecisionStatus.SUPPRESSED
+        assert "suppression interval" in decision.reason
+        assert h._check_out_anchors == {"007": 1.0}  # not refreshed
+        assert h._open_sessions == {}  # hook path mutated nothing
+        assert hook.calls == ["007", "007"]
+
+
+# ---------------------------------------------------------------------------
+# P2-6 S3: additive restoration APIs (journal-backed recovery support)
+# ---------------------------------------------------------------------------
+
+
+class TestRestoreCheckOutAnchor:
+    def test_restored_anchor_places_state_and_suppresses(self, clocks) -> None:
+        h = engine(clocks, cooldown_out=10.0)
+        clocks.mono = 100.0
+        assert h.restore_check_out_anchor("007", elapsed_seconds=3.0)
+        assert h._check_out_anchors == {"007": 97.0}
+        # The open-session map and the check-in map stay untouched.
+        assert h._open_sessions == {}
+        assert h.tracked_employee_count() == 0
+        # Recovery is not a session: without a marker/hook a checkout
+        # is still rejected (recovery of the anchor != open session).
+        assert checkout(h).status is AttendanceDecisionStatus.SUPPRESSED
+        # With an admitting hook, the restored anchor suppresses: the
+        # anchor sits at mono 100-3=97, so the boundary is mono 107.
+        h = engine(
+            clocks,
+            cooldown_out=10.0,
+            open_session_lookup=lambda _id: True,
+        )
+        clocks.mono = 100.0
+        h.restore_check_out_anchor("007", elapsed_seconds=3.0)
+        clocks.mono = 106.0
+        assert checkout(h).status is AttendanceDecisionStatus.SUPPRESSED
+        clocks.mono = 107.0
+        assert checkout(h).status is AttendanceDecisionStatus.EVENT_CREATED
+
+    def test_age_at_or_beyond_check_out_cooldown_restores_nothing(
+        self, clocks
+    ) -> None:
+        h = engine(clocks, cooldown_out=10.0)
+        clocks.mono = 50.0
+        assert not h.restore_check_out_anchor("007", elapsed_seconds=10.0)
+        assert not h.restore_check_out_anchor("007", elapsed_seconds=600.0)
+        assert h._check_out_anchors == {}  # expired: nothing stored
+
+    def test_expiry_uses_the_check_out_cooldown_not_the_check_in_cooldown(
+        self, clocks
+    ) -> None:
+        h = engine(clocks, cooldown=2.0, cooldown_out=50.0)
+        clocks.mono = 10.0
+        # Age 3 >= check-in cooldown would be expired for check-ins,
+        # but the check-out cooldown governs here.
+        assert h.restore_check_out_anchor("007", elapsed_seconds=3.0)
+        assert h._check_out_anchors == {"007": 7.0}
+
+    def test_invalid_arguments_rejected_before_any_state_change(
+        self, clocks
+    ) -> None:
+        h = engine(clocks, cooldown_out=10.0)
+        clocks.mono = 100.0
+        for elapsed in (-3.0, float("nan"), float("inf"), "3", True):
+            with pytest.raises(AttendanceInputError):
+                h.restore_check_out_anchor("007", elapsed_seconds=elapsed)
+        for employee_id in ("", "   ", None, 7):
+            with pytest.raises(AttendanceInputError):
+                h.restore_check_out_anchor(
+                    employee_id, elapsed_seconds=1.0
+                )
+        assert h._check_out_anchors == {}  # invalid args mutate nothing
+
+
+class TestRestoreOpenSession:
+    def test_restored_marker_allows_checkout_to_proceed(self, clocks) -> None:
+        h = engine(clocks, cooldown_out=10.0)
+        clocks.mono = 100.0
+        assert h.restore_open_session("007", elapsed_seconds=30.0)
+        assert h._open_sessions == {"007": 70.0}
+        # No anchors were touched by the session restore.
+        assert h.tracked_employee_count() == 0
+        assert h._check_out_anchors == {}
+        # The restored marker authorizes the check-out (no hook needed).
+        assert checkout(h).status is AttendanceDecisionStatus.EVENT_CREATED
+        assert h._open_sessions == {}  # accepted checkout closed it
+
+    def test_restored_marker_is_authoritative_over_any_hook(
+        self, clocks
+    ) -> None:
+        hook = RecordingHook()
+        h = engine(clocks, cooldown_out=10.0, open_session_lookup=hook)
+        clocks.mono = 100.0
+        h.restore_open_session("007", elapsed_seconds=30.0)
+        assert checkout(h).status is AttendanceDecisionStatus.EVENT_CREATED
+        assert hook.calls == []  # in-memory marker authoritative
+
+    def test_marker_eviction_order_follows_restored_age(self, clocks) -> None:
+        h = engine(clocks, cooldown_out=10.0, max_tracked=2)
+        clocks.mono = 100.0
+        h.restore_open_session("A", elapsed_seconds=50.0)  # marker @50
+        h.restore_open_session("B", elapsed_seconds=5.0)   # marker @95
+        # Placing C evicts A (least-recently-opened session).
+        assert h.restore_open_session("C", elapsed_seconds=0.0)
+        assert set(h._open_sessions) == {"B", "C"}
+
+    def test_invalid_arguments_rejected_before_any_state_change(
+        self, clocks
+    ) -> None:
+        h = engine(clocks, cooldown_out=10.0)
+        clocks.mono = 100.0
+        for elapsed in (-1.0, float("nan"), float("inf"), None, True):
+            with pytest.raises(AttendanceInputError):
+                h.restore_open_session("007", elapsed_seconds=elapsed)
+        for employee_id in ("", "   ", None, 5):
+            with pytest.raises(AttendanceInputError):
+                h.restore_open_session(employee_id, elapsed_seconds=1.0)
+        assert h._open_sessions == {}  # invalid args mutate nothing

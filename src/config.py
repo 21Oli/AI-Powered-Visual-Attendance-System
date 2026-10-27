@@ -502,6 +502,14 @@ class AttendanceConfig:
     #: of that employee's last accepted event suppress the decision.
     #: Boundary is exact and non-refreshing (engine module docstring).
     check_in_cooldown_seconds: float = 300.0
+    #: Duplicate-suppression interval in seconds for CHECK_OUT events
+    #: (P2-6, Step S1): mirrors ``check_in_cooldown_seconds`` as an
+    #: initial engineering value, explicitly NOT a calibrated workplace
+    #: policy — same epistemic status as the check-in constant. Validated
+    #: exactly like the check-in field; consumed by the attendance engine
+    #: in a later P2-6 step (nothing in the current engine code reads it
+    #: yet), so the existing check-in semantics are untouched.
+    check_out_cooldown_seconds: float = 300.0
     #: Maximum number of employees whose per-employee suppression
     #: anchors are retained. Beyond this, the least-recently-seen
     #: employee's anchor is evicted (bounded memory; worst case after
@@ -524,6 +532,25 @@ class AttendanceConfig:
             raise ValueError(
                 "check_in_cooldown_seconds must be a finite positive "
                 f"number of seconds, got {self.check_in_cooldown_seconds}"
+            )
+        if (
+            not isinstance(self.check_out_cooldown_seconds, (int, float))
+            or isinstance(self.check_out_cooldown_seconds, bool)
+        ):
+            raise ValueError(
+                "check_out_cooldown_seconds must be a real number (bool "
+                "rejected), got "
+                f"{type(self.check_out_cooldown_seconds).__name__}"
+            )
+        check_out_cooldown = float(self.check_out_cooldown_seconds)
+        if (
+            not math.isfinite(check_out_cooldown)
+            or check_out_cooldown <= 0.0
+        ):
+            raise ValueError(
+                "check_out_cooldown_seconds must be a finite positive "
+                "number of seconds, got "
+                f"{self.check_out_cooldown_seconds}"
             )
         if not isinstance(self.max_tracked_employees, int) or isinstance(
             self.max_tracked_employees, bool

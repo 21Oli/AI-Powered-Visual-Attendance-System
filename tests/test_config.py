@@ -25,11 +25,13 @@ VENV_PYTHON = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
 
 from src.config import (
     APP_NAME,
+    ATTENDANCE,
     CAMERA,
     ENROLLMENT,
     FACE_PROCESSING,
     SETTINGS,
     AppSettings,
+    AttendanceConfig,
     CameraConfig,
     ConfigError,
     EnrollmentConfig,
@@ -258,3 +260,53 @@ def test_config_import_does_not_pull_cv_stack() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().endswith("OK")
+
+
+# ---------------------------------------------------------------------------
+# 5b. P2-6 S1: check-out cooldown constant (configuration only)
+# ---------------------------------------------------------------------------
+
+
+def test_attendance_check_out_cooldown_defaults_mirror_check_in() -> None:
+    """The P2-6 field mirrors the check-in constant by default, and the
+    existing check-in default is untouched (300.0 stays 300.0)."""
+    assert ATTENDANCE.check_in_cooldown_seconds == 300.0
+    assert ATTENDANCE.check_out_cooldown_seconds == 300.0
+    assert AttendanceConfig().check_in_cooldown_seconds == 300.0
+    assert AttendanceConfig().check_out_cooldown_seconds == 300.0
+
+
+@pytest.mark.parametrize(
+    "bad_kwargs",
+    [
+        {"check_out_cooldown_seconds": 0},
+        {"check_out_cooldown_seconds": -5},
+        {"check_out_cooldown_seconds": -0.5},
+        {"check_out_cooldown_seconds": float("inf")},
+        {"check_out_cooldown_seconds": float("nan")},
+        {"check_out_cooldown_seconds": True},   # bool rejected
+        {"check_out_cooldown_seconds": "300"},  # str rejected
+        {"check_out_cooldown_seconds": None},
+    ],
+)
+def test_attendance_check_out_cooldown_invalid_values_rejected(
+    bad_kwargs: dict,
+) -> None:
+    """Validation mirrors the check-in field exactly: booleans, strings,
+    non-finite values, zero, and negatives are rejected at construction."""
+    with pytest.raises(ValueError):
+        AttendanceConfig(**bad_kwargs)
+
+
+def test_attendance_check_out_cooldown_accepts_positive_values() -> None:
+    """Real finite positive numbers are accepted, ints included."""
+    cfg = AttendanceConfig(check_out_cooldown_seconds=0.5)
+    assert cfg.check_out_cooldown_seconds == 0.5
+    cfg_int = AttendanceConfig(check_out_cooldown_seconds=60)
+    assert cfg_int.check_out_cooldown_seconds == 60
+
+
+def test_attendance_frozen_config_instance_still_frozen() -> None:
+    """The new field does not weaken the frozen-constant convention."""
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ATTENDANCE.check_out_cooldown_seconds = 99.0  # type: ignore[misc]

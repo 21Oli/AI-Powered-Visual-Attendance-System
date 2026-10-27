@@ -28,7 +28,11 @@ from src.attendance_persistence import (
 )
 from src.attendance_recovery import (
     CooldownRecoveryReport,
+    SessionRecoveryReport,
+    fold_latest_events,
+    make_journal_open_session_lookup,
     recover_cooldown_anchors,
+    recover_session_state,
 )
 from src.attendance_store import (
     ATTENDANCE_JOURNAL_SCHEMA_VERSION,
@@ -159,6 +163,34 @@ class ExplodingLoader:
         if self._error is not None:
             raise self._error
         raise AssertionError("loader must be scripted")
+
+
+class RecordingP26Restore:
+    """P2-6 restore double recording both session/checkout calls."""
+
+    def __init__(self) -> None:
+        self.session_calls: list[tuple[str, float]] = []
+        self.anchor_calls: list[tuple[str, float]] = []
+
+    def restore_open_session(
+        self, employee_id: str, *, elapsed_seconds: float
+    ) -> bool:
+        self.session_calls.append((employee_id, elapsed_seconds))
+        return True
+
+    def restore_check_out_anchor(
+        self, employee_id: str, *, elapsed_seconds: float
+    ) -> bool:
+        self.anchor_calls.append((employee_id, elapsed_seconds))
+        return elapsed_seconds < 300.0
+
+
+def _append_record(tmp_path: pathlib.Path, event: AttendanceEvent) -> None:
+    """Append one validated record to the existing journal file."""
+    path = tmp_path / "attendance" / JOURNAL_FILENAME
+    path.write_bytes(
+        path.read_bytes() + _record_line(event).encode("utf-8") + b"\n"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -747,3 +779,453 @@ class TestReplayThenCompose:
         assert second.status is DurableAttendanceStatus.NO_EVENT
         assert second.decision.status is AttendanceDecisionStatus.SUPPRESSED
         assert len(store.load_events().events) == 1
+
+
+# ---------------------------------------------------------------------------
+# P2-6 S3: shared pure fold (latest event per employee)
+# ---------------------------------------------------------------------------
+
+
+class TestFoldLatestEvents:
+    def test_latest_timestamp_wins_regardless_of_position(self) -> None:
+        old = _temporary_event("ev-old", "E1", _T0 - timedelta(seconds=250))
+        new = _temporary_event("ev-new", "E1", _T0 - timedelta(seconds=50))
+        # The newest timestamp wins in both journal orders.
+        folded = fold_latest_events([new, old])
+        assert folded["E1"] is new
+        folded = fold_latest_events([old, new])
+        assert folded["E1"] is new
+
+    def test_equal_timestamp_resolves_by_later_journal_position(self) -> None:
+        first = _temporary_event("ev-1", "E1", _T0)
+        second = _temporary_event("ev-2", "E1", _T0)
+        out = _temporary_event(
+            "ev-3", "E1", _T0, event_type=EventType.CHECK_OUT
+        )
+        assert fold_latest_events([first, second])["E1"] is second
+        assert fold_latest_events([second, out])["E1"] is out
+
+    def test_interleaved_employees_are_selected_independently(self) -> None:
+        a_in = _temporary_event("ev-1", "E-A", _T0 - timedelta(seconds=100))
+        b_in = _temporary_event("ev-2", "E-B", _T0 - timedelta(seconds=90))
+        a_out = _temporary_event(
+            "ev-3", "E-A", _T0 - timedelta(seconds=80),
+            event_type=EventType.CHECK_OUT,
+        )
+        b_in2 = _temporary_event("ev-4", "E-B", _T0 - timedelta(seconds=70))
+        folded = fold_latest_events([a_in, b_in, a_out, b_in2])
+        assert set(folded) == {"E-A", "E-B"}
+        assert folded["E-A"] is a_out
+        assert folded["E-B"] is b_in2
+
+    def test_deterministic_and_first_seen_order(self) -> None:
+        a_in = _temporary_event("ev-1", "E-A", _T0 - timedelta(seconds=100))
+        b_in = _temporary_event("ev-2", "E-B", _T0 - timedelta(seconds=90))
+        b_in2 = _temporary_event("ev-3", "E-B", _T0 - timedelta(seconds=70))
+        events = [a_in, b_in, b_in2]
+        first = fold_latest_events(events)
+        again = fold_latest_events(list(events))
+        assert first == again
+        assert list(first) == ["E-A", "E-B"]  # first-seen journal order
+
+
+# ---------------------------------------------------------------------------
+# P2-6 S3: open-session + check-out cooldown recovery
+# ---------------------------------------------------------------------------
+
+
+class TestRecoverSessionState:
+    def test_latest_check_in_restores_open_session(self, tmp_path) -> None:
+        clocks = FakeClocks()
+        at = clocks.wall - timedelta(seconds=60)
+        _write_journal(
+            tmp_path,
+            [_record_line(_temporary_event("ev-in", _EMPLOYEE, at))],
+        )
+        h = _engine(clocks)
+        report = recover_session_state(
+            h, _store(tmp_path), wall_now=clocks.wall
+        )
+        assert isinstance(report, SessionRecoveryReport)
+        assert report.open_sessions_restored == (_EMPLOYEE,)
+        assert report.check_out_anchors_restored == ()
+        assert report.expired_check_out_anchors == 0
+        assert report.events_scanned == 1
+        assert report.incomplete_trailing_record is False
+        # The restored session authorizes a check-out immediately.
+        assert (
+            h.update(_verified_result(), event_type=EventType.CHECK_OUT)
+            .status
+            is AttendanceDecisionStatus.EVENT_CREATED
+        )
+
+    def test_latest_check_out_closes_session_and_restores_out_anchor(
+        self, tmp_path
+    ) -> None:
+        clocks = FakeClocks()
+        at = clocks.wall - timedelta(seconds=60)
+        _write_journal(
+            tmp_path,
+            [
+                _record_line(
+                    _temporary_event(
+                        "ev-out", _EMPLOYEE, at, event_type=EventType.CHECK_OUT
+                    )
+                )
+            ],
+        )
+        h = _engine(clocks)
+        report = recover_session_state(
+            h, _store(tmp_path), wall_now=clocks.wall
+        )
+        assert report.open_sessions_restored == ()
+        assert report.check_out_anchors_restored == (_EMPLOYEE,)
+        # No open session: an honest (hookless) checkout is rejected.
+        h = _engine(clocks)
+        assert (
+            h.update(_verified_result(), event_type=EventType.CHECK_OUT)
+            .status
+            is AttendanceDecisionStatus.SUPPRESSED
+        )
+        # The restored anchor suppresses a hook-admitted checkout.
+        h2 = AttendanceEngine(
+            config=AttendanceConfig(
+                check_in_cooldown_seconds=_COOLDOWN,
+                check_out_cooldown_seconds=_COOLDOWN,
+            ),
+            clock_wall=clocks.utc_now,
+            monotonic_clock=clocks.mono_now,
+            open_session_lookup=lambda _id: True,
+            event_id_factory=lambda: "ev-fixed",
+        )
+        report2 = recover_session_state(
+            h2, _store(tmp_path), wall_now=clocks.wall
+        )
+        assert report2.open_sessions_restored == ()
+        assert report2.check_out_anchors_restored == (_EMPLOYEE,)
+        assert (
+            h2.update(_verified_result(), event_type=EventType.CHECK_OUT)
+            .status
+            is AttendanceDecisionStatus.SUPPRESSED
+        )
+
+    def test_missing_journal_restores_nothing(self, tmp_path) -> None:
+        clocks = FakeClocks()
+        h = _engine(clocks)
+        report = recover_session_state(
+            h, _store(tmp_path), wall_now=clocks.wall
+        )
+        assert report.open_sessions_restored == ()
+        assert report.check_out_anchors_restored == ()
+        assert report.events_scanned == 0
+        assert not (tmp_path / "attendance").exists()
+
+    def test_corrupt_journal_fails_closed_without_partial_state(
+        self, tmp_path
+    ) -> None:
+        clocks = FakeClocks()
+        good = _temporary_event(
+            "ev-good", _EMPLOYEE, clocks.wall - timedelta(seconds=15)
+        )
+        _write_journal(
+            tmp_path,
+            [_record_line(good), '{"schema_version": 1, "event_id": ""}'],
+        )
+        h = _engine(clocks)
+        with pytest.raises(CorruptAttendanceJournalError):
+            recover_session_state(
+                h, _store(tmp_path), wall_now=clocks.wall
+            )
+        # All-or-nothing: nothing restored before the failed load.
+        assert (
+            h.update(_verified_result(), event_type=EventType.CHECK_OUT)
+            .status
+            is AttendanceDecisionStatus.SUPPRESSED
+        )
+        assert h.tracked_employee_count() == 0
+
+    def test_later_check_in_means_no_check_out_anchor(self, tmp_path) -> None:
+        clocks = FakeClocks()
+        at_out = clocks.wall - timedelta(seconds=300)
+        at_in = clocks.wall - timedelta(seconds=10)
+        _write_journal(
+            tmp_path,
+            [
+                _record_line(
+                    _temporary_event(
+                        "ev-out", _EMPLOYEE, at_out,
+                        event_type=EventType.CHECK_OUT,
+                    )
+                ),
+                _record_line(_temporary_event("ev-in", _EMPLOYEE, at_in)),
+            ],
+        )
+        double = RecordingP26Restore()
+        report = recover_session_state(
+            double, _store(tmp_path), wall_now=clocks.wall
+        )
+        assert report.open_sessions_restored == (_EMPLOYEE,)
+        assert report.check_out_anchors_restored == ()
+        assert double.session_calls == [(_EMPLOYEE, 10.0)]
+        assert double.anchor_calls == []
+
+    def test_recurring_sessions_restore_from_the_final_checkout(
+        self, tmp_path
+    ) -> None:
+        clocks = FakeClocks()
+        at_in1 = clocks.wall - timedelta(seconds=1000)
+        at_out1 = clocks.wall - timedelta(seconds=900)
+        at_in2 = clocks.wall - timedelta(seconds=100)
+        at_out2 = clocks.wall - timedelta(seconds=60)
+        _write_journal(
+            tmp_path,
+            [
+                _record_line(_temporary_event("ev-1", _EMPLOYEE, at_in1)),
+                _record_line(
+                    _temporary_event(
+                        "ev-2", _EMPLOYEE, at_out1,
+                        event_type=EventType.CHECK_OUT,
+                    )
+                ),
+                _record_line(_temporary_event("ev-3", _EMPLOYEE, at_in2)),
+                _record_line(
+                    _temporary_event(
+                        "ev-4", _EMPLOYEE, at_out2,
+                        event_type=EventType.CHECK_OUT,
+                    )
+                ),
+            ],
+        )
+        double = RecordingP26Restore()
+        report = recover_session_state(
+            double, _store(tmp_path), wall_now=clocks.wall
+        )
+        # Final folded event is the last CHECK_OUT: anchor from it,
+        # session closed.
+        assert report.check_out_anchors_restored == (_EMPLOYEE,)
+        assert report.open_sessions_restored == ()
+        assert double.anchor_calls == [(_EMPLOYEE, 60.0)]
+        assert double.session_calls == []
+
+    def test_equal_timestamp_out_after_in_restores_out_anchor(
+        self, tmp_path
+    ) -> None:
+        clocks = FakeClocks()
+        at = clocks.wall - timedelta(seconds=60)
+        _write_journal(
+            tmp_path,
+            [
+                _record_line(_temporary_event("ev-in", _EMPLOYEE, at)),
+                _record_line(
+                    _temporary_event(
+                        "ev-out", _EMPLOYEE, at,
+                        event_type=EventType.CHECK_OUT,
+                    )
+                ),
+            ],
+        )
+        double = RecordingP26Restore()
+        report = recover_session_state(
+            double, _store(tmp_path), wall_now=clocks.wall
+        )
+        # Folded latest = the later-positioned CHECK_OUT.
+        assert report.open_sessions_restored == ()
+        assert report.check_out_anchors_restored == (_EMPLOYEE,)
+        assert double.session_calls == []
+        assert double.anchor_calls == [(_EMPLOYEE, 60.0)]
+
+    def test_future_dated_records_are_clamped_to_zero(self, tmp_path) -> None:
+        clocks = FakeClocks()
+        _write_journal(
+            tmp_path,
+            [
+                _record_line(
+                    _temporary_event(
+                        "ev-out", "E-A", clocks.wall + timedelta(seconds=45),
+                        event_type=EventType.CHECK_OUT,
+                    )
+                ),
+                _record_line(
+                    _temporary_event(
+                        "ev-in", "E-B", clocks.wall + timedelta(seconds=45)
+                    )
+                ),
+            ],
+        )
+        double = RecordingP26Restore()
+        report = recover_session_state(
+            double, _store(tmp_path), wall_now=clocks.wall
+        )
+        assert report.future_timestamps_clamped == 2
+        assert double.session_calls == [("E-B", 0.0)]
+        assert double.anchor_calls == [("E-A", 0.0)]
+
+    def test_check_in_only_journal_recovers_sessions_per_employee(
+        self, tmp_path
+    ) -> None:
+        clocks = FakeClocks()
+        at = clocks.wall - timedelta(seconds=30)
+        _write_journal(
+            tmp_path,
+            [
+                _record_line(_temporary_event("ev-1", "EMP-A", at)),
+                _record_line(_temporary_event("ev-2", "EMP-B", at)),
+            ],
+        )
+        h = _engine(clocks)
+        report = recover_session_state(
+            h, _store(tmp_path), wall_now=clocks.wall
+        )
+        assert report.open_sessions_restored == ("EMP-A", "EMP-B")
+        assert report.check_out_anchors_restored == ()
+        # And the long-established cooldown replay is unaffected:
+        cooldown_report = recover_cooldown_anchors(
+            h, _store(tmp_path), wall_now=clocks.wall
+        )
+        assert cooldown_report.anchors_restored == ("EMP-A", "EMP-B")
+
+    def test_store_contract_and_wall_now_validated_before_any_load(
+        self, tmp_path
+    ) -> None:
+        with pytest.raises(AttendanceInputError):
+            recover_session_state(object(), object(), wall_now=_T0)
+        with pytest.raises(AttendanceInputError):
+            recover_session_state(
+                RecordingP26Restore(),
+                _store(tmp_path),
+                wall_now=_T0.replace(tzinfo=None),  # naive
+            )
+
+
+# ---------------------------------------------------------------------------
+# P2-6 S3: journal-backed open_session_lookup
+# ---------------------------------------------------------------------------
+
+
+class TestJournalOpenSessionLookup:
+    def test_latest_check_in_returns_true(self, tmp_path) -> None:
+        clocks = FakeClocks()
+        at = clocks.wall - timedelta(seconds=30)
+        _write_journal(
+            tmp_path,
+            [_record_line(_temporary_event("ev-in", _EMPLOYEE, at))],
+        )
+        lookup = make_journal_open_session_lookup(_store(tmp_path))
+        assert lookup(_EMPLOYEE) is True
+
+    def test_latest_check_out_returns_false(self, tmp_path) -> None:
+        clocks = FakeClocks()
+        at = clocks.wall - timedelta(seconds=30)
+        _write_journal(
+            tmp_path,
+            [
+                _record_line(_temporary_event("ev-in", _EMPLOYEE, at)),
+                _record_line(
+                    _temporary_event(
+                        "ev-out", _EMPLOYEE, at,
+                        event_type=EventType.CHECK_OUT,
+                    )
+                ),
+            ],
+        )
+        lookup = make_journal_open_session_lookup(_store(tmp_path))
+        assert lookup(_EMPLOYEE) is False
+
+    def test_unknown_employee_returns_false(self, tmp_path) -> None:
+        clocks = FakeClocks()
+        at = clocks.wall - timedelta(seconds=30)
+        _write_journal(
+            tmp_path,
+            [_record_line(_temporary_event("ev-in", "OTHER", at))],
+        )
+        lookup = make_journal_open_session_lookup(_store(tmp_path))
+        assert lookup(_EMPLOYEE) is False
+
+    def test_fresh_load_every_call_no_stale_caching(self, tmp_path) -> None:
+        clocks = FakeClocks()
+        store = _store(tmp_path)
+        at = clocks.wall - timedelta(seconds=30)
+        _write_journal(
+            tmp_path,
+            [_record_line(_temporary_event("ev-1", _EMPLOYEE, at))],
+        )
+        lookup = make_journal_open_session_lookup(store)
+        assert lookup(_EMPLOYEE) is True
+        # A checkout appended after the first lookup is visible on the
+        # very next call (the same store instance, no cached snapshot).
+        _append_record(
+            tmp_path,
+            _temporary_event(
+                "ev-2", _EMPLOYEE, clocks.wall,
+                event_type=EventType.CHECK_OUT,
+            ),
+        )
+        assert lookup(_EMPLOYEE) is False
+
+    def test_corrupt_journal_error_propagates_never_false(
+        self, tmp_path
+    ) -> None:
+        clocks = FakeClocks()
+        at = clocks.wall - timedelta(seconds=30)
+        _write_journal(
+            tmp_path,
+            [
+                _record_line(_temporary_event("ev-in", _EMPLOYEE, at)),
+                '{"broken json',
+            ],
+        )
+        lookup = make_journal_open_session_lookup(_store(tmp_path))
+        with pytest.raises(CorruptAttendanceJournalError):
+            lookup(_EMPLOYEE)
+
+    def test_loader_io_error_propagates_unchanged(self) -> None:
+        boom = CorruptAttendanceJournalError("unreadable journal")
+        lookup = make_journal_open_session_lookup(ExplodingLoader(error=boom))
+        with pytest.raises(CorruptAttendanceJournalError) as excinfo:
+            lookup(_EMPLOYEE)
+        assert excinfo.value is boom
+
+    def test_invalid_or_malformed_records_fail_closed_via_store(
+        self, tmp_path
+    ) -> None:
+        clocks = FakeClocks()
+        at = clocks.wall - timedelta(seconds=30)
+        # An unknown event-type string must fail closed exactly as the
+        # store loader does for any other consumer.
+        _write_journal(
+            tmp_path,
+            [_record_line(_temporary_event("ev-x", _EMPLOYEE, at))],
+        )
+        payload = json.loads(
+            _record_line(_temporary_event("ev-x", _EMPLOYEE, at))
+        )
+        payload["event_type"] = "check_pause"
+        _write_journal(tmp_path, [json.dumps(payload)])
+        lookup = make_journal_open_session_lookup(_store(tmp_path))
+        with pytest.raises(CorruptAttendanceJournalError):
+            lookup(_EMPLOYEE)
+
+    def test_lookup_never_mutates_engine_state(self, tmp_path) -> None:
+        clocks = FakeClocks()
+        at = clocks.wall - timedelta(seconds=30)
+        _write_journal(
+            tmp_path,
+            [_record_line(_temporary_event("ev-in", _EMPLOYEE, at))],
+        )
+        h = _engine(clocks)
+        lookup = make_journal_open_session_lookup(_store(tmp_path))
+        assert lookup(_EMPLOYEE) is True
+        # Direct hook calls perform no engine work.
+        assert h.tracked_employee_count() == 0
+        assert (
+            h.update(_verified_result()).status
+            is AttendanceDecisionStatus.EVENT_CREATED  # engine own state
+        )
+
+    def test_factory_and_hook_input_validation(self, tmp_path) -> None:
+        with pytest.raises(AttendanceInputError):
+            make_journal_open_session_lookup(object())
+        lookup = make_journal_open_session_lookup(_store(tmp_path))
+        for employee_id in ("", None, 7):
+            with pytest.raises(AttendanceInputError):
+                lookup(employee_id)
