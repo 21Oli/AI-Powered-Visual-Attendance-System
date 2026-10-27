@@ -27,10 +27,12 @@ from src.attendance_persistence import (
     DurableAttendanceStatus,
 )
 from src.attendance_recovery import (
+    AttendanceStartupRecoveryReport,
     CooldownRecoveryReport,
     SessionRecoveryReport,
     fold_latest_events,
     make_journal_open_session_lookup,
+    recover_attendance_startup_state,
     recover_cooldown_anchors,
     recover_session_state,
 )
@@ -1229,3 +1231,204 @@ class TestJournalOpenSessionLookup:
         for employee_id in ("", None, 7):
             with pytest.raises(AttendanceInputError):
                 lookup(employee_id)
+
+
+# ---------------------------------------------------------------------------
+# P2-6 S4: combined single-snapshot startup recovery
+# ---------------------------------------------------------------------------
+
+
+class CountingLoadStore:
+    """Delegating store double counting validated journal loads."""
+
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+        self.loads = 0
+
+    def load_events(self):
+        self.loads += 1
+        return self._inner.load_events()
+
+
+def _hook_out_engine(clocks: FakeClocks) -> AttendanceEngine:
+    """Engine with an always-True hook (checkout admission upstream)."""
+    return AttendanceEngine(
+        config=AttendanceConfig(
+            check_in_cooldown_seconds=_COOLDOWN,
+            check_out_cooldown_seconds=_COOLDOWN,
+        ),
+        clock_wall=clocks.utc_now,
+        monotonic_clock=clocks.mono_now,
+        open_session_lookup=lambda _id: True,
+        event_id_factory=lambda: "ev-fixed",
+    )
+
+
+class TestRecoverAttendanceStartupState:
+    def test_single_journal_load_restores_both_phases(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        clocks = FakeClocks()
+        at_in = clocks.wall - timedelta(seconds=60)
+        at_out = clocks.wall - timedelta(seconds=30)
+        _write_journal(
+            tmp_path,
+            [
+                _record_line(_temporary_event("ev-in", _EMPLOYEE, at_in)),
+                _record_line(
+                    _temporary_event(
+                        "ev-out", _EMPLOYEE, at_out,
+                        event_type=EventType.CHECK_OUT,
+                    )
+                ),
+            ],
+        )
+        h = _engine(clocks)
+        counting = CountingLoadStore(_store(tmp_path))
+        report = recover_attendance_startup_state(
+            h, counting, wall_now=clocks.wall
+        )
+        assert isinstance(report, AttendanceStartupRecoveryReport)
+        # Exactly ONE validated journal load backs both phases.
+        assert counting.loads == 1
+        # P2-3 phase: check-in anchor from the latest CHECK_IN.
+        assert report.cooldown.anchors_restored == (_EMPLOYEE,)
+        assert report.cooldown.expired_anchors == 0
+        assert report.cooldown.events_scanned == 1
+        # P2-6 phase: latest folded event is CHECK_OUT → no session,
+        # unexpired checkout anchor restored.
+        assert report.session.open_sessions_restored == ()
+        assert report.session.check_out_anchors_restored == (_EMPLOYEE,)
+        assert report.session.expired_check_out_anchors == 0
+        assert report.session.events_scanned == 2
+
+    def test_restored_startup_state_behaves_like_the_individual_replays(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        clocks = FakeClocks()
+        at_in = clocks.wall - timedelta(seconds=60)
+        at_out = clocks.wall - timedelta(seconds=30)
+        _write_journal(
+            tmp_path,
+            [
+                _record_line(_temporary_event("ev-in", _EMPLOYEE, at_in)),
+                _record_line(
+                    _temporary_event(
+                        "ev-out", _EMPLOYEE, at_out,
+                        event_type=EventType.CHECK_OUT,
+                    )
+                ),
+            ],
+        )
+        # Check-in anchor: suppressed until the boundary (age 60).
+        h = _engine(clocks)
+        recover_attendance_startup_state(
+            h, _store(tmp_path), wall_now=clocks.wall
+        )
+        assert (
+            h.update(_verified_result()).status
+            is AttendanceDecisionStatus.SUPPRESSED
+        )
+        clocks.advance(mono_seconds=240.0)
+        assert (
+            h.update(_verified_result()).status
+            is AttendanceDecisionStatus.EVENT_CREATED
+        )
+        # Session is closed: a hookless checkout is honestly rejected.
+        h2 = _engine(clocks)
+        recover_attendance_startup_state(
+            h2, _store(tmp_path), wall_now=clocks.wall
+        )
+        assert (
+            h2.update(_verified_result(), event_type=EventType.CHECK_OUT)
+            .status
+            is AttendanceDecisionStatus.SUPPRESSED
+        )
+        # Checkout anchor: hook-admitted checkout suppressed until the
+        # anchor's boundary. The shared clock is at mono 240 here (the
+        # check-in boundary advance above), so the age-30 restore
+        # places the anchor at mono 210 → boundary at mono 510.
+        h3 = _hook_out_engine(clocks)
+        recover_attendance_startup_state(
+            h3, _store(tmp_path), wall_now=clocks.wall
+        )
+        assert (
+            h3.update(_verified_result(), event_type=EventType.CHECK_OUT)
+            .status
+            is AttendanceDecisionStatus.SUPPRESSED
+        )
+        clocks.mono = 509.0  # 299 s elapsed
+        assert (
+            h3.update(_verified_result(), event_type=EventType.CHECK_OUT)
+            .status
+            is AttendanceDecisionStatus.SUPPRESSED
+        )
+        clocks.mono = 510.0  # exactly 300 s elapsed → expired
+        assert (
+            h3.update(_verified_result(), event_type=EventType.CHECK_OUT)
+            .status
+            is AttendanceDecisionStatus.EVENT_CREATED
+        )
+
+    def test_check_in_only_journal_matches_the_individual_replays(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        clocks = FakeClocks()
+        at = clocks.wall - timedelta(seconds=30)
+        _write_journal(
+            tmp_path,
+            [
+                _record_line(_temporary_event("ev-1", "EMP-A", at)),
+                _record_line(_temporary_event("ev-2", "EMP-B", at)),
+            ],
+        )
+        h = _engine(clocks)
+        report = recover_attendance_startup_state(
+            h, _store(tmp_path), wall_now=clocks.wall
+        )
+        assert report.cooldown.anchors_restored == ("EMP-A", "EMP-B")
+        assert report.session.open_sessions_restored == ("EMP-A", "EMP-B")
+        assert report.session.check_out_anchors_restored == ()
+        assert report.session.events_scanned == 2
+
+    def test_corrupt_journal_fails_closed_without_partial_state(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        clocks = FakeClocks()
+        good = _temporary_event(
+            "ev-good", _EMPLOYEE, clocks.wall - timedelta(seconds=15)
+        )
+        _write_journal(
+            tmp_path,
+            [_record_line(good), '{"schema_version": 1, "event_id": ""}'],
+        )
+        h = _engine(clocks)
+        with pytest.raises(CorruptAttendanceJournalError):
+            recover_attendance_startup_state(
+                h, _store(tmp_path), wall_now=clocks.wall
+            )
+        # All-or-nothing: nothing restored by the failed load.
+        assert (
+            h.update(_verified_result()).status
+            is AttendanceDecisionStatus.EVENT_CREATED
+        )
+
+    def test_collaborator_validation_precedes_any_journal_access(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        clocks = FakeClocks()
+        counting = CountingLoadStore(_store(tmp_path))
+        # Engine missing any one of the three restore callables.
+        with pytest.raises(AttendanceInputError):
+            recover_attendance_startup_state(
+                RecordingRestore(), counting, wall_now=clocks.wall
+            )
+        assert counting.loads == 0
+        # Naive wall_now.
+        with pytest.raises(AttendanceInputError):
+            recover_attendance_startup_state(
+                _engine(clocks),
+                counting,
+                wall_now=clocks.wall.replace(tzinfo=None),
+            )
+        assert counting.loads == 0

@@ -122,6 +122,17 @@ position in the validated journal sequence. It never loads files, never
 mutates engine state, never catches store errors, and is deterministic
 for the same input sequence.
 
+Single-snapshot startup recovery (P2-6 S4)
+-------------------------------------------
+
+:func:`recover_attendance_startup_state` composes the two replay loops
+above over **one** validated journal load: both the P2-3 check-in
+cooldown anchors and the P2-6 open-session / check-out cooldown state
+derive from the same validated event sequence (same store validation,
+same corruption rules, one snapshot). The per-phase selection still
+uses the single shared fold; the individual functions remain unchanged
+for their existing callers and tests.
+
 """
 
 from __future__ import annotations
@@ -138,9 +149,11 @@ from src.attendance import (
 from src.logging_setup import get_logger
 
 __all__ = [
+    "AttendanceStartupRecoveryReport",
     "CooldownRecoveryReport",
     "SessionRecoveryReport",
     "fold_latest_events",
+    "recover_attendance_startup_state",
     "recover_cooldown_anchors",
     "recover_session_state",
     "make_journal_open_session_lookup",
@@ -580,3 +593,200 @@ def make_journal_open_session_lookup(
         return event is not None and event.event_type is EventType.CHECK_IN
 
     return lookup
+
+
+@dataclass(frozen=True)
+class AttendanceStartupRecoveryReport:
+    """Explicit result of one combined read-only startup replay (P2-6 S4).
+
+    Both phases derive from the **same** validated journal snapshot (one
+    ``load_events()`` call) so every startup decision comes from one
+    consistent event sequence:
+
+    Attributes:
+        cooldown: The P2-3 phase — check-in cooldown anchor replay
+            (see :class:`CooldownRecoveryReport` for the field
+            contract; unchanged semantics).
+        session: The P2-6 phase — open-session and check-out cooldown
+            replay (see :class:`SessionRecoveryReport`).
+    """
+
+    cooldown: CooldownRecoveryReport
+    session: SessionRecoveryReport
+
+
+def recover_attendance_startup_state(
+    engine: object,
+    store: object,
+    *,
+    wall_now: datetime,
+) -> AttendanceStartupRecoveryReport:
+    """One validated journal snapshot, both replay phases (P2-6 S4).
+
+    The startup composition helper: the journal is loaded and fully
+    validated **once** through the store's ``load_events()`` and both
+    replay phases run from that same event sequence, in their
+    established semantics — byte-compatible with calling
+    :func:`recover_cooldown_anchors` and :func:`recover_session_state`
+    separately, minus the second journal load:
+
+    1. P2-3 phase (unchanged contract): over the ``CHECK_IN``-only
+       allowlist the latest check-in per employee restores the check-in
+       cooldown anchor through ``restore_suppression_anchor``.
+    2. P2-6 phase: over all events the folded latest per employee
+       restores the open-session marker (latest ``CHECK_IN``) through
+       ``restore_open_session``, or the check-out cooldown anchor
+       (latest ``CHECK_OUT``, unexpired) through
+       ``restore_check_out_anchor``.
+
+    Nothing is appended; no attendance event is created; no cooldown
+    decision is made here (the engine's restore calls own expiry
+    against their configured cooldowns); the same wall-clock-to-
+    monotonic clamp policy applies (see the module docstring).
+
+    Args:
+        engine: The decision authority — by contract an object exposing
+            callable ``restore_suppression_anchor``,
+            ``restore_open_session``, and ``restore_check_out_anchor``
+            (the combined P2-3/P2-6
+            :class:`~src.attendance.AttendanceEngine` contract), or an
+            injected double of the same shape.
+        store: The persistence authority — by contract an object
+            exposing a callable ``load_events()`` (the P2-1 store
+            contract), or any injected double.
+        wall_now: The current wall-clock instant (timezone-aware;
+            normalized to UTC). Never a hidden clock.
+
+    Returns:
+        A frozen :class:`AttendanceStartupRecoveryReport`.
+
+    Raises:
+        AttendanceInputError: a collaborator lacks a required callable,
+            or ``wall_now`` is naive / not a datetime — raised **before
+            any journal access**.
+        CorruptAttendanceJournalError: the journal fails load
+            validation (propagated unchanged; no partial restoration).
+        UnsupportedJournalSchemaVersionError: a record carries an
+            unsupported schema version (propagated unchanged).
+    """
+    restore_checkin = getattr(engine, "restore_suppression_anchor", None)
+    if not callable(restore_checkin):
+        raise AttendanceInputError(
+            "engine must provide a callable restore_suppression_anchor "
+            "(the P2-3 AttendanceEngine contract), got "
+            f"{type(engine).__name__}"
+        )
+    restore_session = getattr(engine, "restore_open_session", None)
+    if not callable(restore_session):
+        raise AttendanceInputError(
+            "engine must provide a callable restore_open_session "
+            "(the P2-6 AttendanceEngine contract), got "
+            f"{type(engine).__name__}"
+        )
+    restore_anchor = getattr(engine, "restore_check_out_anchor", None)
+    if not callable(restore_anchor):
+        raise AttendanceInputError(
+            "engine must provide a callable restore_check_out_anchor "
+            "(the P2-6 AttendanceEngine contract), got "
+            f"{type(engine).__name__}"
+        )
+    load_events = getattr(store, "load_events", None)
+    if not callable(load_events):
+        raise AttendanceInputError(
+            "store must provide a callable load_events() (the P2-1 "
+            f"AttendanceEventStore contract), got {type(store).__name__}"
+        )
+    if not isinstance(wall_now, datetime):
+        raise AttendanceInputError(
+            "wall_now must be a datetime, got "
+            f"{type(wall_now).__name__}"
+        )
+    if wall_now.tzinfo is None or wall_now.utcoffset() is None:
+        raise AttendanceInputError(
+            "wall_now must be timezone-aware, got naive "
+            f"{wall_now!r}"
+        )
+    wall_now_utc = wall_now.astimezone(UTC)
+
+    # The one validated snapshot: fully loaded and validated before ANY
+    # engine mutation (same atomicity as both individual replays). A
+    # failed load can never leave a partially recovered engine.
+    load_result = load_events()
+
+    # -- P2-3 phase: check-in cooldown anchors (established allowlist) --
+    checkin_events = tuple(
+        event
+        for event in load_result.events
+        if event.event_type is EventType.CHECK_IN
+    )
+    checkin_latest = fold_latest_events(checkin_events)
+    cooldown_restored: list[str] = []
+    cooldown_expired = 0
+    cooldown_clamped = 0
+    for employee_id, event in checkin_latest.items():  # first-seen order
+        age = (wall_now_utc - event.occurred_at).total_seconds()
+        if age < 0:
+            # Same documented clamp policy (conservative, never
+            # inverted) as the individual P2-3 replay.
+            cooldown_clamped += 1
+            age = 0.0
+        if restore_checkin(employee_id, elapsed_seconds=age):
+            cooldown_restored.append(employee_id)
+        else:
+            cooldown_expired += 1
+
+    # -- P2-6 phase: open-session and check-out cooldown state -----------
+    all_latest = fold_latest_events(load_result.events)
+    open_sessions: list[str] = []
+    out_anchors: list[str] = []
+    expired_out = 0
+    session_clamped = 0
+    for employee_id, event in all_latest.items():  # first-seen order
+        age = (wall_now_utc - event.occurred_at).total_seconds()
+        if age < 0:
+            session_clamped += 1
+            age = 0.0
+        if event.event_type is EventType.CHECK_IN:
+            restore_session(employee_id, elapsed_seconds=age)
+            open_sessions.append(employee_id)
+        else:
+            if restore_anchor(employee_id, elapsed_seconds=age):
+                out_anchors.append(employee_id)
+            else:
+                expired_out += 1
+
+    cooldown_report = CooldownRecoveryReport(
+        anchors_restored=tuple(cooldown_restored),
+        expired_anchors=cooldown_expired,
+        future_timestamps_clamped=cooldown_clamped,
+        events_scanned=len(checkin_events),
+        incomplete_trailing_record=(
+            load_result.incomplete_trailing_record
+        ),
+    )
+    session_report = SessionRecoveryReport(
+        open_sessions_restored=tuple(open_sessions),
+        check_out_anchors_restored=tuple(out_anchors),
+        expired_check_out_anchors=expired_out,
+        future_timestamps_clamped=session_clamped,
+        events_scanned=len(load_result.events),
+        incomplete_trailing_record=(
+            load_result.incomplete_trailing_record
+        ),
+    )
+    _logger.info(
+        "startup recovery replayed from one snapshot: %d events loaded, "
+        "%d check-in anchors restored, %d open sessions restored, "
+        "%d checkout anchors restored (expired %d), %d clamped "
+        "(incomplete_trailing=%s)",
+        len(load_result.events),
+        len(cooldown_restored),
+        len(open_sessions),
+        len(out_anchors),
+        expired_out,
+        cooldown_clamped + session_clamped,
+        load_result.incomplete_trailing_record,
+    )
+    return AttendanceStartupRecoveryReport(
+        cooldown=cooldown_report, session=session_report
+    )

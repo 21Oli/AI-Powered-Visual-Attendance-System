@@ -477,26 +477,38 @@ def run_smoke(
     recovered_anchors = 0
     if durable:
         from src.attendance_persistence import DurableAttendanceService
-        from src.attendance_recovery import recover_cooldown_anchors
+        from src.attendance_recovery import (
+            make_journal_open_session_lookup,
+            recover_attendance_startup_state,
+        )
         from src.attendance_store import AttendanceEventStore
 
+        durable_store = AttendanceEventStore(settings=settings)
+        # P2-6 S4: the durable engine's checkout adjudication hook is
+        # the journal-backed open-session lookup (fresh validated load
+        # per query, never a cached snapshot; errors propagate).
         attendance = AttendanceEngine(
             config=AttendanceConfig(),
             monotonic_clock=monotonic,
             clock_wall=wall,
+            open_session_lookup=make_journal_open_session_lookup(
+                durable_store
+            ),
         )
         # P2-5 composition: the P2-1 journal is scoped to the smoke
-        # run's isolated settings. Recovery (P2-3) replays persisted
-        # cooldown anchors BEFORE any frame is processed; any
-        # journal-load or recovery error propagates (typing errors
-        # included) so durable mode stops before processing events and
-        # never silently degrades to non-durable processing.
-        durable_store = AttendanceEventStore(settings=settings)
-        recovery_report = recover_cooldown_anchors(
+        # run's isolated settings. Recovery (P2-3 + P2-6, one validated
+        # snapshot) replays persisted cooldown and session state BEFORE
+        # any frame is processed; any journal-load or recovery error
+        # propagates (typing errors included) so durable mode stops
+        # before processing events and never silently degrades to
+        # non-durable processing.
+        startup_report = recover_attendance_startup_state(
             attendance, durable_store, wall_now=wall()
         )
         durable_service = DurableAttendanceService(attendance, durable_store)
-        recovered_anchors = len(recovery_report.anchors_restored)
+        recovered_anchors = (
+            len(startup_report.cooldown.anchors_restored)
+        )
     else:
         # Flag-off: exact pre-P2-5 engine construction (wall clock
         # untouched, no journal loaded or written anywhere).
@@ -885,28 +897,46 @@ def run_live(
             DurableAttendanceService,
             DurableAttendanceStatus,
         )
-        from src.attendance_recovery import recover_cooldown_anchors
+        from src.attendance_recovery import (
+            make_journal_open_session_lookup,
+            recover_attendance_startup_state,
+        )
         from src.attendance_store import AttendanceEventStore
 
         if monotonic is None:
             import time as _time
 
             monotonic = _time.monotonic
-        attendance = AttendanceEngine(
-            monotonic_clock=monotonic, clock_wall=wall
-        )
         durable_store = AttendanceEventStore(settings=settings)
-        recovery_report = recover_cooldown_anchors(
+        # P2-6 S4: same wiring as the smoke durable path — checkout
+        # adjudication goes through the journal-backed lookup.
+        attendance = AttendanceEngine(
+            monotonic_clock=monotonic,
+            clock_wall=wall,
+            open_session_lookup=make_journal_open_session_lookup(
+                durable_store
+            ),
+        )
+        startup_report = recover_attendance_startup_state(
             attendance, durable_store, wall_now=wall()
         )
         durable_service = DurableAttendanceService(attendance, durable_store)
         print(
             "[live-demo] durable mode: cooldown recovery replayed before "
             "any event processing "
-            f"({len(recovery_report.anchors_restored)} anchor(s) restored, "
-            f"{recovery_report.expired_anchors} expired, "
-            f"{recovery_report.future_timestamps_clamped} clamped, torn "
-            f"tail: {'yes' if recovery_report.incomplete_trailing_record else 'no'})"
+            f"({len(startup_report.cooldown.anchors_restored)} anchor(s) restored, "
+            f"{startup_report.cooldown.expired_anchors} expired, "
+            f"{startup_report.cooldown.future_timestamps_clamped} clamped, torn "
+            f"tail: {'yes' if startup_report.cooldown.incomplete_trailing_record else 'no'})"
+        )
+        print(
+            "[live-demo] durable mode: session state recovered from the "
+            "same validated snapshot ("
+            f"{len(startup_report.session.open_sessions_restored)} open "
+            f"session(s) restored, "
+            f"{len(startup_report.session.check_out_anchors_restored)} "
+            f"checkout anchor(s) restored, "
+            f"{startup_report.session.expired_check_out_anchors} expired)"
         )
 
     camera: CameraService | None = None

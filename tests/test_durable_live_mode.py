@@ -510,3 +510,209 @@ class TestDurableLiveWiring:
         out = capsys.readouterr().out
         assert "durable mode" not in out
         assert not _journal(settings).exists()
+
+
+# ---------------------------------------------------------------------------
+# 7. P2-6 S4 wiring: single-snapshot startup recovery + journal-backed
+#    session lookup on the durable engine
+# ---------------------------------------------------------------------------
+
+
+class TestP26StartupWiring:
+    def test_smoke_durable_engine_gets_journal_backed_lookup_and_session_recovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The durable engine is constructed with the journal-backed
+        open-session lookup, and startup recovery restores both check-in
+        anchors and open-session markers from the seeded journal."""
+        import src.attendance as attendance_mod
+
+        settings = _settings(tmp_path)
+        wall = _fake_wall()
+        _seed_event(
+            settings, occurred_at=wall() - timedelta(seconds=30)
+        )
+        real_engine = attendance_mod.AttendanceEngine
+
+        class SpyEngine(real_engine):
+            instances: list["SpyEngine"] = []
+
+            def __init__(self, **kwargs: Any) -> None:
+                self.init_kwargs = kwargs
+                self.session_restores: list[tuple[str, float]] = []
+                super().__init__(**kwargs)
+                type(self).instances.append(self)
+
+            def restore_open_session(
+                self, employee_id: str, *, elapsed_seconds: float
+            ) -> bool:
+                self.session_restores.append(
+                    (employee_id, elapsed_seconds)
+                )
+                return super().restore_open_session(
+                    employee_id, elapsed_seconds=elapsed_seconds
+                )
+
+        monkeypatch.setattr(attendance_mod, "AttendanceEngine", SpyEngine)
+        run_smoke(settings=settings, durable=True, wall_clock=wall)
+        assert len(SpyEngine.instances) == 1
+        spy = SpyEngine.instances[0]
+        # The checkout hook is the journal-backed lookup (callable).
+        hook = spy.init_kwargs.get("open_session_lookup")
+        assert callable(hook)
+        # Latest persisted CHECK_IN → the hook says a session is open.
+        assert hook(_EMPLOYEE) is True
+        assert hook("NO-SUCH") is False
+        # Startup recovery restored the open-session marker too.
+        assert spy.session_restores == [(_EMPLOYEE, 30.0)]
+
+    def test_startup_recovery_loads_the_journal_exactly_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One validated journal snapshot backs both replay phases.
+
+        The startup load count is exactly one: the session hook is lazy
+        (never consulted during a check-in-only smoke run) and nothing
+        else reads the journal at startup.
+        """
+        import src.attendance_store as store_mod
+
+        settings = _settings(tmp_path)
+        wall = _fake_wall()
+        _seed_event(
+            settings, occurred_at=wall() - timedelta(seconds=30)
+        )
+        loads: list[int] = []
+        real_load = store_mod.AttendanceEventStore.load_events
+
+        def counting(self: Any):
+            loads.append(1)
+            return real_load(self)
+
+        monkeypatch.setattr(
+            store_mod.AttendanceEventStore, "load_events", counting
+        )
+        result = run_smoke(
+            settings=settings, durable=True, wall_clock=wall
+        )
+        assert loads == [1]  # one snapshot, both phases
+        assert result.durable_recovered_anchors == 1
+
+    def test_run_live_recovery_finishes_before_hardware_initialization(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Call-order proof: startup recovery precedes detector load and
+        camera acquire even on a journal-free durable run."""
+        import src.attendance_recovery as recovery_mod
+
+        detector_events: list[str] = []
+        camera_events: list[str] = []
+        _install_demo_doubles(
+            monkeypatch,
+            detector_events=detector_events,
+            camera_events=camera_events,
+        )
+        order: list[str] = []
+        real_recover = recovery_mod.recover_attendance_startup_state
+
+        def recording(*args: Any, **kwargs: Any):
+            order.append("recovery")
+            return real_recover(*args, **kwargs)
+
+        monkeypatch.setattr(
+            recovery_mod, "recover_attendance_startup_state", recording
+        )
+        settings = _settings(tmp_path)
+        run_live(
+            settings=settings,
+            config=LiveModeConfig(open_window=False, durable=True),
+        )
+        assert order == ["recovery"]
+        # Recovery ran before the detector was loaded and the camera
+        # opened (hardware events exist only after it).
+        assert detector_events == ["loaded"]
+        assert camera_events[0] == "constructed"
+        assert "opened" in camera_events
+
+    def test_durable_live_fails_closed_on_corrupt_journal_with_session_recovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Corruption aborts before attendance processing and camera —
+        never degraded and never re-labeled as a closed session."""
+        detector_events: list[str] = []
+        camera_events: list[str] = []
+        _install_demo_doubles(
+            monkeypatch,
+            detector_events=detector_events,
+            camera_events=camera_events,
+        )
+        settings = _settings(tmp_path)
+        journal = _journal(settings)
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text("corrupt\n", encoding="utf-8")
+
+        with pytest.raises(CorruptAttendanceJournalError):
+            run_smoke(settings=settings, durable=True, wall_clock=_fake_wall())
+        assert detector_events == []
+        assert camera_events == []
+
+    def test_durable_live_reports_single_snapshot_session_recovery(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import src.attendance_store as store_mod
+
+        detector_events: list[str] = []
+        camera_events: list[str] = []
+        _install_demo_doubles(
+            monkeypatch,
+            detector_events=detector_events,
+            camera_events=camera_events,
+        )
+        settings = _settings(tmp_path)
+        loads: list[int] = []
+        real_load = store_mod.AttendanceEventStore.load_events
+
+        def counting(self: Any):
+            loads.append(1)
+            return real_load(self)
+
+        monkeypatch.setattr(
+            store_mod.AttendanceEventStore, "load_events", counting
+        )
+        run_live(
+            settings=settings,
+            config=LiveModeConfig(open_window=False, durable=True),
+        )
+        out = capsys.readouterr().out
+        # The established P2-5 wording is preserved; the S4 line names
+        # the same-snapshot session recovery.
+        assert (
+            "durable mode: cooldown recovery replayed before any event "
+            "processing (0 anchor(s) restored, 0 expired, 0 clamped, "
+            "torn tail: no)" in out
+        )
+        assert (
+            "durable mode: session state recovered from the same "
+            "validated snapshot (0 open session(s) restored, "
+            "0 checkout anchor(s) restored, 0 expired)" in out
+        )
+        # Startup loaded the journal exactly once.
+        assert loads == [1]
+
+    def test_no_auto_checkout_trigger_journal_stays_check_in_only(
+        self, tmp_path: Path
+    ) -> None:
+        """Ordinary verified attendance keeps creating CHECK_IN events
+        only; S4 introduces no checkout caller of any kind."""
+        settings = _settings(tmp_path)
+        result = run_smoke(
+            settings=settings, durable=True, wall_clock=_fake_wall()
+        )
+        assert result.event_created is True
+        load = AttendanceEventStore(settings=settings).load_events()
+        assert [e.event_type for e in load.events] == [
+            EventType.CHECK_IN
+        ]
