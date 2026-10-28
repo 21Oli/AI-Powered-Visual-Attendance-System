@@ -204,7 +204,14 @@ python tools/delete_enrollment.py --employee-id "EMP-0042" --execute --confirm-d
 ## Attendance event storage
 
 Accepted attendance events are durably journalled as JSON Lines at
-`data/attendance/events.jsonl` (`AttendanceEventStore`). A composition
+`data/attendance/events.jsonl` (`AttendanceEventStore`). The journal
+carries the two existing event types — `check_in` and `check_out`
+(`EventType`, Phase 2 P2-6) — each in the same five-key envelope and
+the same journal schema version (1). Ordinary verified attendance
+continues to use the existing check-in path; the engine never
+auto-triggers a checkout merely because an employee has an open
+session — a checkout decision only occurs when an explicit checkout
+decision reaches the engine's `CHECK_OUT` path. A composition
 service (`DurableAttendanceService`) feeds engine decisions to the
 store and reports exactly four outcomes — no event, durably persisted,
 persistence rejected before any write (confirmed failure), or
@@ -219,7 +226,7 @@ is reported as an unconfirmed record); an interrupted append can leave
 an incomplete trailing line, which loading excludes *and reports*
 (`incomplete_trailing_record=True`) while corruption anywhere else
 raises a typed error with the exact line number. Details:
-[DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md) Steps 21–25.
+[DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md) Steps 21–26.
 
 ### Inspecting the journal (read-only report CLI)
 
@@ -228,7 +235,13 @@ A on-demand, read-only operator utility inspects the journal:
 default, `--journal-order` for append order), filterable by verbatim
 employee ID (`--employee`, repeatable) and by UTC date half-open
 intervals (`--since`/`--until`/`--day`), with `--summary` for
-per-employee × per-day check-in counts. It never appends, repairs, or
+per-employee × per-day counts, kept separate per event type: the
+`CHECK_INS` table counts `check_in` events only, and an additive
+`CHECK_OUTS` table counts `check_out` events only when the filtered
+selection contains at least one checkout. Pre-P2-6 (check-in-only)
+histories keep the prior summary format exactly; no work duration,
+session window, or payroll total is inferred — the report is
+count-oriented only. It never appends, repairs, or
 rewrites the journal; it is **not wired into the live attendance
 workflow** (the live demo remains unconnected to persistence). Exit
 codes: `0` success (including an empty journal and a torn trailing
@@ -248,25 +261,78 @@ python tools/run_integration_demo.py --smoke --durable   # journal inside the ru
 python tools/run_integration_demo.py --live --durable    # journals to data/attendance/events.jsonl
 ```
 
-* **What is persisted:** only check-in events the real attendance
-  engine authorizes (verified identity + cooldown eligibility) — one
-  record, the exact `schema_version`/`event_id`/`employee_id`/
+* **What is persisted:** check-in **and check-out** events the real
+  attendance engine authorizes (verified identity + the applicable
+  independent check-in/check-out cooldown eligibility; a check-out is
+  accepted only against a known open session — in memory or, on an
+  in-memory miss, via the journal-backed session lookup) — one record,
+  the exact `schema_version`/`event_id`/`employee_id`/
   `event_type`/`occurred_at` (UTC) envelope, appended with per-record
   `fsync`. Repeat check-ins are suppressed by recovering previously
-  journaled cooldown anchors *before* any event is processed.
+  journaled cooldown anchors *before* any event is processed. P2-6
+  durable startup restores check-in cooldown state **and** open-
+session/check-out-anchor state from **one validated journal
+  snapshot**; the journal-backed session lookup reloads persisted
+events on every query (never a stale cache). There is no automatic
+checkout trigger: a checkout is only ever an explicit engine decision.
 * **Failure behavior (fail closed):** corrupt or unreadable journal
   data stops durable mode before any event is processed (smoke: exit
   `1` with the typed error; live: the run aborts before the camera
-  opens). An uncertain append is reported as
+  opens). Migration/validation errors in the session lookup propagate
+  — an employee is never silently treated as having no open session.
+  An uncertain append is reported as
   `persistence unconfirmed` and is **never** automatically retried.
-* **What is never persisted or logged:** check-out attempts (unknown
-  rules, deferred), unknown faces, crops, embeddings, similarity
-  scores, or frames of any kind.
+* **What is never persisted or logged:** unknown faces, crops,
+  embeddings, similarity scores, or frames of any kind.
 * **Real-camera status:** automated verification of the durable live
   path used injected camera/detector doubles; a supervised owner-run
   `--live --durable` session is the remaining evidence for real-camera
   behavior. Empirical CV accuracy evaluation remains blocked pending
   consented labeled data.
+
+### Journal compatibility and upgrade/rollback practice
+
+Verified from source (Phase 2, P2-6):
+
+* The journal schema version is **1** (`ATTENDANCE_JOURNAL_SCHEMA_VERSION`)
+  and remains **1** with `CHECK_OUT` events — no schema bump or
+  migration was needed because the envelope is unchanged and the
+  `event_type` field simply carries the new `check_out` value.
+* Unknown event types, malformed records, and unsupported schema
+  versions are never skipped by the loader: the journal fails with a
+  typed error (exact line number reported), in every consumer — the
+  report CLI (exit `2`), durable-mode recovery, and the
+  journal-backed session lookup.
+* **Rollback compatibility risk (verified, treat as real):** releases
+  from before P2-6 know only `check_in`. A release at the P2-5
+  checkpoint (`38984f6`) rejects the value `check_out` when mapping
+  `event_type` through its event model, so `load_events()` fails for
+  the **whole journal**, not just the checkout lines: an older release
+  running against a journal that already contains checkout events
+  reports corrupt data and cannot read any of it (fail closed — the
+  session/anchor state for employees with only check-ins is equally
+  unreachable). One checkout event therefore makes the journal
+  unreadable by the older release.
+
+Recommended operational practice (not automated; nothing here is
+executed by the project):
+
+1. **Back up before upgrading:** copy
+   `data/attendance/events.jsonl` (and the whole `attendance/`
+   directory) before any version change.
+2. **Verify the target release's journal compatibility first** — the
+   P2-6-era releases read schema-version-1 journals containing both
+   `check_in` and `check_out` events; older releases do not (above).
+3. **Test recovery on a synthetic copy** before production rollout:
+   point a temporary `DATA_DIR` at a copied journal and run the
+   durable smoke path.
+4. **If a downgrade is required while checkout events exist**, expect
+   fail-closed behavior — do **not** manually delete, re-sort, or edit
+   journal lines as a workaround.
+5. **Preserve the original journal** during any rollback
+   investigation and restore a verified backup, or follow a separately
+   reviewed migration/recovery procedure; the repository does not ship
+   a conversion or downgrade tool.
 
 ## Environment variables
 

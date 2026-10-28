@@ -815,3 +815,69 @@ paths.
   evaluation remains BLOCKED pending consented labeled data; the
   check-out/shift/daily-dedup business-rules milestone remains
   explicitly future work.
+
+### D23 — Check-out events, three independently bounded engine maps, journal-backed session recovery, one-snapshot startup (Phase 2, P2-6)
+
+P2-6 adds `EventType.CHECK_OUT` (serialized value `check_out`) and
+symmetric-but-independent state without changing the event envelope,
+the journal schema version (still 1), or the decision authority.
+
+* **Independent bounded state (S2).** The engine keeps three separate
+  maps — check-in cooldown anchors, check-out cooldown anchors,
+  open-session markers — each LRU-bounded at `max_tracked_employees`
+  and evicted independently; eviction in one map never removes
+  entries from another. Accepting a `CHECK_IN` opens/refreshes the
+  open-session marker (last writer wins after the check-in cooldown);
+  an accepted `CHECK_OUT` closes the marker and anchors the
+  independent check-out cooldown (`check_out_cooldown_seconds`),
+  never touching the check-in anchor; checkout cooldown rejections
+  leave session and anchors untouched; a checkout with no known open
+  session creates no event and mutates nothing. No session-capacity
+  status was invented; on an evicted marker with an honest hookless
+  miss, checkout is rejected as unknown-session.
+* **Journal-backed adjudication, fresh per query (S2/S3).** On an
+  in-memory session miss, the engine consults an injected
+  `open_session_lookup` hook — wired, in durable composition, to
+  `make_journal_open_session_lookup(store)`, which `load_events()`s
+  the full journal, validates it through the unchanged P2-1
+  fail-closed rules, and folds it to per-employee latest events.
+  Latest `CHECK_IN` ⇒ open session; `CHECK_OUT` or no events ⇒ none.
+  Corruption/I-O/loader errors propagate; they are never converted to
+  “no open session”. The lookup is **never cached**: each miss reloads
+  the journal.
+* **Shared fold, no competing algorithms (S3).** One pure helper,
+  `fold_latest_events(events)`, selects per employee the maximum of
+  `(occurred_at, journal_position)` — later timestamp wins, equal
+  timestamps by the later journal entry, UTC-normalized datetime
+  comparison, deterministic. Recovery (check-in anchors over the
+  `CHECK_IN` allowlist; session/checkout anchors over all events) and
+  the lookup all consume it. Check-in anchor recovery remains exactly
+  the pre-P2-6 contract.
+* **Single-snapshot startup (S4).** Durable composition calls
+  `recover_attendance_startup_state(engine, store, wall_now)`: one
+  validated `load_events()` snapshot feeds both the P2-3 check-in
+  anchor replay and the P2-6 open-session/check-out-anchor replay
+  (byte-compatible with the separate functions, minus the duplicate
+  journal read). Recovery completes fully before any attendance
+  processing, detector load, or camera open, and session-lookup
+  wiring precedes processing; a journal error fails closed before any
+  hardware is touched. Default (non-durable) behavior, defaults, CLI
+  flags, and the journal's check-in-only production path (no automatic
+  checkout trigger) are unchanged.
+* **Reporting semantics (S5).** `tools/attendance_report.py --summary`
+  counts `check_in` events under `CHECK_INS` and `check_out` events
+  under an additive `CHECK_OUTS` table (printed only when the
+  selection contains check-outs); check-in-only histories keep the
+  prior output. The report is count-oriented: no work duration,
+  session window, break time, or payroll inference exists.
+* **Schema/rollback boundary (verified from source).** The journal
+  stays schema version 1 with the five-key envelope; `check_out`
+  records are ordinary version-1 records. Older releases (up to and
+  including the P2-5 checkpoint `38984f6`, whose event model lacks
+  `CHECK_OUT`) map the unknown `check_out` value to
+  `CorruptAttendanceJournalError` in `load_events()` — a whole-journal
+  fail-closed rejection, not a per-record skip. Downgrading across
+  that boundary to a journal containing checkouts leaves every
+  consumer (report CLI exit 2, durable startup, session lookup)
+  unable to read the journal; the documented practice is a verified
+  backup restore, never hand-editing journal lines.

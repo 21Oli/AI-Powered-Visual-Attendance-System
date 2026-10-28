@@ -4,6 +4,23 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 2, P2-6: Check-out event support, journal-backed session recovery, checkout-aware reporting
+
+### Added
+
+* `EventType.CHECK_OUT` (serialized value `check_out`) in the unchanged five-key journal envelope at the unchanged schema version 1; accepted check-outs are persistable through the existing store like check-ins.
+* `AttendanceConfig.check_out_cooldown_seconds = 300.0` (validated like the existing cooldowns; `check_in_cooldown_seconds` untouched). The value is an engineering default, not a calibrated organizational policy.
+* `src/attendance.py` `AttendanceEngine`: three independently capacity-bounded maps (check-in anchors, check-out anchors, open-session markers), open-session decisions (accepted checkout closes the session and starts the independent checkout cooldown without clearing the check-in anchor; checkout without a known open session is rejected eventless and stateless), and the additive `open_session_lookup` constructor hook for durable adjudication of in-memory misses (strict Boolean contract; typed error on non-Boolean; exceptions propagate; never a silent `False`; never cached). No automatic checkout trigger exists.
+* `src/attendance_recovery.py`: pure `fold_latest_events(events)` (per-employee max of `(occurred_at, journal_position)`; equal timestamps by later journal position; UTC datetime comparison; deterministic), shared by `recover_session_state` (open-session/check-out-anchor recovery off the folded latest event), the pre-existing check-in anchor recovery (unchanged contract), and `make_journal_open_session_lookup(store)` (fresh validated `load_events()` per invocation; corruption/I-O errors propagate, never coerced to `False`). Additive engine restoration APIs `restore_open_session` / `restore_check_out_anchor` follow the established P2-3 restoration contract.
+* `src/integration_demo.py` durable paths: `recover_attendance_startup_state` performs **one** validated journal snapshot feeding both the P2-3 check-in-anchor replay and the P2-6 open-session/check-out-anchor replay, before any attendance processing, detector load, or camera open; the durable engine's session hook is the journal-backed lookup. Corrupt/unreadable journals stop durable startup before any hardware is touched; default non-durable behavior is unchanged and `--durable` remains opt-in.
+* `tools/attendance_report.py --summary`: `CHECK_INS` counts `check_in` events only (pre-P2-6 journals keep the prior output byte-identically) and an additive `CHECK_OUTS` table counts `check_out` events only when the selection contains at least one checkout; count-oriented only (no duration/payroll inference).
+* Documentation: README journal-compatibility/upgrade-rollback section, ARCHITECTURE D23, DEVELOPMENT_STATUS Step 26.
+
+### Notes
+
+* **Rollback compatibility risk (verified from source):** releases through the P2-5 checkpoint (commit `38984f6`) map the unknown `check_out` event type to `CorruptAttendanceJournalError` during `load_events()` — a whole-journal fail-closed rejection, not a per-record skip. A journal that already contains checkout events becomes entirely unreadable by such releases; the recommended practice is a verified journal backup before upgrading and a backup restore (never hand-edited journal lines) for rollback. The store's unknown-event-type and torn-tail handling is otherwise unchanged.
+* Ordinary verified attendance continues to produce only `check_in` events; a checkout only occurs through an explicit checkout decision request reaching the engine. Test verdicts (2026-10-27 session, hardware-free, synthetic data): recovery 56, core battery 258, integration/durable/report 104, integration-demo CLI 49, report CLI 40 — all passed, exit 0 each; `git diff --check` exit 0. No camera, no real biometric/attendance data, no Git mutations.
+
 ## [0.24.0] — 2026-10-24 — Phase 2, P2-5: Opt-in durable composition wired into live and smoke modes (owner-approved wiring milestone)
 
 ### Added

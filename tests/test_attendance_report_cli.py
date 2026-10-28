@@ -309,6 +309,112 @@ class TestSummary:
         assert "EMP-001" not in out
         assert "2026-10-23 EMP-002 1" in out
 
+    # -- P2-6 S5: check-out events are never counted as check-ins ---
+
+    def test_checkout_counts_as_checkout_not_checkin(self, tmp_path) -> None:
+        _write_journal(
+            tmp_path,
+            [
+                _record("EMP-001", event_id="ev-1", occurred_at="2026-10-23T08:00:00+00:00"),
+                _record("EMP-001", event_id="ev-2", occurred_at="2026-10-23T09:00:00+00:00"),
+                _record(
+                    "EMP-001",
+                    event_type="check_out",
+                    event_id="ev-3",
+                    occurred_at="2026-10-23T17:00:00+00:00",
+                ),
+            ],
+        )
+        code, out, _err = _run(["--summary"], tmp_path)
+        assert code == 0
+        # Check-in table counts only CHECK_IN events.
+        assert "DAY EMPLOYEE CHECK_INS" in out
+        assert "2026-10-23 EMP-001 2" in out
+        # The checkout lands in the additive CHECK_OUTS table.
+        assert "DAY EMPLOYEE CHECK_OUTS" in out
+        assert "2026-10-23 EMP-001 1" in out
+        # Cross-coverage: the check-in total rows and checkout rows are
+        # disjoint counts (2 and 1, asserted above) — exactly one
+        # occurrence each, never 3 merged under CHECK_INS.
+        lines = out.splitlines()
+        assert sum(
+            1 for line in lines if line == "2026-10-23 EMP-001 2"
+        ) == 1
+        assert sum(
+            1 for line in lines if line == "2026-10-23 EMP-001 1"
+        ) == 1
+
+    def test_checkin_only_history_has_no_checkout_table(self, tmp_path) -> None:
+        _write_journal(
+            tmp_path,
+            [
+                _record("EMP-001", event_id="ev-1", occurred_at="2026-10-23T08:00:00+00:00"),
+                _record("EMP-002", event_id="ev-2", occurred_at="2026-10-24T08:00:00+00:00"),
+            ],
+        )
+        code, out, _err = _run(["--summary"], tmp_path)
+        assert code == 0
+        assert "CHECK_INS" in out
+        assert "CHECK_OUTS" not in out  # additive table absent entirely
+
+    def test_mixed_history_reports_each_type_per_employee_and_day(
+        self, tmp_path
+    ) -> None:
+        _write_journal(
+            tmp_path,
+            [
+                # EMP-A: two sessions on one day (in/out/in/out).
+                _record("EMP-A", event_id="ev-1", occurred_at="2026-10-23T08:00:00+00:00"),
+                _record("EMP-A", event_type="check_out", event_id="ev-2", occurred_at="2026-10-23T12:00:00+00:00"),
+                _record("EMP-A", event_id="ev-3", occurred_at="2026-10-23T13:00:00+00:00"),
+                _record("EMP-A", event_type="check_out", event_id="ev-4", occurred_at="2026-10-23T17:30:00+00:00"),
+                # EMP-B: check-out only, on a different day (sorted last).
+                _record("EMP-B", event_type="check_out", event_id="ev-5", occurred_at="2026-10-24T09:00:00+00:00"),
+                # EMP-C: check-in only on 2026-10-23.
+                _record("EMP-C", event_id="ev-6", occurred_at="2026-10-23T08:30:00+00:00"),
+            ],
+        )
+        code, out, _err = _run(["--summary"], tmp_path)
+        assert code == 0
+        lines = out.splitlines()
+        ci_index = lines.index("DAY EMPLOYEE CHECK_INS")
+        co_index = lines.index("DAY EMPLOYEE CHECK_OUTS")
+        # Day order first, then verbatim employee ID — per table, one
+        # table per type, check-in table printed before checkout table.
+        assert ci_index < co_index
+        checkin_rows = lines[ci_index + 1 : co_index]
+        assert checkin_rows == [
+            "2026-10-23 EMP-A 2",
+            "2026-10-23 EMP-C 1",
+        ]
+        # Stop at the trailing ``filters:`` echo main() appends after
+        # the summary tables.
+        end_index = next(
+            i
+            for i, line in enumerate(lines)
+            if line.startswith("filters:")
+        )
+        checkout_rows = lines[co_index + 1 : end_index]
+        assert checkout_rows == [
+            "2026-10-23 EMP-A 2",
+            "2026-10-24 EMP-B 1",
+        ]
+    def test_summary_of_corrupt_journal_still_fails_closed(
+        self, tmp_path
+    ) -> None:
+        _write_journal(
+            tmp_path,
+            [
+                _record(),
+                '{"broken json',
+            ],
+        )
+        code, out, err = _run(["--summary"], tmp_path)
+        assert code == 2
+        assert "journal error" in err
+        assert "CHECK_INS" not in out
+        assert "CHECK_OUTS" not in out
+
 
 # ---------------------------------------------------------------------------
 # Torn trailing record: rows print, warning on stderr, exit 0

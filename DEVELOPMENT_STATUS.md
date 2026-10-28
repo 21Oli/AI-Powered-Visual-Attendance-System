@@ -3,6 +3,72 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 26 — check-out event support: independent bounded engine state, journal-backed session recovery, single-snapshot startup, checkout-aware reporting (Phase 2, P2-6) (2026-10-27)
+
+**P2-6, implemented in owner-authorized stages S1–S6** on `main`:
+
+* **S1 (`src/config.py` + tests):** additive
+  `AttendanceConfig.check_out_cooldown_seconds = 300.0`, validated like
+  the existing cooldowns (booleans/non-finite/zero/negative rejected);
+  `check_in_cooldown_seconds = 300.0` untouched. The default is an
+  engineering value, not an organization-calibrated policy.
+* **S2+S2.1 (`src/attendance.py` + engine tests):** `CHECK_OUT` is an
+  `EventType` with its own serialized value `check_out` (envelope and
+  schema version unchanged); the engine keeps **three independently
+  bounded maps** — check-in cooldown anchors, check-out cooldown
+  anchors, open-session markers — each at `max_tracked_employees`,
+  eviction in one never touching the others. Open-session decisions:
+  accepted `CHECK_IN` opens/refreshes the marker (last writer wins);
+  checkout without a known open session is rejected with no event and
+  no state change; an accepted `CHECK_OUT` closes the session and
+  starts the independent check-out cooldown without touching the
+  check-in anchor; cooldown-rejected checkouts preserve the session.
+  An optional `open_session_lookup` hook adjudicates in-memory misses
+  via a fresh external query: strict Boolean contract, typed error on
+  non-Boolean, propagated exceptions, never silently `False`. No
+  automatic checkout trigger — a checkout only occurs via an explicit
+  decision request.
+* **S3 (`src/attendance_recovery.py` + tests):** one pure
+  `fold_latest_events(events)` — per employee, the max of
+  `(occurred_at, journal_position)` (later timestamp wins, equal
+  timestamps by later journal position; UTC-normalized datetime
+  comparison; deterministic per-employee isolation) — shared by
+  recovery and the new `make_journal_open_session_lookup(store)`
+  lookup factory (fresh validated `load_events()` per query, errors
+  propagated). `recover_session_state` restores an open-session marker
+  for a latest-`CHECK_IN` employee and a check-out cooldown anchor
+  only when the latest event is `CHECK_OUT`; a corrupt journal fails
+  closed with no partial restoration. Additive engine APIs
+  `restore_open_session` / `restore_check_out_anchor` mirror the P2-3
+  restoration pattern (wall-to-wall ages; expiry decided by the
+  engine's configured cooldown).
+* **S4 (`src/integration_demo.py` + durable tests):** both durable
+  paths run single-snapshot startup recovery
+  (`recover_attendance_startup_state`: **one** validated journal load
+  feeding the P2-3 check-in-anchor phase and the P2-6
+  session/checkout-anchor phase) **before** any attendance processing,
+  detector load, or camera open; corrupt or unreadable journals fail
+  closed before any hardware is touched. The durable engine's open-
+session hook is the journal-backed lookup (fresh load per query,
+  never cached). Non-durable behavior and defaults are unchanged;
+  durable mode remains opt-in behind `--durable`; the journal stays
+  check-in-only under ordinary attendance (no invented trigger).
+* **S5 (`tools/attendance_report.py` + tests):** the report summary no
+  longer counts check-outs as check-ins. The `CHECK_INS` table counts
+  `check_in` events only (byte-identical for pre-P2-6 journals); an
+  additive `CHECK_OUTS` table counts `check_out` events only when the
+  selection contains at least one checkout. The journal is never
+  rewritten; exit codes and flags unchanged.
+* **S6 (docs only):** README compatibility/upgrade section, this
+  status entry, ARCHITECTURE D23, changelog entry.
+
+**Verification observed (2026-10-27 session, hardware-free, synthetic
+data any):** recovery suite 56 passed; core battery (recovery + engine +
+config + store + persistence) 258 passed; integration/durable/report
+suites 104 passed; integration-demo CLI suite 49 passed; report CLI
+suite 40 passed (36 prior + 4 S5-focused); `git diff --check` exit 0.
+No camera, no real biometric/attendance data, no Git mutations.
+
 ## Step 25 — opt-in durable composition wired into live and smoke modes (Phase 2, P2-5) (2026-10-24)
 
 **Owner-approved wiring milestone only: P2-1 through P2-4 components

@@ -144,8 +144,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "Read-only inspection of the durable attendance journal "
             "(<DATA_DIR>/attendance/events.jsonl). Lists events, "
             "filters them, or summarizes check-ins per employee and "
-            "day. Never modifies the journal; report is not wired "
-            "into the live attendance workflow."
+            "day (plus a per-employee/day check-out table when the "
+            "selection contains check-outs). Never modifies the "
+            "journal; report is not wired into the live attendance "
+            "workflow."
         ),
     )
     parser.add_argument(
@@ -334,17 +336,38 @@ def _print_listing(
 def _print_summary(
     filtered: Sequence[tuple[AttendanceEvent, int]],
 ) -> None:
-    """Per-employee x per-day counts: day order, then verbatim ID."""
-    counts: dict[tuple[str, str], int] = {}
+    """Per-employee x per-day counts: day order, then verbatim ID.
+
+    P2-6 S5: the event type is never misclassified — ``CHECK_IN``
+    events feed the ``CHECK_INS`` table only, ``CHECK_OUT`` events
+    feed the additive ``CHECK_OUTS`` table only (printed when the
+    filtered selection contains at least one check-out). Each table
+    prints its header only when non-empty, so pre-S2 (check-in-only)
+    history keeps the byte-identical legacy summary output.
+    """
+    # Deferred into the same lazy block as main()'s store import: no
+    # new import-time behavior, the module graph is already loaded.
+    from src.attendance import EventType
+
+    checkins: dict[tuple[str, str], int] = {}
+    checkouts: dict[tuple[str, str], int] = {}
     for event, _index in filtered:
         key = (
             event.occurred_at.strftime("%Y-%m-%d"),
             event.employee_id,
         )
-        counts[key] = counts.get(key, 0) + 1
-    print("DAY", "EMPLOYEE", "CHECK_INS")
-    for (day, employee_id), count in sorted(counts.items()):
-        print(day, employee_id, count)
+        if event.event_type is EventType.CHECK_IN:
+            checkins[key] = checkins.get(key, 0) + 1
+        elif event.event_type is EventType.CHECK_OUT:
+            checkouts[key] = checkouts.get(key, 0) + 1
+    if checkins:
+        print("DAY", "EMPLOYEE", "CHECK_INS")
+        for (day, employee_id), count in sorted(checkins.items()):
+            print(day, employee_id, count)
+    if checkouts:
+        print("DAY", "EMPLOYEE", "CHECK_OUTS")
+        for (day, employee_id), count in sorted(checkouts.items()):
+            print(day, employee_id, count)
 
 
 def _print_filters_echo(
