@@ -310,3 +310,138 @@ def test_attendance_frozen_config_instance_still_frozen() -> None:
     """The new field does not weaken the frozen-constant convention."""
     with pytest.raises(dataclasses.FrozenInstanceError):
         ATTENDANCE.check_out_cooldown_seconds = 99.0  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# 7. Phase 3 (Gate 1.2): database URLs, loopback-only API_HOST, strict API_PORT
+# ---------------------------------------------------------------------------
+
+
+def test_default_phase3_settings_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset Phase 3 variables resolve to the documented safe defaults:
+    no DSN targets (``None`` — never a silent local fall-through),
+    loopback API host, port 8000."""
+    for var in (
+        "ATTENDANCE_DATABASE_URL",
+        "ATTENDANCE_TEST_DATABASE_URL",
+        "API_HOST",
+        "API_PORT",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    settings = load_settings()
+    assert settings.database_url is None
+    assert settings.test_database_url is None
+    assert settings.api_host == "127.0.0.1"
+    assert settings.api_port == 8000
+
+
+@pytest.mark.parametrize(
+    ("var", "value"),
+    [
+        ("ATTENDANCE_DATABASE_URL", "postgresql://u:p@127.0.0.1:5432/attendance"),
+        ("ATTENDANCE_TEST_DATABASE_URL", "postgresql://u:p@127.0.0.1:5433/attendance_test"),
+    ],
+)
+def test_env_sets_database_urls_verbatim(
+    monkeypatch: pytest.MonkeyPatch, var: str, value: str
+) -> None:
+    """DSNs pass through verbatim (no syntax validation in the config
+    layer — psycopg owns the connection-string dialect at first use)."""
+    monkeypatch.setenv(var, value)
+    settings = load_settings()
+    assert getattr(settings, "database_url" if var == "ATTENDANCE_DATABASE_URL" else "test_database_url") == value
+
+
+@pytest.mark.parametrize("value", ["", "   ", "\t"])
+def test_blank_database_url_is_treated_as_unset(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("ATTENDANCE_DATABASE_URL", value)
+    settings = load_settings()
+    assert settings.database_url is None
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["localhost", "127.0.0.1", "127.255.0.7", "::1"],
+)
+def test_api_host_accepts_loopback_values(
+    monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    monkeypatch.setenv("API_HOST", host)
+    assert load_settings().api_host == host
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "0.0.0.0",        # all interfaces — explicitly forbidden
+        "192.168.1.10",   # LAN address — forbidden
+        "example.com",    # bare hostname — forbidden
+        "not-an-address",
+        "  ",             # blank
+        "",               # empty
+    ],
+)
+def test_api_host_rejects_non_loopback_and_invalid_values(
+    monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    monkeypatch.setenv("API_HOST", host)
+    with pytest.raises(ConfigError):
+        load_settings()
+
+
+@pytest.mark.parametrize(
+    "port",
+    ["1", "80", "8000", "65535"],
+)
+def test_api_port_accepts_valid_range(
+    monkeypatch: pytest.MonkeyPatch, port: str
+) -> None:
+    monkeypatch.setenv("API_PORT", port)
+    assert load_settings().api_port == int(port)
+
+
+@pytest.mark.parametrize(
+    "port",
+    [
+        "0",        # below range
+        "65536",     # above range
+        "-1",        # negative — sign rejected before range check
+        "8000.5",    # decimal separator rejected
+        "＋8000",    # non-ASCII digit run rejected
+        "８０００",    # full-width digits rejected
+        "eight",     # not a number at all
+        "",          # empty string
+        "  ",        # whitespace-only
+    ],
+)
+def test_api_port_rejects_invalid_values(
+    monkeypatch: pytest.MonkeyPatch, port: str
+) -> None:
+    monkeypatch.setenv("API_PORT", port)
+    with pytest.raises(ConfigError):
+        load_settings()
+
+
+def test_direct_construction_validates_phase3_fields_too() -> None:
+    """``__post_init__`` validates identically for direct construction (same
+    rule as every other config dataclass here: invalid values never survive)."""
+    with pytest.raises(ConfigError):
+        AppSettings(api_host="0.0.0.0")
+    with pytest.raises(ConfigError):
+        AppSettings(api_port=0)
+    with pytest.raises(ConfigError):
+        AppSettings(api_port=65536)
+    with pytest.raises(ConfigError):
+        AppSettings(api_port=True)  # bool rejected like every other int field
+
+
+def test_phase3_fields_frozen_like_the_rest() -> None:
+    settings = load_settings()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        settings.api_host = "0.0.0.0"  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        settings.api_port = 9999  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        settings.database_url = "postgresql://attacker@127.0.0.1/evil"  # type: ignore[misc]

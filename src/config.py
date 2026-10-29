@@ -29,6 +29,7 @@ numbers through the pipeline modules.
 
 from __future__ import annotations
 
+import ipaddress
 import math
 import os
 from dataclasses import dataclass, field
@@ -605,6 +606,76 @@ def _resolve_env_path(var: str, default: str) -> Path:
     return path if path.is_absolute() else (PROJECT_ROOT / path)
 
 
+def _resolve_env_database_url(var: str) -> str | None:
+    """Resolve a DSN env var; unset and whitespace-only both mean unset.
+
+    No DSN *syntax* validation happens here — the DSN value is passed
+    through verbatim (only surrounding whitespace is trimmed, which
+    cannot corrupt a psycopg-legal connection string) and its syntax is
+    psycopg's contract, checked at first use in :mod:`src.db`. Keeping
+    this module driver-free preserves the lightweight import rule.
+    """
+    raw = os.getenv(var, "").strip()
+    return raw if raw else None
+
+
+def _resolve_env_api_host() -> str:
+    """Resolve ``API_HOST`` (loopback-only; failed values raise ConfigError)."""
+    return os.getenv("API_HOST", "127.0.0.1").strip()
+
+
+def _resolve_env_api_port() -> int:
+    """Resolve ``API_PORT`` as a strict ASCII integer in ``[1, 65535]``.
+
+    ``str.isdigit`` alone accepts non-ASCII digit runs (e.g. Arabic-Indic
+    digits), so the value must additionally be ASCII — signs and decimal
+    separators are rejected the same way.
+    """
+    raw = os.getenv("API_PORT", "8000").strip()
+    if not (raw.isascii() and raw.isdigit()):
+        raise ConfigError(
+            f"Invalid API_PORT {raw!r}: expected an ASCII integer port number"
+        )
+    return _validate_api_port_value(int(raw))
+
+
+def _validate_api_port_value(port: int) -> int:
+    """Validate a concrete port value; shared by env and direct construction."""
+    if isinstance(port, bool) or not isinstance(port, int):
+        raise ConfigError(f"api_port must be an int, got {type(port).__name__}")
+    if not 1 <= port <= 65535:
+        raise ConfigError(
+            f"api_port {port} is outside the valid range [1, 65535]"
+        )
+    return port
+
+
+def _validate_api_host_value(host: str) -> str:
+    """Validate a concrete host value (loopback-only); shared by both paths.
+
+    Accepts ``localhost``, any ``127.0.0.0/8`` address, and ``::1``.
+    Bare hostnames and non-loopback addresses are rejected: Phase 3's API
+    is loopback-only and must never accidentally bind outward.
+    """
+    if not isinstance(host, str) or not host.strip():
+        raise ConfigError("api_host must be a non-empty hostname or IP address")
+    if host == "localhost":
+        return host
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        raise ConfigError(
+            f"Invalid API_HOST {host!r}: not a recognized IP address "
+            "(use localhost, a 127.0.0.0/8 address, or ::1)"
+        ) from None
+    if not address.is_loopback:
+        raise ConfigError(
+            f"Invalid API_HOST {host!r}: non-loopback binding is forbidden "
+            "in Phase 3 (use 127.0.0.0/8, ::1, or localhost)"
+        )
+    return host
+
+
 @dataclass(frozen=True)
 class AppSettings:
     """Environment-specific settings plus derived project paths.
@@ -619,6 +690,26 @@ class AppSettings:
     data_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "data")
     #: Log directory consumed by ``src/logging_setup.py`` (same anchoring rule).
     log_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "data" / "logs")
+    #: PostgreSQL DSN for employee metadata (Phase 3). ``None`` means unset:
+    #: all database-touching layers must fail fast, never fall through to a
+    #: local default connection target.
+    database_url: str | None = None
+    #: Dedicated integration-test DSN (Phase 3 test gates only). Never set
+    #: this to a shared or production database.
+    test_database_url: str | None = None
+    #: Development API bind address. Loopback-only, enforced below; the
+    #: Phase 3 API is explicitly not network-exposed.
+    api_host: str = "127.0.0.1"
+    #: Development API bind port. Validated to a strict ``[1, 65535]`` range.
+    api_port: int = 8000
+
+    def __post_init__(self) -> None:
+        # Same rule as every other configuration object here: an invalid
+        # value must fail at construction, not silently survive until it is
+        # read later. The loopback constraint is this dataclass's own
+        # constant-level rule (like CameraConfig index/frame bounds).
+        _validate_api_port_value(self.api_port)
+        _validate_api_host_value(self.api_host)
 
     # -- Derived paths (constants by composition, not environment) ---------
 
@@ -661,6 +752,12 @@ def load_settings() -> AppSettings:
         debug=_resolve_env_debug(),
         data_dir=_resolve_env_path("DATA_DIR", "data"),
         log_dir=_resolve_env_path("LOG_DIR", "data/logs"),
+        database_url=_resolve_env_database_url("ATTENDANCE_DATABASE_URL"),
+        test_database_url=_resolve_env_database_url(
+            "ATTENDANCE_TEST_DATABASE_URL"
+        ),
+        api_host=_resolve_env_api_host(),
+        api_port=_resolve_env_api_port(),
     )
 
 

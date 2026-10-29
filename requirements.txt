@@ -7,9 +7,22 @@
 # Rationale: smaller, honest commits; version risk is verified at the step
 # that introduces each package. See ARCHITECTURE.md for the fallback policy.
 #
+# Phase 3 backend (Gate 1.1) — exact pins recorded below.
+#   - fastapi 0.162.0:  newest minor line at the time of step planning,
+#     verified installable on Python 3.14 / Windows x64 (smoke test done).
+#   - uvicorn 0.54.0:   newest minor line; no C extensions required at
+#     this phase's scope (no httptools/uvloop extras).
+#   - psycopg[binary] 3.3.6: pinned binary extra (psycopg-binary wheel),
+#     verified on Python 3.14 / Windows x64.
+#   - pytest 9.1.1 + numpy 2.5.3 + opencv-python 5.0.0.93 + python-dotenv
+#     1.2.3: pre-existing pins from earlier phases, listed unchanged.
+#
 # Python: 3.14 (venv). Tested on Windows x64.
 
 numpy==2.5.3
 opencv-python==5.0.0.93
 python-dotenv==1.2.3
 pytest==9.1.1
+fastapi==0.162.0
+uvicorn==0.54.0
+psycopg[binary]==3.3.6
