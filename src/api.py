@@ -338,17 +338,34 @@ def build_server_config(settings: AppSettings):
 
 
 def run_server(settings: AppSettings | None = None) -> None:
-    """Run the settings-driven loopback server to completion.
+    """Run the settings-driven loopback server to completion (guarded).
+
+    Step 1.4: acquiring the Windows single-process startup guard
+    (:func:`src.api_guard.acquire_startup_guard`) happens **before** any
+    request can be served, and the guard stays held for the entire
+    server lifetime — released by the context manager on orderly
+    shutdown, by the OS after abnormal process termination. A guard
+    failure raises :class:`src.api_guard.StartupGuardError` and Uvicorn
+    is never started, so ``--print-bind`` (which does not serve) and any
+    library caller of this entry point get the same protection.
 
     Uses a fresh :func:`load_settings()` by default (current environment,
     consistent with :mod:`src.db`), then serves on the validated loopback
     host/port. A separate runner (``tools/run_api.py``) owns nothing
-    beyond settings resolution — binding cannot bypass the loopback
-    contract.
+    beyond settings resolution and translating the typed guard failure
+    into its documented startup exit code — binding cannot bypass the
+    loopback contract.
     """
     if settings is None:
         settings = load_settings()
-    import uvicorn  # lazy: the server runtime is not an import dependency
+    from src.api_guard import acquire_startup_guard  # lazy, side-effect free
 
-    server = uvicorn.Server(build_server_config(settings))
-    server.run()
+    with acquire_startup_guard(settings) as guard:
+        # Structured trusted diagnostics only; client/console output
+        # never includes paths.
+        _logger.info("startup guard acquired (%s)", guard.lock_path.name)
+        import uvicorn  # lazy: only after successful guard acquisition
+
+        server = uvicorn.Server(build_server_config(settings))
+        server.run()
+        # leaving the ``with`` block releases the guard (orderly shutdown)

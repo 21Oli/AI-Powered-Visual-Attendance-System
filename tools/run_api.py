@@ -16,12 +16,16 @@ Safety contract
   never start bound to a LAN address. This is a development safety
   measure, not a production security boundary; there is no
   authentication and no CORS in the foundation step.
-* Single-process, no workers: this runner never spawns uvicorn worker
-  processes. A dedicated startup lock guard against multi-process
-  serving follows its finalized design contract in a later authorized
-  step; until then, running a second instance on a different loopback
-  port is permitted and harmless (it is also refused by the OS on port
-  conflict with the same port).
+* Single-process, guarded: the Windows OS-enforced startup guard
+  (:mod:`src.api_guard`, acquired inside :func:`src.api.run_server`
+  before serving) refuses a second API process with a documented exit
+  code and a sanitized diagnostic. The lock file is
+  ``DATA_DIR/api_guard.lock`` (derived from the validated settings;
+  never parsed here). Abnormal process termination is safe — the
+  Windows OS releases the byte-range lock with the process, and a stale
+  guard file never blocks a later startup. POSIX platforms are out of
+  scope for the guard (explicit typed failure, no fallback). This
+  remains a development safeguard, not a security boundary.
 * No database activity: starting or importing this runner never
   connects to PostgreSQL (uvicorn is imported lazily inside the run
   path).
@@ -112,8 +116,18 @@ def main(argv: list[str] | None = None) -> int:
 
     # Lazy server-runtime import: importing this module starts nothing.
     from src.api import run_server
+    from src.api_guard import StartupGuardError
 
-    run_server(settings)
+    try:
+        run_server(settings)
+    except StartupGuardError as exc:
+        # Documented step 1.4 startup-code: the single-instance guard
+        # refused startup (contention) or is unsupported on this
+        # platform. The message is the typed guard's sanitized constant;
+        # no paths, values, or tracebacks. Exit 3 is distinct from 2
+        # (invalid configuration).
+        print(f"run-api: {exc}", file=sys.stderr)
+        return 3
     return 0
 
 

@@ -99,8 +99,23 @@ python tools/run_api.py --print-bind # print the validated bind, then exit
   (`API_HOST`, `API_PORT`; see `.env.example`). Non-loopback or invalid
   values are rejected by configuration validation itself — the runner
   fails fast (exit code 2, sanitized message) and never starts a
-  server. The runner is single-process; multi-process serving is
-  contracted for a later authorized step.
+  server.
+- **Single-process startup guard (Step 1.4, Windows):** before serving,
+  `run_server` acquires an OS-enforced exclusive lock (`msvcrt.locking`,
+  one byte at offset 0 of `data/api_guard.lock`, path derived from
+  `DATA_DIR`) and holds it for the server's entire lifetime. A second
+  API process is refused: the runner exits **3** with a sanitized
+  one-line diagnostic and Uvicorn never starts. Orderly shutdown
+  releases the lock; abrupt process termination also does (the OS
+  releases it with the process), and a stale guard file never blocks a
+  later startup. The lock file is idempotent — the initial byte is
+  written only when empty, so repeated starts never grow it. Non-Windows
+  platforms fail deterministically (no POSIX fallback); this is a
+  **local single-process development safeguard, not a security
+  boundary**.
+- Runner exit codes: `0` success, `2` invalid/non-loopback
+  configuration, `3` startup-guard failure (contention or unsupported
+  platform), `1` for other unexpected runtime failures.
 - Error responses use one stable envelope:
   `{"error": {"code": <machine_code>, "message": <sanitized>}}`, with
   machine codes (`HTTP_ERROR`, `NOT_IMPLEMENTED`, `REQUEST_INVALID`,

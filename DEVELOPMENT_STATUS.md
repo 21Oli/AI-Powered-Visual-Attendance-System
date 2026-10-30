@@ -3,6 +3,76 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 28 — Phase 3 Windows single-process startup guard: OS-enforced msvcrt byte-range lock, guarded `run_server` lifecycle, typed exit-code-3 runner handling (Step 1.4) (2026-10-30)
+
+**Step 1.4, implemented on top of the Step 1.3 foundation (working tree
+uncommitted; owner commits):**
+
+* **`src/api_guard.py` (new):** Windows-only startup guard per the
+  finalized Phase 0 contract. Lock file `DATA_DIR/api_guard.lock` — the
+  path is derived from the validated `AppSettings.data_dir`, never
+  re-parsed. Opened `a+b` (never truncates); the initial byte is
+  written only when the file is empty, so repeated startups (and a
+  guard file left by an abnormal termination) never grow it.
+  Acquisition locks **one byte at offset 0** with a nonblocking
+  exclusive `msvcrt.locking(..., LK_NBLCK, 1)` after `seek(0)`; the
+  handle stays open for the guarded server's whole lifetime. Contention
+  and acquisition/creation failures raise the typed
+  `StartupGuardError`; non-Windows platforms raise
+  `StartupGuardUnavailableError` (deterministic, no POSIX fallback —
+  a Python-level flag cannot guarantee exclusivity, so non-win32 must
+  not *appear* guarded). Exception messages are fixed sanitized
+  constants — no paths, environment values, or raw OS error text
+  (trusted detail stays with `__cause__`/server-side logging).
+* **`src/api.py` (minimal, disclosed Step 1.4 scope adjustment — the
+  file owns `run_server`; flag it for owner confirmation):**
+  `run_server` acquires the guard **before** any request can be served
+  and releases it via the context manager on orderly shutdown; Uvicorn
+  is imported only after successful acquisition. `--print-bind` and
+  app construction never acquire the guard. The eight approved
+  `/api/v1` routes, loopback binding, and error envelopes are untouched.
+* **`tools/run_api.py`:** `run_server` guard failures are translated to
+  the documented **exit code 3** (distinct from the configuration exit
+  code 2) with a single sanitized line — no traceback, no paths.
+  `--print-bind` remains guard-free (it does not serve).
+* **Windows facts verified empirically (probes + tests, win32/Python
+  3.14, temp directories only):** contention from an independent process
+  is denied (`OSError` 13 on `LK_NBLCK`); a **byte read of the locked
+  range is likewise denied** (`PermissionError`) — the lock byte can be
+  verified only after release; orderly release and abrupt termination
+  (`os._exit(1)`, `TerminateProcess`) both leave the file unlockable
+  immediately (the OS releases the byte range with the process); a
+  stale file never blocks acquisition and is never rewritten.
+* **`tests/test_api_guard.py` (new):** 14 tests — in-process
+  acquire/release/idempotent-byte/stale-file/context-manager/sanitization
+  contracts; real subprocess acquisition vs contention; acquisition
+  after orderly release (`RELEASED`) and after crash release
+  (`os._exit(1)`); stale file does not block; failed acquisition stops
+  before any Uvicorn import (fresh-process proof: `uvicorn` never in
+  `sys.modules`); the guarded runner serves healthy on an ephemeral
+  loopback port, the lock stays held while serving, and abrupt
+  termination reopens acquisition; an **orderly real-Uvicorn shutdown
+  (in-process recorded `uvicorn.Server`, graceful `should_exit`)
+  releases the lock** — subprocess `CTRL_BREAK_EVENT` was rejected as
+  the orderly path because uvicorn does not translate `SIGBREAK` into a
+  graceful stop; the runner exits 3 with sanitized stderr and nothing
+  listening under contention; `--print-bind` never acquires.
+  Every child is killed and reaped in `finally` blocks; all fixtures
+  use per-test temporary `DATA_DIR` values (the project's real
+  `data/` directory is never touched). Non-win32 platforms skip the
+  file (documented, deliberate).
+
+**Verification observed (2026-10-30 session, hardware-free, synthetic
+data only, Windows x64):** guard suite **14 passed**; config/db/
+environment/API foundation **120 passed**; core recovery/engine/store/
+persistence/employee battery **265 passed**; integration/durable/report
+suites **153 passed**; live-runner subprocess evidence captured inside
+the tests (health 200 while lock held; contention exit 3; crash and
+orderly release then acquisition). `git diff --check` exit 0. No
+PostgreSQL connection, no migration/schema change, no journal access,
+no camera, no real biometric/employee data, no dependency change, no
+Git mutation.
+
 ## Step 27 — Phase 3 API foundation: approved eight-endpoint application, settings-driven loopback runner, sanitized error surface (Step 1.3) (2026-10-30)
 
 *(Phase 3 relatedly completed earlier, without its own status entry: Gate

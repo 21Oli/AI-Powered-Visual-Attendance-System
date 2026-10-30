@@ -4,6 +4,21 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 3, Step 1.4: Windows single-process startup guard
+
+### Added
+
+* `src/api_guard.py`: Windows-only startup guard — an OS-enforced exclusive `msvcrt.locking` byte-range lock on one byte at offset 0 of `DATA_DIR/api_guard.lock` (path derived from validated `AppSettings.data_dir`). Opened `a+b`; the initial byte is written only when the file is empty, so repeated startups never grow the file. The handle is held for the guarded server's entire lifetime; orderly shutdown releases it, and abnormal process termination is covered by the OS releasing the byte range with the process (a stale guard file never blocks a later startup). Contention/acquisition failures raise the typed `StartupGuardError`; non-Windows platforms raise `StartupGuardUnavailableError` deterministically (no POSIX fallback). Exception messages are fixed sanitized constants.
+* `run_server` guard lifecycle: acquisition happens before any request can be served and before Uvicorn is imported (minimal edit in `src/api.py`, disclosed because that file owns `run_server`); the release is the context-manager exit on orderly shutdown. Direct library callers of `run_server` get the same protection; `--print-bind` and app construction never acquire the guard.
+* `tools/run_api.py`: guard failures surface as the documented exit code 3 (distinct from configuration exit code 2) with a single sanitized one-line diagnostic — no traceback, no paths.
+* `tests/test_api_guard.py`: 14 hardware-free tests using per-test temporary `DATA_DIR` values and real subprocesses — contention across processes, denial while serving, acquisition after orderly release and after abrupt termination, stale-file tolerance, idempotent lock bytes, Uvicorn-never-starts proof, sanitized exit 3, `--print-bind` guard-freedom, and a real graceful-Uvicorn-shutdown release; children are always killed and reaped in `finally`.
+
+### Security notes
+
+* The guard is a **local single-process development safeguard**, not authentication and not a production security boundary; it prevents two API processes serving concurrently on one machine and nothing more.
+* Non-Windows platforms fail explicitly rather than silently substituting a weaker Python-level lock; POSIX locking support remains out of scope for Phase 3.
+* No database connection, schema change, migration, journal access, camera, or biometric/real-runtime-data access occurs in this step (test-enforced hygiene).
+
 ## [Unreleased] — Phase 3, Step 1.3: Loopback-only API foundation
 
 ### Added
