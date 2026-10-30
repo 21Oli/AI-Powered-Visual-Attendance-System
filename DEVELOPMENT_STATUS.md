@@ -3,6 +3,77 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 27 — Phase 3 API foundation: approved eight-endpoint application, settings-driven loopback runner, sanitized error surface (Step 1.3) (2026-10-30)
+
+*(Phase 3 relatedly completed earlier, without its own status entry: Gate
+1.1 dependency verification and Gate 1.2 configuration/typed-DB layer
+(`requirements.txt` pins `fastapi==0.162.0` / `uvicorn` / `psycopg[binary]==3.3.6`,
+`src/config.py` `ATTENDANCE_DATABASE_URL`/`ATTENDANCE_TEST_DATABASE_URL`/
+`API_HOST`/`API_PORT` with strict loopback-only binding, `src/db.py` lazy
+connection layer with DSN-redaction hardening, `.env.example`). Verify
+against commit `4a944d4`.)*
+
+**Step 1.3, implemented on top of the Gate 1.2 baseline (3 new untracked
+files, nothing staged or committed):**
+
+* **`src/api.py`:** FastAPI application foundation. The served inventory
+  is **exactly** the approved eight `/api/v1` endpoints
+  (`GET /health`; the seven non-health approved routes registered at
+  their approved methods, each answering a typed `501 NOT_IMPLEMENTED`
+  envelope closing no business decision, reaching no database, and
+  claiming no attendance operation — deferred to authorized later
+  steps). Docs URLs (`/docs`, `/redoc`, `/openapi.json`) are disabled so
+  the inventory is exactly eight. No CORS/auth middleware is installed.
+  Only `GET /api/v1/health` is implemented (`{"status": "ok"}`; no
+  paths/credentials/employee data/DB details). Error responses are one
+  stable envelope — `"error": {"code", "message"}` — with machine
+  codes separate from human messages: `HTTP_ERROR` (registered against
+  **Starlette's base `HTTPException`** so framework-generated
+  404/405 route errors go through the same sanitized envelope — covered
+  by live-verified tests), `REQUEST_INVALID`, `INTERNAL_ERROR` (last-
+  resort 500: logs trusted diagnostics server-side via
+  `src.logging_setup`, the client sees only a generic constant), plus
+  `CONFIG_INVALID` / `DATABASE_UNAVAILABLE` / `DATABASE_CONFIG_INVALID`
+  handlers reserved for the database-backed step (downstream of the
+  Gate 1.2 redaction machinery, keeping malformed-DSN and unavailable
+  classifications distinct). Importing the module and building the app
+  connect to no PostgreSQL and import no driver, CV stack,
+  attendance/camera/enrollment module, or the `uvicorn` server runtime
+  (fresh-subprocess enforced by test).
+* **`tools/run_api.py`:** settings-driven loopback server entry point.
+  Bind host/port are the already-validated `AppSettings.api_host`/
+  `api_port` values — never duplicated or bypassed. Non-loopback or
+  invalid `API_HOST`/`API_PORT` fails fast: exit code 2, one sanitized
+  line, **no traceback and no server start** (the invalid-configuration
+  classification happens at the settings *import* boundary and the
+  failed `src.config` module is deliberately never re-imported).
+  `--print-bind` prints the validated bind and exits without serving.
+  Single-process; a startup lock guard follows its finalized design
+  contract in a later authorized step.
+* **`tests/test_api.py`:** import-hygiene subprocess test (banned-module
+  list), exact-eight route inventory, no-middleware assertion, real
+  ephemeral-loopback uvicorn servers driven by stdlib HTTP (server
+  fixture + forbid-DB tripwire asserting `src.db._connect` is never
+  called and psycopg stays unloaded), live health + deferred-endpoint
+  501 envelopes, unknown-route 404 and unsupported-method 405 in the
+  stable envelope, credential-bearing synthetic-exception 500
+  sanitization (no DSN/password/traceback/path leakage), the four typed
+  code handlers asserted as unit contracts, and the runner CLI
+  (loopback bind print, defaults, invalid-host refusal with exit 2).
+
+**Verification observed (2026-10-30 session, hardware-free, synthetic
+data only):** `tests/test_api.py` **24 passed**; config/db/environment
+regression **96 passed**; core recovery/engine/store/persistence/employee
+battery **265 passed**; integration/durable/report/CLI suites **153
+passed**; `git diff --check` exit 0. Live subprocess smoke via the real
+runner + curl: `/api/v1/health` 200, unknown route 404 envelope,
+unsupported-method 405 envelope, all seven deferred routes 501
+envelopes, `API_HOST=0.0.0.0 --print-bind` exit 2 with sanitized stderr,
+blank stdout/server-sharing-free log; smoke server stopped by its
+recorded PID. No PostgreSQL connection, no migration/schema change, no
+journal access, no camera, no real biometric/employee data, no
+dependency change, no Git mutation.
+
 ## Step 26 — check-out event support: independent bounded engine state, journal-backed session recovery, single-snapshot startup, checkout-aware reporting (Phase 2, P2-6) (2026-10-27)
 
 **P2-6, implemented in owner-authorized stages S1–S6** on `main`:

@@ -4,6 +4,20 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 3, Step 1.3: Loopback-only API foundation
+
+### Added
+
+* `src/api.py`: FastAPI application foundation serving exactly the approved eight `/api/v1` endpoints; only `GET /api/v1/health` is implemented, while the seven non-health approved routes exist at their approved methods and answer a typed `501 NOT_IMPLEMENTED` envelope (no business decision, no database reach, no attendance claim) until their authorized later step. Documentation URLs (`/docs`, `/redoc`, `/openapi.json`) are disabled so the served inventory is exactly the approved eight. No CORS or authentication middleware is installed.
+* One stable client-facing error envelope (`{"error": {"code", "message"}}`) with machine-readable codes separate from human messages: `HTTP_ERROR` (registered against Starlette's base `HTTPException`, so framework 404/405 responses use the same sanitized envelope), `REQUEST_INVALID`, `INTERNAL_ERROR` (500 logging trusted diagnostics server-side only), plus `CONFIG_INVALID` / `DATABASE_UNAVAILABLE` / `DATABASE_CONFIG_INVALID` handlers reserved for the database-backed step; raw exceptions, tracebacks, DSNs/credentials, and internal paths never reach responses.
+* `tools/run_api.py`: settings-driven single-process development server entry point; binding uses the already-validated `AppSettings.api_host`/`api_port` (never duplicated or bypassed). Non-loopback/invalid `API_HOST`/`API_PORT` fails fast with exit code 2, a sanitized one-line diagnostic, no traceback, and no server start; `--print-bind` prints the validated bind without serving.
+* `tests/test_api.py`: offline, hardware-free verification — fresh-subprocess import hygiene (no psycopg/CV/attendance/camera/uvicorn imports and no connection on import or app construction), exact-eight route inventory, ephemeral-loopback real-uvicorn tests over stdlib HTTP with a DB-connection tripwire, sanitized 500 with a credential-bearing synthetic exception, typed-code handler contracts, and runner CLI behavior.
+
+### Security notes
+
+* The API binds loopback-only by validated configuration; loopback binding is a development safety measure, not a production security boundary. There is no authentication and no CORS in this step; any network exposure requires an approved auth/RBAC design in a later phase.
+* Nothing in this step connects to PostgreSQL, changes the schema, runs migrations, touches the attendance journal, or accesses camera/biometric data. Importing or starting the API performs no side effects (test-enforced).
+
 ## [Unreleased] — Phase 2, P2-6: Check-out event support, journal-backed session recovery, checkout-aware reporting
 
 ### Added

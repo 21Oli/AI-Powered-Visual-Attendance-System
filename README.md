@@ -73,6 +73,53 @@ cp .env.example .env
 python -m pytest tests/ -v                      # Linux/macOS
 ```
 
+## Phase 3 development API (loopback-only)
+
+A minimal FastAPI backend for the Phase 3 work is under construction.
+Step 1.3 implements the **API foundation** only:
+
+- `src/api.py` serves the approved eight-endpoint inventory under
+  `/api/v1`, of which only `GET /api/v1/health` is implemented (returns
+  `{"status": "ok"}`). The other seven approved endpoints
+  (`POST/GET /employees`, `GET/PATCH /employees/{employee_id}`,
+  `POST /employees/{employee_id}/deactivate`, `GET /attendance`,
+  `POST /attendance/{employee_id}/checkout`) exist at their approved
+  methods but deliberately answer `501` with the typed
+  `NOT_IMPLEMENTED` envelope — they implement nothing, claim no database
+  operation, and reach no attendance data until their authorized later
+  step.
+- Run it locally (binds to the validated loopback address only):
+
+```bash
+python tools/run_api.py              # API_HOST=127.0.0.1, API_PORT=8000
+python tools/run_api.py --print-bind # print the validated bind, then exit
+```
+
+- Settings come from the environment through `src.config`
+  (`API_HOST`, `API_PORT`; see `.env.example`). Non-loopback or invalid
+  values are rejected by configuration validation itself — the runner
+  fails fast (exit code 2, sanitized message) and never starts a
+  server. The runner is single-process; multi-process serving is
+  contracted for a later authorized step.
+- Error responses use one stable envelope:
+  `{"error": {"code": <machine_code>, "message": <sanitized>}}`, with
+  machine codes (`HTTP_ERROR`, `NOT_IMPLEMENTED`, `REQUEST_INVALID`,
+  `INTERNAL_ERROR`, and distinct `CONFIG_INVALID` /
+  `DATABASE_UNAVAILABLE` / `DATABASE_CONFIG_INVALID` handlers reserved
+  for later database-backed steps) deliberately separate from human
+  messages. Raw exceptions, tracebacks, DSNs/credentials, and internal
+  filesystem paths never appear in responses.
+- **Security limitations (by design, in this step):** loopback-only
+  binding is a development safety measure, **not** a production
+  boundary; there is no authentication, no CORS middleware, and no
+  documentation UI (`/docs`, `/redoc`, `/openapi.json` are disabled).
+  Any network exposure would require an approved auth/RBAC design in a
+  later phase.
+- Nothing in this step connects to PostgreSQL, changes the database
+  schema, runs a migration, touches the attendance journal, opens a
+  camera, or stores biometric data. Starting or importing the API is
+  side-effect free (test-enforced).
+
 ## Face-detection model (manual download)
 
 Step 05's face detector needs the official YuNet ONNX model, which is not
