@@ -3,10 +3,282 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 31 — Phase 3 Step 1.5b (H-3): session-scoped migration lock — Option B (owner-approved) (2026-11-03)
+
+**Owner decision recorded:** OQ-1's *mechanism* is superseded — the
+transaction-scoped `pg_try_advisory_xact_lock` first approved in Step
+1.5a is replaced by a **session-scoped, nonblocking
+`pg_try_advisory_lock` held on a dedicated connection for the entire
+migration run**. The approval covers **only the lock mechanism**: the
+approved per-migration transaction and ledger semantics (OQ-2/OQ-4) are
+unchanged, and Option A (one outer transaction) was rejected for exactly
+that reason. Implemented and offline-verified; **no PostgreSQL
+connection was made**, and no runtime executor exists yet.
+
+* **`src/db_migrate.py`:** the lock is now session-scoped and is the
+  *first* executor call of a run — before ledger creation, table
+  inspection, applied-version lookup and gap validation. It stays held
+  across every per-migration COMMIT (that is the whole point of
+  session scope), so a second runner cannot pass the state checks while
+  the first is mid-run. Acquisition remains fail-fast and typed
+  (`MigrationContentionError`), with no inference, waiting, sleep or
+  retry.
+* **Executor contract (ownership split):** the *executor* owns one
+  dedicated lock connection; the *runner* owns its lifecycle. New
+  abstract `release_advisory_lock()` must release the key, close that
+  connection, and be **idempotent and no-op safe** (nothing acquired,
+  not held, already closed → silent no-op; a second call never
+  double-releases or touches a closed connection). The dedicated
+  connection must stay open for the whole run — closing it silently
+  drops the session lock — and the runner still performs no other
+  connection management, retries, or re-acquisition.
+* **Cleanup semantics:** one `finally` path covers success, typed
+  failures, unexpected exceptions **and a failed acquisition** (the
+  connection may already be open when acquisition blows up). A release
+  failure never masks the original error: it is attached as a note when
+  something else is propagating (`__notes__`), and becomes a typed
+  `MigrationCleanupError` (new) when nothing else failed — the run's
+  outcome is then explicitly unknown rather than silently assumed fine.
+  A dropped lock connection means PostgreSQL released the lock and the
+  run aborts: no recovery attempt.
+* **Unchanged by this decision:** per-migration transactions with one
+  ledger row each; a later failure never rolls back migrations that
+  already committed; checksum re-verification, gap/missing-script/
+  ledger-integrity refusals, the prohibited-statement scan and the
+  `ADVISORY_LOCK_KEY` constant (still fixed, still not configurable).
+* **Testing (offline only):** `tests/test_db_migrate.py` 40 → **53**
+  (+13). New coverage proves, against a shared fake *server* (not a
+  flag): acquisition precedes every state check; a second simulated
+  runner is refused before it reads or writes state and its cleanup
+  does not drop the first runner's lock; the lock is observed as held
+  during each state check and each application; commits stay
+  per-migration (`[1, 2, 3]`) with earlier commits surviving a failure
+  at V2; release + connection close happen on success, typed refusal,
+  unexpected exception and failed acquisition; a release failure
+  becomes a note and never the reported cause; a release failure with
+  no other error surfaces as `MigrationCleanupError`; and release is
+  idempotent/after-close safe. Two obsolete assertions were *replaced*
+  (the exact-call list now includes the mandatory `release`, and the
+  contention test now asserts `acquire`+`release` only) — no assertion
+  was weakened, and `naive now` was strengthened to prove the executor
+  is never touched.
+* **Verification:** `pytest tests/test_db_migrate.py -q` → **53
+  passed**; `tests/test_employee_repository.py` → **25 passed**;
+  `tests/test_test_database_guard.py` → **48 passed**; full offline
+  sweep (camera / enrollment-CLI / YUNET-download suites excluded:
+  hardware, real artifact, network) → **1147 passed, 0 failed, exit 0**;
+  `git diff --check` clean. Nothing staged or committed.
+* **Still unverified (unchanged):** the psycopg-backed executor, the
+  no-serve-during-migration wiring, and any live-server behaviour of
+  `pg_try_advisory_lock` including session-loss cleanup — no Tier-2
+  database work is authorized or performed here.
+
+## Step 30 — Phase 3 Step 1.5b: employee-metadata persistence foundation (offline, owner-approved OQ-1..7) (2026-11-02)
+
+**Implemented offline on top of `bb95559` on `main`; no PostgreSQL
+connection, no migration execution, no DDL against a real database, no
+dependency change, and no camera/biometric/real-runtime-data access.**
+The owner approved all seven OQ recommendations; this entry records
+what was actually built and tested, never what remains.
+
+* **`src/db_migrate.py` (new):** migration-runner core — deterministic
+  `V<N>__<name>.sql` discovery (unparseable names/duplicates/version < 1
+  refused), sha256 per-file checksums, fixed advisory-lock key
+  acquired via the executor **before any state check** (typed
+  fail-fast `MigrationContentionError`; no inference, no waiting),
+  per-migration ledger rows with checksums (OQ-2 approved shape:
+  `schema_version(version, checksum, applied_at)`, runner-materialized
+  — migrations never create the ledger), checksum re-verification of
+  already-applied scripts (modified-applied → typed refusal),
+  missing-script/non-contiguous-ledger/employee-without-ledger
+  integrity refusals, strict version-N-only-at-N−1 pending window, per
+  migration one executor-managed transaction (failure aborts the run;
+  later versions never attempted; typed sanitized
+  `MigrationApplicationError` with the cause type name only),
+  prohibited-statement scan (`CREATE DATABASE` /
+  `CREATE INDEX CONCURRENTLY`) over comment-stripped text, and the
+  fully sanitized typed error family (no file paths, no SQL content,
+  no driver text; causes preserved for trusted server-side use only).
+* **`migrations/V001__employee.sql` (new):** the approved
+  `employee` table verbatim — four metadata columns, `created_at`
+  with **no database default** (application-authored), no
+  biometric/embedding/attendance-event tables.
+* **`src/employee_repository.py` (new):** create (explicit Typed
+  duplicate via the driver's SQLSTATE 23505, never a raw driver error —
+  `sqlstate` after the H-1 audit repair), get
+  (`None` → caller's 404), list (**keyset-only** `employee_id > after`,
+  default 20 / hard clamp above 100 per OQ-6 as frozen
+  `PaginationConfig` in `src/config.py`; values above the max are
+  clamped, sub-1/non-int refused before any DB call; **no
+  cross-request snapshot claim**), `update_full_name` (validated
+  through the existing model first; SQL touches `full_name` only;
+  `is_active`/`created_at`/`employee_id` untouched; returns the
+  read-back row), deactivate (persisting status only; written back as
+  read-back row). Availability/config errors propagate untouched
+  (`DatabaseUnavailableError`, `MalformedDsnError`); duplicate
+  detection is typed `EmployeeAlreadyExists`; missing employee →
+  `EmployeeNotFound`. No connection at import or construction time.
+* **`src/config.py`:** new frozen `PaginationConfig` registered as
+  `PAGINATION` (default 20, max 100, validation mirrors the existing
+  constants pattern). Attendance behavior untouched; no attendance
+  pagination exists to change.
+* **`src/test_database_guard.py` (new):** Tier-2 positive-verification
+  guard per approved OQ-5 — marker `_phase3_test_guard` with fixed
+  phase-tagged literal `VISUAL_ATTENDANCE_PHASE3_TEST_ONLY`; **both**
+  DSNs required before any verification; normalized identity
+  comparison (dbname/host-normalized/port; text-alias and
+  credential differences can neither fake nor enable distinctness);
+  connection identity read from the connection object
+  (`connection.info` then `current_database()`, never reconstructed);
+  read-only SELECT discipline until every ordered check passes; the
+  marker's `schema_version` cross-checked against the applied ledger;
+  destructive-action manifest gate (`require_destructive_action`);
+  every missing/ambiguous/inconsistent condition → typed
+  `GuardBlocked` **fail closed**, never a name-pattern guess, never a
+  fallback to the application database. The DSN parser is an
+  injectable hook so offline tests run psycopg-free in-process (the
+  API suite's "psycopg unloaded" tripwire stays honest under any
+  ordering); the default `src.db` parser is proven in fresh
+  subprocesses instead.
+* **Testing (all offline, synthetic):** `tests/test_db_migrate.py` 53,
+  `tests/test_employee_repository.py` 25,
+  `tests/test_test_database_guard.py` 48 — 126 total (the initial 1.5b
+  gate had 26 + 20 + 24 = 70; the audit repairs took it to 113; the H-3
+  Option B lifecycle tests in Step 31 took it to 126). Includes
+  fresh-process default-parser and import-hygiene proofs. Regression: full offline suite
+  sweep `pytest tests/` minus the hardware/external-file suites
+  (camera, enrollment CLI, YUNET download) → **1147 passed, 0
+  failed**; the focused new+existing Phase 3 order
+  (api/config/db/environment/api_guard + new three) also green.
+  One test-isolation fix during the run: the guard suite initially
+  leaked psycopg into the shared pytest process via the default DSN
+  parser; resolved by the injectable-parser hook (no existing test
+  weakened).
+* **Independent-audit repairs (read-only audit of 1.5b; all fixed
+  offline, no database contacted):**
+  * *H-1* — duplicate detection moved from psycopg2's `pgcode` to
+    psycopg 3's `sqlstate == "23505"`. The old attribute does not exist
+    on the pinned driver (`psycopg[binary]==3.3.6`, verified directly:
+    `Error.pgcode` is absent, `Error.sqlstate` exists), so the typed
+    `EmployeeAlreadyExists`/409 path could never fire; the fake driver
+    had manufactured `pgcode`, which is why 20/20 offline tests passed.
+    The fake now models psycopg 3, and unrelated SQLSTATEs (`23502`),
+    a psycopg2-only `pgcode`, and exceptions with no SQLSTATE are
+    proven to propagate untouched.
+  * *H-2* — the prohibited-statement scanner missed
+    `CREATE UNIQUE INDEX CONCURRENTLY` (and comment-split forms); it now
+    matches `CREATE [UNIQUE] INDEX CONCURRENTLY` and
+    `CREATE DATABASE` on comment-stripped, whitespace-collapsed text.
+    Reported honestly as a scanner, not a SQL parser: `/* */` is not
+    nested and string literals are not special-cased, so both
+    limitations can only cause an over-refusal.
+  * *M-1* — identity comparison fails closed: `hostaddr`, `service`, a
+    missing host, or a missing database name → `IDENTITY_AMBIGUOUS`
+    instead of being treated as proof of distinctness; an omitted port
+    is libpq's 5432; the driver-reported connected host/port must match
+    the declared target (`CONNECTED_TARGET_MISMATCH`) and differ from
+    the application target.
+  * *M-2* — read-only is now **enforced** (`connection.read_only = True`,
+    read back before the first query); failure → `READ_ONLY_UNAVAILABLE`
+    with nothing read.
+  * *M-3* — the verification connection is closed on success and on
+    every blocked path (`try`/`finally`), without committing.
+  * *M-4* — migration checksums hash canonical text (BOM dropped,
+    CRLF/CR → LF), so the repository's `core.autocrlf=true` checkout
+    cannot fake a modified migration, while any SQL edit still changes
+    the digest.
+  * *M-5* — `VerifiedTestTarget` can no longer be constructed directly
+    (private proof), manifests must be collections of non-blank strings
+    (`MANIFEST_INVALID`), and the module states plainly that this is a
+    mistake-guard library contract, **not** a security boundary against
+    in-process code.
+  * *L-1..L-5* — corrected the DB_DESIGN test count (71 → 70 at the
+    1.5b gate), replaced "nothing in this section is implemented" with
+    per-section implementation status, split a misnamed migration test
+    into a real file-validation test plus a post-lock gap test, removed
+    a tautological pagination assertion, distinguished marker-absent /
+    read-failure / ambiguous rows, and fixed the CHANGELOG
+    "unlicensed" wording.
+* **OQ-1 mechanism reopened by the audit, then RESOLVED by the owner —
+  Option B, implemented in Step 31.** The audit found the approved
+  transaction-scoped `pg_try_advisory_xact_lock` incompatible with one
+  transaction per migration: taken before the state checks, a
+  transaction-scoped lock is released before the migrations it
+  protects, and holding that transaction open instead would merge the
+  whole run into one commit. The two options considered were:
+  * **A — one outer transaction** (lock + checks + DDL + ledger share
+    it). Pro: the lock is genuinely held for the run and the code stays
+    simple. Con: a later migration's failure rolls back *all* migrations
+    in that run, and per-migration commit granularity is lost —
+    contradicting the OQ-2/OQ-4 per-migration ledger design.
+  * **B — session-scoped `pg_try_advisory_lock` on a dedicated
+    connection** held for the whole run, each migration in its own
+    transaction, released in `finally` and the connection closed.
+    Pro: keeps per-migration atomicity and the approved fail-fast
+    policy; a crashed runner still leaks nothing (the OS closes the
+    session). Con: changes the approved lock *mechanism* (needs owner
+    approval), requires an explicit release path, and ties the lock to
+    connection lifetime, so the executor contract must expose that
+    lifetime.
+  * **Recommendation: Option B** — it is the only one that preserves
+    the already-approved per-migration ledger/commit semantics; Option
+    A silently trades that away.
+  The owner **approved Option B**, and it is implemented and
+  offline-tested in Step 31. This block is kept as the decision
+  history; nothing here is still pending.
+* **Deliberately NOT in this step (unverified, later gates):** the
+  real psycopg-backed `MigrationExecutor`, the no-serve-during-
+  migration runtime wiring, any Tier-2 integration test against a
+  live database (requires owner-provisioned dedicated test database,
+  the established marker, and `ATTENDANCE_TEST_DATABASE_URL` — Step
+  1.5b-3), the JSONL→PostgreSQL employee importer (Step 1.5c, source
+  format still an open decision), and all API endpoint
+  implementations (all seven non-health routes remain 501).
+
+**Verification:** baseline `bb95559` clean + synced; 3 pre-existing
+Step 1.5a doc changes preserved untouched; nothing staged or committed.
+
+## Step 29 — Phase 3 Step 1.5a: DB design planning record for employee metadata (planning-only; nothing implemented) (2026-10-31)
+
+**Planning gate, no code and no database activity.** Wrote
+[DB_DESIGN.md](DB_DESIGN.md) and corrected stale Step 27/28 commit-status
+wording; reworded the `.env.example` test-DSN block. The record fields:
+
+* **Provenance split:** conversation-derived decisions recorded *as
+  supplied* (employee table contract, rollback strategy, test-guard
+  contract, repository/API rules) vs. statements verified directly in
+  the repository at `bb95559` (marked [REPO] with per-item evidence).
+* **`employee` table contract recorded here** (owner-approved in the
+  decision record, not by this planning gate): exactly the four
+  metadata columns (`employee_id` PK, `full_name`, `is_active`,
+  `created_at TIMESTAMPTZ NOT NULL`, **no DB default** —
+  application-authored via `datetime.now(UTC)`); no biometric/
+  embedding/attendance-event tables.
+* **Migration contract drafted:** forward-only `migrations/` SQL,
+  per-migration transaction with an atomic `schema_version` ledger row,
+  gap-free version checks, sanitized failure reports (no DSN/driver
+  text), full-backup-restore rollback (no down-migrations), destructive
+  ops prohibited outside a positively verified disposable test target.
+* **Repository contract drafted:** create/get/list(PAGE 20, max 100,
+  keyed-offset ordering)/update_full_name/deactivate; 409/404/422/503
+  mappings, `EmployeeAlreadyExists`/`EmployeeNotFound` typed errors,
+  blank-DSN and unavailable paths reusing `src.db`'s existing taxonomy.
+* **Tier-2 test safety contract drafted:** five ordered positive checks
+  (+ typed BLOCKED) before any destructive setup, including the
+  `phase3_test_guard` marker as a *server-defined truth*, never
+  inferred from names.
+* **Open decisions flagged for owner review before 1.5b:** runner
+  concurrency policy, ledger shape, rollback medium, migration storage
+  form, marker details, pagination defaults, JSONL importer timing.
+
+**Verification:** baseline `bb95559` clean and synced; documentation
+only — no code/test/dependency change, no PostgreSQL connection, no
+migration, no camera or real data access.
+
 ## Step 28 — Phase 3 Windows single-process startup guard: OS-enforced msvcrt byte-range lock, guarded `run_server` lifecycle, typed exit-code-3 runner handling (Step 1.4) (2026-10-30)
 
-**Step 1.4, implemented on top of the Step 1.3 foundation (working tree
-uncommitted; owner commits):**
+**Step 1.4, implemented on top of the Step 1.3 foundation (committed by
+the owner as `bb95559`):**
 
 * **`src/api_guard.py` (new):** Windows-only startup guard per the
   finalized Phase 0 contract. Lock file `DATA_DIR/api_guard.lock` — the
@@ -83,8 +355,8 @@ Git mutation.
 connection layer with DSN-redaction hardening, `.env.example`). Verify
 against commit `4a944d4`.)*
 
-**Step 1.3, implemented on top of the Gate 1.2 baseline (3 new untracked
-files, nothing staged or committed):**
+**Step 1.3, implemented on top of the Gate 1.2 baseline (committed by
+the owner as `601341b`):**
 
 * **`src/api.py`:** FastAPI application foundation. The served inventory
   is **exactly** the approved eight `/api/v1` endpoints

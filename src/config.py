@@ -49,6 +49,7 @@ __all__ = [
     "TemporalVerificationConfig",
     "UnknownFaceConfig",
     "AttendanceConfig",
+    "PaginationConfig",
     "CAMERA",
     "FACE_PROCESSING",
     "QUALITY",
@@ -57,6 +58,7 @@ __all__ = [
     "TEMPORAL_VERIFICATION",
     "UNKNOWN_FACE",
     "ATTENDANCE",
+    "PAGINATION",
     "AppSettings",
     "Settings",
     "ConfigError",
@@ -570,6 +572,74 @@ class AttendanceConfig:
 
 UNKNOWN_FACE: Final[UnknownFaceConfig] = UnknownFaceConfig()
 ATTENDANCE: Final[AttendanceConfig] = AttendanceConfig()
+
+
+# ---------------------------------------------------------------------------
+# Employee-list pagination constants (Phase 3, Step 1.5b; consumer is the
+# employee repository — database behaves only through it).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PaginationConfig:
+    """Approved employee-list pagination constants (Phase 3, Step 1.5b).
+
+    Frozen constants per the repository's configuration split (env for
+    environment-specific values, code for application constants — the
+    same rule as camera/threshold constants). **Attendance pagination
+    does not exist and is untouched** — these constants are exclusively
+    the employee-metadata contract approved in Step 1.5b (OQ-6: default
+    page 20, hard maximum 100; an earlier draft suggested 25 and was
+    explicitly superseded).
+
+    Per the approved OQ-6 record, the repository contract is
+    *keyset-only* (``WHERE employee_id > last_seen_id`` ordered by
+    ``employee_id`` ascending; no plain-``OFFSET`` path exists) and
+    **does not claim a consistent snapshot across separate requests**:
+    each request has its own consistency boundary; records inserted
+    between requests can affect subsequent results.
+    """
+
+    #: Default number of employees returned per page.
+    default_page_size: int = 20
+    #: Hard ceiling on any single page request (no caller may exceed it).
+    max_page_size: int = 100
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.default_page_size, int) or isinstance(
+            self.default_page_size, bool
+        ):
+            raise ValueError(
+                "default_page_size must be a plain int (bool and float "
+                "rejected), got "
+                f"{type(self.default_page_size).__name__}"
+            )
+        if not isinstance(self.max_page_size, int) or isinstance(
+            self.max_page_size, bool
+        ):
+            raise ValueError(
+                "max_page_size must be a plain int (bool and float "
+                "rejected), got "
+                f"{type(self.max_page_size).__name__}"
+            )
+        if self.default_page_size < 1:
+            raise ValueError(
+                "default_page_size must be >= 1, got "
+                f"{self.default_page_size}"
+            )
+        if self.max_page_size < 1:
+            raise ValueError(
+                "max_page_size must be >= 1, got "
+                f"{self.max_page_size}"
+            )
+        if self.default_page_size > self.max_page_size:
+            raise ValueError(
+                "default_page_size must be <= max_page_size, got "
+                f"{self.default_page_size} > {self.max_page_size}"
+            )
+
+
+PAGINATION: Final[PaginationConfig] = PaginationConfig()
 
 
 # ---------------------------------------------------------------------------
