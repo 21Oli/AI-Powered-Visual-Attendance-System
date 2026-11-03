@@ -3,6 +3,108 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 32 — Phase 3 Step 1.5c-1: employee-metadata export from enrollment manifests (2026-11-03)
+
+**Owner-approved source decision, export half only — nothing is
+imported.** Step 1.5c asked whether a safe employee-metadata source
+exists. The investigation (read-only, recorded in Step 1.5c's design
+report) found exactly one: the Step 07 enrollment manifest
+`<DATA_DIR>/employees/<encoded-id>/employee.json`, `format_version: 1`,
+whose `employee` section is the `Employee.to_dict()` payload. There is
+**no employee-metadata JSONL** anywhere in the project (the only JSONL is
+the attendance journal — five keys, employee ID only), and the embedding
+sidecars carry no name or status. Approved: manifest as the source, a
+versioned five-key JSONL artifact as the export, the enrollment
+`created_at` preserved verbatim, and the artifact at
+`<DATA_DIR>/exports/employee_metadata.jsonl` (git-ignored; personal
+data).
+
+* **`src/employee_export.py` (new):** read-only scan of the manifest
+  root. Only `employee.json` files that are direct children of the root
+  are opened; symlinked entries, symlinked manifests, and a symlinked
+  root are refused (`symlink_refused`), so the scan cannot leave the
+  configured root. Nothing under `face_samples/`, `embeddings/`, or
+  `attendance/` is opened, and the `samples` array / `sample_count` of a
+  manifest are never exported.
+* **Validation, all typed (`ExportRejection`, 17 codes):**
+  `not_a_directory`, `symlink_refused`, `manifest_missing`,
+  `manifest_unreadable` (non-UTF-8/unreadable), `malformed_json`,
+  `unsupported_format_version` (only integer `1`),
+  `missing_employee_section`, `missing_fields`, `unexpected_fields`,
+  `invalid_employee_id`, `id_normalization_changed`,
+  `directory_mismatch`, `invalid_full_name`,
+  `name_normalization_changed`, `invalid_is_active`,
+  `invalid_created_at`, `duplicate_employee_id`. The employee ID is read
+  from **inside** the manifest and only *checked* against the writer's
+  own encoding (`safe_dir_name`); ID and name normalization are taken
+  from the `Employee` model itself (never re-implemented) and a value
+  the model would change is **rejected, never normalized**. `is_active`
+  must be a real bool; `created_at` must be tz-aware ISO-8601 and is
+  emitted **verbatim** (never replaced with export time). Duplicate IDs
+  are ambiguous identity: every manifest in the group is rejected, so
+  no record wins silently.
+* **Artifact contract:** exactly five keys per line
+  (`schema_version` 1, `employee_id`, `full_name`, `is_active`,
+  `created_at`), UTF-8, LF, one trailing newline per record, ordered by
+  `employee_id` code point — a stable export order, **not** a claim
+  about PostgreSQL collation. No paths, sample data, image/embedding
+  data, or biometric content ever appears.
+* **Publication safety:** the artifact is written to a temporary file in
+  the destination directory, flushed and fsynced, permission-restricted
+  to owner-only where the platform supports it (reported honestly when
+  it does not), then moved into place with `os.replace`; a failure
+  removes the temporary file and leaves any previous artifact intact.
+  An existing artifact is **never** replaced silently —
+  `ExportOutputExistsError` (CLI exit 2) unless `overwrite=True`.
+* **Fail-closed default:** any rejected manifest means **no artifact at
+  all**. `allow_partial=True` (CLI `--allow-partial`) is the explicit
+  opt-in that writes only the valid records and still reports every
+  rejection. If entries exist but none validate, no artifact is written
+  (an empty file could be mistaken for "no employees"); a genuinely
+  empty manifest root does write an empty artifact, which is the honest
+  representation of "no enrollments yet".
+* **`src/config.py`:** new derived `AppSettings.exports_dir`
+  (`<DATA_DIR>/exports`). Deliberately **not** added to
+  `ensure_directories`: the directory holds names and is created only by
+  an explicit export. `.gitignore` now ignores `data/exports/**`.
+* **`tools/export_employee_metadata.py` (new):** operator CLI over the
+  same code path (`0` success, `1` fail-closed/partial/write failure,
+  `2` existing-artifact refusal). Its report contains counts, the
+  artifact path, directory names, and reason codes only — **never an
+  employee name**.
+* **Testing (offline only):** new `tests/test_employee_export.py` →
+  **94 passed, 4 skipped**. Coverage: exact five-key schema and line
+  format, verbatim timestamps (`+00:00` and `Z`), non-ASCII names,
+  leading zeros and a percent-encoded directory, deterministic ordering,
+  every rejection code, missing/extra fields, unsupported version,
+  malformed/non-UTF-8 JSON, directory mismatch, duplicate-ID grouping,
+  symlink refusal (real symlinks where the platform allows it, plus the
+  refusal branch simulated on Windows), output protection/overwrite,
+  atomic-write failure leaving no partial artifact and preserving the
+  previous one, owner-only permissions (POSIX), fail-closed and
+  `--allow-partial` behavior, empty-root semantics, source-manifest
+  immutability, sample/embedding-tree non-touch, and the CLI's exit
+  codes and name-free output. `tests/test_config.py` gained the
+  `exports_dir` assertion. The 4 skips are real-symlink creation (×3)
+  and POSIX permission bits (×1), both unsupported on this Windows host.
+* **Verification:** `pytest tests/test_employee_export.py -q` → **94
+  passed, 4 skipped**; `tests/test_employee_export.py` +
+  `tests/test_config.py` → 154 passed, 4 skipped; full offline sweep
+  (camera / enrollment-CLI / YUNET-download suites excluded) → **1382
+  passed, 0 failed, exit 0** — the same sweep with the new file excluded
+  is **1288 passed**, so the delta is exactly this step's 94 passing
+  tests. (Step 31's 1147 figure predates the owner's `60289ff` commit;
+  1288 is the measured baseline at that commit.) `git diff --check`
+  clean. Nothing staged or committed.
+* **Deliberately NOT in this step:** the importer itself (Step 1.5c-2),
+  any PostgreSQL/DSN access or real import (1.5c-3, which additionally
+  needs the owner-provisioned dedicated test database, its marker, and
+  the still-missing psycopg-backed runtime wiring), API endpoints, and
+  any recognition change. Never-enrolled and deleted employees are
+  outside this population, and recognition keeps gating on the
+  manifest's `is_active` until a later approved step makes the database
+  the read source — a documented, temporary divergence.
+
 ## Step 31 — Phase 3 Step 1.5b (H-3): session-scoped migration lock — Option B (owner-approved) (2026-11-03)
 
 **Owner decision recorded:** OQ-1's *mechanism* is superseded — the

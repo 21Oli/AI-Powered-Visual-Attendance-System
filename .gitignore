@@ -32,6 +32,9 @@ data/employees/**
 data/face_samples/**
 data/embeddings/**
 
+# --- Employee metadata exports (names = personal data; never commit) ---
+data/exports/**
+
 # --- Runtime attendance journal (employee IDs + timestamps; not tracked) ---
 data/attendance/**
 

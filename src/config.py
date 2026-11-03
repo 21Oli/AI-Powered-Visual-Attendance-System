@@ -800,6 +800,16 @@ class AppSettings:
         return self.data_dir / "attendance"
 
     @property
+    def exports_dir(self) -> Path:
+        """Operator export artifacts (Phase 3 Step 1.5c-1).
+
+        Holds personal data (employee names), so it is git-ignored and
+        deliberately **not** created by :func:`ensure_directories`: the
+        directory exists only after an explicit operator export.
+        """
+        return self.data_dir / "exports"
+
+    @property
     def models_dir(self) -> Path:
         return PROJECT_ROOT / "models"
 

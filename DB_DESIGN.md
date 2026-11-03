@@ -457,7 +457,10 @@ means a PostgreSQL connection is required (Section 5.2 contract).
 | 1.5b-3 | Owner provisions the dedicated test database and establishes the `phase3_test_guard` marker; `ATTENDANCE_TEST_DATABASE_URL` set locally (never committed) | none (owner-run) | Yes — provisioning is owner-only | Owner confirms target & marker |
 | 1.5b-4 | Tier-2 integration tests under the Section 5.2 contract | `tests/test_employee_repository_integration.py` | **Yes** | Explicit owner authorization for *this specific* DB access |
 | 1.5b-5 | Regression + docs | `DEVELOPMENT_STATUS.md`, `README.md`, `CHANGELOG.md` | No | Owner review of actual evidence |
-| 1.5c+ | DB-backed API endpoints; checkout endpoint; migration importer for existing employee metadata | not yet designed | Yes | later gate, separate design |
+| 1.5c-1 | **Employee-metadata export** from the enrollment manifests (read-only) | `src/employee_export.py`, `tools/export_employee_metadata.py`, `tests/test_employee_export.py` | No | **Implemented (offline) in Step 1.5c-1** |
+| 1.5c-2 | Importer over the exported JSONL (fake-backed tests only) | proposed module + tests | No | Owner approval of the import behavior (duplicate / conflict / partial-failure policy) |
+| 1.5c-3 | Real import into PostgreSQL | none (owner-run) | **Yes** | Requires 1.5b-3 (provisioned DSN + marker) and the psycopg-backed runtime wiring |
+| 1.5c+ | DB-backed API endpoints; checkout endpoint | not yet designed | Yes | later gate, separate design |
 
 **Acceptance criteria before any Step 1.5 code milestone is accepted:**
 
@@ -503,4 +506,100 @@ means a PostgreSQL connection is required (Section 5.2 contract).
 | OQ-4 | Migration storage form | **RESOLVED:** plain SQL files in `migrations/`; static text; one transaction per file; non-transactional DDL prohibited; real execution via `src/db.py` deferred to runtime wiring |
 | OQ-5 | `phase3_test_guard` marker details | **RESOLVED:** `_phase3_test_guard(marker TEXT NOT NULL UNIQUE, created_at TIMESTAMPTZ NOT NULL, schema_version INTEGER NOT NULL)`, literal `VISUAL_ATTENDANCE_PHASE3_TEST_ONLY`, both DSNs required, normalized identity comparison, read-only-until-verified, typed `GuardBlocked` fail-closed |
 | OQ-6 | Pagination defaults | **RESOLVED:** page 20, max 100, frozen `src/config.py` constants; keyset-only ordering; no cross-request snapshot claim **(25 default explicitly superseded by the owner)** |
-| OQ-7 | JSONL → PostgreSQL employee-metadata importer | **RESOLVED (deferred):** no importer in 1.5b; Worker Step 1.5c requires a separate owner decision on the actual source format and reconciliation procedure; PostgreSQL becomes the authoritative read source for employee metadata only once DB-backed endpoints exist |
+| OQ-7 | JSONL → PostgreSQL employee-metadata importer | **RESOLVED (deferred):** no importer in 1.5b; Worker Step 1.5c requires a separate owner decision on the actual source format and reconciliation procedure; PostgreSQL becomes the authoritative read source for employee metadata only once DB-backed endpoints exist. **Source settled in Step 1.5c-1 (see Section 9):** the Step 07 manifest `employee` section, exported as a versioned five-key JSONL artifact; the importer itself is still deferred |
+
+## 9. Step 1.5c-1 — employee-metadata export (owner-approved, implemented offline)
+
+**Status: export implemented and offline-tested; nothing imported, no
+PostgreSQL connection, no live database behavior verified.** This section
+records the owner-approved Step 1.5c source decision and the artifact
+contract actually implemented in `src/employee_export.py`,
+`tools/export_employee_metadata.py`, and `tests/test_employee_export.py`.
+
+### 9.1 Source of truth for employee metadata (evidence, not invention)
+
+Repository investigation at `60289ff` found exactly one structured
+employee-metadata record:
+
+* The Step 07 enrollment manifest
+  `<DATA_DIR>/employees/<encoded-id>/employee.json`,
+  `format_version: 1` (`MANIFEST_FILENAME` / `MANIFEST_FORMAT_VERSION` in
+  `src/enrollment.py`), whose `employee` section is
+  `Employee.to_dict()` — the four approved fields and nothing else.
+* **No employee-metadata JSONL exists.** The only JSONL is the attendance
+  journal (five keys, employee ID only; `src/attendance_store.py`), which
+  is not a metadata source.
+* Embedding sidecars (`<encoded-id>.meta.json`) carry
+  `format_version`/`employee_id`/`dimension`/`dtype`/`stored_at` — no
+  name, no status — so they cannot supply metadata.
+* Employees are created only by enrollment, so **never-enrolled people
+  have no metadata anywhere**, and `tools/delete_enrollment.py` removes
+  all artifacts with no tombstone, so **deleted employees are
+  indistinguishable from never-enrolled ones**. Both are outside the
+  import population.
+* Post-enrollment name/status changes are impossible today (nothing
+  writes `is_active` after enrollment), so the manifest cannot currently
+  be stale relative to the database — but recognition keeps reading the
+  manifest's status, so a divergence window exists once DB-backed reads
+  arrive. That is recorded, not resolved, here.
+
+Approved: manifests are the **sole** upstream source; the importer never
+reads enrollment artifacts.
+
+### 9.2 Artifact contract
+
+`<DATA_DIR>/exports/employee_metadata.jsonl` (override with `--output`),
+one JSON object per line, UTF-8, LF, no header:
+
+```json
+{"schema_version": 1, "employee_id": "EMP-0042", "full_name": "Ada Lovelace", "is_active": true, "created_at": "2026-10-31T09:12:44.123456+00:00"}
+```
+
+* Exactly these five keys; `schema_version` is the integer `1`.
+* `employee_id` comes from inside the manifest (the directory name is only
+  *checked* against `safe_dir_name`); normalized-away IDs/names are
+  rejected, never rewritten.
+* `created_at` is the manifest's original enrollment timestamp, preserved
+  **verbatim** (approved: it is application-authored at enrollment, so the
+  export never re-stamps import/export time).
+* Ordering is `employee_id` code point — a stable export order, **not** a
+  claim about PostgreSQL collation; the importer must not rely on it.
+* The `samples` array, `sample_count`, file paths, images, embeddings, and
+  attendance events never appear.
+* The artifact contains personal data (names): git-ignored
+  (`data/exports/**`), owner-permission-restricted where the platform
+  supports it, and never printed by the CLI.
+
+### 9.3 Implemented behavior
+
+* **Read-only scan** confined to the manifest root; symlinked entries,
+  symlinked manifests, and a symlinked root are refused, so the scan
+  cannot escape the configured directory.
+* **Typed rejections** (17 codes) for malformed, unsupported, incomplete,
+  or inconsistent manifests; duplicate employee IDs are ambiguous
+  identity and every manifest in the group is rejected.
+* **Atomic publication**: temporary file → `fsync` → permission step →
+  `os.replace`; a failure removes the temporary file and leaves any
+  previous artifact untouched.
+* **No silent overwrite**: an existing artifact is refused
+  (`ExportOutputExistsError`, CLI exit 2) unless overwrite is explicit.
+* **Fail-closed default**: any rejection means no artifact at all;
+  `--allow-partial` writes only valid records and still reports every
+  rejection. A non-empty root with no valid record writes nothing; a
+  genuinely empty root writes an empty artifact.
+* **CLI exit codes**: `0` success, `1` fail-closed/partial/write failure,
+  `2` existing-artifact refusal; output is counts, paths, directory names,
+  and reason codes only — never a name.
+
+### 9.4 Still open (not settled by this step)
+
+* The importer itself (Step 1.5c-2): duplicate/conflict/partial-failure
+  policy for `EmployeeRepository.create` (`skip-if-identical` vs.
+  `abort`), and whether a conflict report may name fields.
+* The real import (Step 1.5c-3): requires the owner-provisioned dedicated
+  test database, its `_phase3_test_guard` marker, and the psycopg-backed
+  runtime wiring that does not exist yet. Tier-2 verification remains
+  outstanding.
+* Reconciliation of the interim divergence between manifest-based
+  recognition gating and future database reads (Section 9.1), and the
+  treatment of never-enrolled/deleted employees.

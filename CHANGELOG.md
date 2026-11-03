@@ -4,6 +4,25 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 3, Step 1.5c-1: employee-metadata export from enrollment manifests
+
+### Added
+
+* `src/employee_export.py`: the read-only export half of the deferred employee-metadata importer. Scans the Step 07 enrollment manifests (`<DATA_DIR>/employees/<encoded-id>/employee.json`, `format_version: 1`) and emits one versioned JSONL record per employee — exactly five keys (`schema_version` 1, `employee_id`, `full_name`, `is_active`, `created_at`). The employee ID is taken from **inside** the manifest and only checked against the writer's own encoding (`safe_dir_name`); ID and name normalization come from the `Employee` model and any value the model would change is **rejected, never normalized**; `is_active` must be a real bool; `created_at` must be tz-aware ISO-8601 and is preserved **verbatim** (never replaced with export time). Every invalid input produces a typed, name-free `ExportRejection` (17 codes covering malformed/unsupported/incomplete/inconsistent manifests, directory mismatch, normalization changes, duplicate IDs). Only `employee.json` files that are direct children of the manifest root are opened; symlinked entries, symlinked manifests, and a symlinked root are refused, and the `samples` array, `sample_count`, face-sample PNGs, embeddings, and the attendance journal are never read or exported. Output is written to a temporary file, fsynced, permission-restricted to owner-only where supported, and atomically replaced; an existing artifact is refused unless overwrite is explicit; fail-closed by default (any rejection → no artifact) with an explicit partial opt-in; an empty manifest root writes an empty artifact while a non-empty root with no valid record writes nothing.
+* `tools/export_employee_metadata.py`: operator CLI over the same path (`0` success, `1` fail-closed/partial/write failure, `2` existing-artifact refusal). Its report carries counts, the artifact path, directory names, and reason codes only — never an employee name.
+* `tests/test_employee_export.py`: 94 offline tests (fakes, synthetic manifests, temporary roots) covering the exact five-key schema, verbatim timestamps (`+00:00` and `Z`), non-ASCII names, deterministic ordering, every rejection code, symlink refusal (real symlinks where the platform allows, branch-simulated on Windows), overwrite protection, atomic-write failure, POSIX owner-only permissions, fail-closed/partial/empty-root behavior, source-manifest immutability, sample/embedding non-touch, and the CLI's exit codes and name-free output.
+
+### Changed
+
+* `src/config.py`: new derived `AppSettings.exports_dir` (`<DATA_DIR>/exports`), deliberately **not** created by `ensure_directories` — the export root holds personal data and exists only after an explicit export.
+* `.gitignore`: `data/exports/**` is ignored (the artifact contains employee names).
+
+### Security notes
+
+* The export artifact is personal data (employee names). It is git-ignored, owner-permission-restricted where the platform supports it, and must be disposed of when no longer needed; the CLI never prints its contents.
+* No PostgreSQL connection, DSN access, database operation, camera access, or biometric/runtime-data access occurred in this step or its tests; every manifest in the tests is synthetic and confined to a temporary data root. The importer itself, the real import, and all API endpoint work remain later authorized steps.
+* Employee metadata only: no biometric, embedding, image-path, or attendance-event data enters the export, and PostgreSQL continues to store employee metadata only.
+
 ## [Unreleased] — Phase 3, Step 1.5b: employee-metadata persistence foundation (offline)
 
 ### Added

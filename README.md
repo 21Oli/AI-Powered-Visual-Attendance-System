@@ -263,6 +263,36 @@ python tools/delete_enrollment.py --employee-id "EMP-0042" --execute --confirm-d
   biometric artifacts are recoverable only by re-enrolling the
   (re-consenting) participant.
 
+### Exporting employee metadata (Phase 3, read-only)
+
+Phase 3's PostgreSQL importer needs employee metadata from a supported
+source. That source is the enrollment manifest's `employee` section
+(`data/employees/<encoded>/employee.json`, `format_version: 1`); this
+CLI exports it as a versioned JSONL artifact and touches nothing else:
+
+```bash
+python tools/export_employee_metadata.py                    # fail-closed export
+python tools/export_employee_metadata.py --overwrite        # replace an existing artifact
+python tools/export_employee_metadata.py --allow-partial    # valid records only (exit 1)
+```
+
+* **Output:** `data/exports/employee_metadata.jsonl` (override with
+  `--output`), one record per line with exactly five keys —
+  `schema_version` (1), `employee_id`, `full_name`, `is_active`, and the
+  original enrollment `created_at` preserved verbatim. The artifact is
+  **personal data**: it is git-ignored, permission-restricted to the
+  owner where the platform supports it, and should be deleted when no
+  longer needed.
+* **Never touched:** face samples, embeddings, the attendance journal,
+  and PostgreSQL. Only `employee.json` files directly under
+  `data/employees/` are read; symlinked paths are refused.
+* **Safety:** an existing artifact is never replaced silently (exit 2
+  without `--overwrite`); any malformed/inconsistent manifest blocks the
+  whole export unless `--allow-partial` is given; every rejection is
+  reported by directory name and reason code, never by employee name.
+* **Not yet implemented:** the importer that loads this artifact into
+  PostgreSQL (a later authorized step — no database access exists yet).
+
 ## Attendance event storage
 
 Accepted attendance events are durably journalled as JSON Lines at

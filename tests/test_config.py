@@ -72,6 +72,7 @@ def test_default_paths_resolve_under_project_root() -> None:
     assert settings.employees_dir == PROJECT_ROOT / "data" / "employees"
     assert settings.face_samples_dir == PROJECT_ROOT / "data" / "face_samples"
     assert settings.embeddings_dir == PROJECT_ROOT / "data" / "embeddings"
+    assert settings.exports_dir == PROJECT_ROOT / "data" / "exports"
     assert settings.models_dir == PROJECT_ROOT / "models"
     assert settings.reports_dir == PROJECT_ROOT / "reports"
 
