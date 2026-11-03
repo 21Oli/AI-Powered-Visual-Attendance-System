@@ -4,6 +4,19 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 3, Step 1.5c-2: offline employee-metadata importer
+
+### Added
+
+* `src/employee_import.py`: importer for the Step 1.5c-1 JSONL artifact, with no database access of its own. Strict validation of the exact five-key contract (JSON object, all five keys and no others, integer `schema_version` 1, employee ID/name validated through the `Employee` model with normalization-changing values **rejected**, real bool `is_active`, timezone-aware ISO-8601 `created_at` preserved as supplied — never import time); typed rejections carrying line number and readable ID only; duplicate IDs reject every occurrence; records processed in `employee_id` order. Reconciliation is restricted to a two-method repository protocol (`get`, `create`): create when absent, skip when identical (all four stored fields match), report a conflict listing the differing field **names** and never update, treat `EmployeeAlreadyExists` during create as a conflict with no retry, and stop safely on any other repository error while recording only the exception's type name. No name-update or deactivation path exists, so a conflict can never become a write and `created_at` can never be modified. Modes: `validate-only` (no repository), `dry-run` (classify, write nothing), `apply` (creates only). Reports are JSON containing counts, employee IDs, differing field names, line numbers and reason codes only — no names, timestamps, record contents, DSNs, or driver text.
+* `tools/import_employee_metadata.py`: operator CLI (`--input`, `--validate-only`, `--apply`, `--report`, `--overwrite-report`) with exit codes `0` clean, `1` rejections/conflicts/stopped run/report failure, `2` CLI or configuration refusal. The psycopg-backed runtime wiring belongs to Step 1.5c-3, so both repository-backed modes are refused (exit 2, before any database access) until that wiring exists; `--validate-only` remains available. Reports are written atomically to a temporary file, fsynced, permission-restricted where supported, and never replace an existing report without explicit overwrite (refused before any work starts).
+* `tests/test_employee_import.py`: 96 offline tests using an in-memory repository fake and synthetic JSONL — dry run mutates nothing, apply creates with the supplied timestamp, identical rows skip, each differing field is a conflict with no mutation, create races become conflicts without retry, invalid records reject while valid ones continue, duplicates reject every occurrence, unsupported versions/missing or extra keys/malformed or non-UTF-8 input/normalization changes all reject with typed codes, repository errors stop safely, reports and CLI output leak no names or timestamps, report refusal/overwrite/atomic-failure behavior, every exit code, and a behavioral proof that `update_full_name`, `deactivate`, and `list` are never called.
+
+### Security notes
+
+* No PostgreSQL connection, DSN access, SQL, migration, or Tier-2 verification occurred in this step or its tests; the repository is injected and every apply path is exercised against an in-memory fake only. The real import remains Step 1.5c-3, which additionally requires the owner-provisioned dedicated test database, its marker, and the runtime wiring.
+* The importer reads only the export artifact: no enrollment manifest, face sample, embedding, attendance journal, camera, or real employee data is accessed. Conflicts are reported by employee ID and differing field names only; record contents (including names and timestamps) never appear in console output or reports.
+
 ## [Unreleased] — Phase 3, Step 1.5c-1: employee-metadata export from enrollment manifests
 
 ### Added

@@ -458,7 +458,7 @@ means a PostgreSQL connection is required (Section 5.2 contract).
 | 1.5b-4 | Tier-2 integration tests under the Section 5.2 contract | `tests/test_employee_repository_integration.py` | **Yes** | Explicit owner authorization for *this specific* DB access |
 | 1.5b-5 | Regression + docs | `DEVELOPMENT_STATUS.md`, `README.md`, `CHANGELOG.md` | No | Owner review of actual evidence |
 | 1.5c-1 | **Employee-metadata export** from the enrollment manifests (read-only) | `src/employee_export.py`, `tools/export_employee_metadata.py`, `tests/test_employee_export.py` | No | **Implemented (offline) in Step 1.5c-1** |
-| 1.5c-2 | Importer over the exported JSONL (fake-backed tests only) | proposed module + tests | No | Owner approval of the import behavior (duplicate / conflict / partial-failure policy) |
+| 1.5c-2 | Importer over the exported JSONL (fake-backed tests only) | `src/employee_import.py`, `tools/import_employee_metadata.py`, `tests/test_employee_import.py` | No | **Implemented (offline) in Step 1.5c-2** under the approved reconciliation policy (Section 10) |
 | 1.5c-3 | Real import into PostgreSQL | none (owner-run) | **Yes** | Requires 1.5b-3 (provisioned DSN + marker) and the psycopg-backed runtime wiring |
 | 1.5c+ | DB-backed API endpoints; checkout endpoint | not yet designed | Yes | later gate, separate design |
 
@@ -593,9 +593,10 @@ one JSON object per line, UTF-8, LF, no header:
 
 ### 9.4 Still open (not settled by this step)
 
-* The importer itself (Step 1.5c-2): duplicate/conflict/partial-failure
-  policy for `EmployeeRepository.create` (`skip-if-identical` vs.
-  `abort`), and whether a conflict report may name fields.
+* The importer policy questions raised here were settled in Step 1.5c-2
+  (Section 9.5): create-if-absent, skip-if-identical, report conflicts
+  without updating, reject invalid/duplicate records, stop on
+  operational errors, and report differing field *names* only.
 * The real import (Step 1.5c-3): requires the owner-provisioned dedicated
   test database, its `_phase3_test_guard` marker, and the psycopg-backed
   runtime wiring that does not exist yet. Tier-2 verification remains
@@ -603,3 +604,73 @@ one JSON object per line, UTF-8, LF, no header:
 * Reconciliation of the interim divergence between manifest-based
   recognition gating and future database reads (Section 9.1), and the
   treatment of never-enrolled/deleted employees.
+
+## 10. Step 1.5c-2 — employee-metadata importer (implemented offline)
+
+**Status: implemented and offline-tested; no database was contacted and
+no real import has run.** `src/employee_import.py` and
+`tools/import_employee_metadata.py` consume **only** the Section 9
+artifact; they never read enrollment manifests, face samples,
+embeddings, or the attendance journal.
+
+### 10.1 Input validation (exactly the Section 9.2 contract)
+
+Every line is validated strictly: JSON object only, all five keys
+present and no others, `schema_version` the integer `1`,
+`employee_id`/`full_name` valid **and unchanged by the model's
+normalization**, `is_active` a real bool, `created_at` a timezone-aware
+ISO-8601 string preserved as supplied (never replaced with import time).
+Rejections are typed (`malformed_json`, `missing_keys`,
+`unexpected_keys`, `unsupported_schema_version`, `invalid_employee_id`,
+`id_normalization_changed`, `invalid_full_name`,
+`name_normalization_changed`, `invalid_is_active`, `invalid_created_at`,
+`invalid_record`, `duplicate_employee_id`) and carry the line number and
+(the ID when readable) — never record contents. Duplicate IDs inside one
+artifact reject **every** occurrence.
+
+### 10.2 Approved reconciliation policy
+
+| Existing employee state | Behavior |
+|---|---|
+| Does not exist | Create it (`--apply` only) |
+| All fields identical | Skip as identical |
+| Differs in any field | Report conflict, list the differing field names, **never update** |
+| Invalid input record | Reject that record and continue |
+| Duplicate ID in input | Reject every occurrence of that ID |
+| `EmployeeAlreadyExists` during create | Report conflict (race); no update, no retry |
+| Unexpected repository error | Stop safely: no further reads/writes, report only the exception type name |
+
+The importer uses exactly two repository calls — `get` (classification)
+and `create` (approved inserts). There is no name-update path, no
+deactivation path, and therefore no way for a conflict to become a write.
+`created_at` is never modified.
+
+### 10.3 Modes and exit codes
+
+* `validate-only` (CLI `--validate-only`) — no repository, no database:
+  schema/duplicate validation only.
+* `dry-run` — validates **and classifies** against the repository and
+  writes nothing. This is the CLI default, and it requires the runtime
+  wiring that Step 1.5c-3 owns; without that wiring the CLI refuses
+  (exit 2) before any database access and directs the operator to
+  `--validate-only`.
+* `apply` (CLI `--apply`) — performs the approved creates only, under the
+  same wiring requirement.
+
+Exit codes: `0` clean; `1` rejections, conflicts, a stopped run, or a
+report-write failure; `2` CLI/configuration refusal (bad flag combination,
+missing/unreadable input, existing report without `--overwrite-report`,
+missing database wiring) with nothing written to a database. Reports are
+JSON containing counts, employee IDs, differing field names, line numbers,
+and reason codes only — no names, timestamps, record contents, DSNs, or
+driver text.
+
+### 10.4 Not done here (Step 1.5c-3)
+
+* No psycopg-backed wiring, connection factory, DSN read, SQL, migration,
+  or Tier-2 verification exists; the importer's repository is injected,
+  and its `apply` path is exercised only against in-memory fakes.
+* No real employee data has been imported; the population limits of
+  Section 9.1 (never-enrolled and deleted employees) still apply.
+* The interim divergence between manifest-based recognition gating and
+  future database reads remains recorded, not resolved.

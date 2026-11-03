@@ -263,7 +263,7 @@ python tools/delete_enrollment.py --employee-id "EMP-0042" --execute --confirm-d
   biometric artifacts are recoverable only by re-enrolling the
   (re-consenting) participant.
 
-### Exporting employee metadata (Phase 3, read-only)
+### Employee metadata export and import checks (Phase 3)
 
 Phase 3's PostgreSQL importer needs employee metadata from a supported
 source. That source is the enrollment manifest's `employee` section
@@ -290,8 +290,24 @@ python tools/export_employee_metadata.py --allow-partial    # valid records only
   without `--overwrite`); any malformed/inconsistent manifest blocks the
   whole export unless `--allow-partial` is given; every rejection is
   reported by directory name and reason code, never by employee name.
-* **Not yet implemented:** the importer that loads this artifact into
-  PostgreSQL (a later authorized step — no database access exists yet).
+* **Validate an export (no database):**
+  ```bash
+  python tools/import_employee_metadata.py --validate-only
+  python tools/import_employee_metadata.py --validate-only --report reports/import.json
+  ```
+  Checks every record against the five-key contract, rejects duplicate
+  IDs, and optionally writes a JSON report of counts, employee IDs,
+  differing field names, and reason codes — never names. Exit codes: `0`
+  clean, `1` rejected records, `2` CLI/configuration refusal.
+* **Import policy (needs the Step 1.5c-3 wiring):** when a repository is
+  supplied, the importer creates employees that are absent, skips ones
+  that match exactly, reports conflicts **without ever updating them**,
+  and never deactivates anyone. The psycopg-backed wiring is not
+  implemented yet, so `--apply` — and the default dry run, which
+  classifies against the database — is refused with exit 2 before any
+  database access; nothing is read from or written to PostgreSQL.
+* **Not yet implemented:** the runtime wiring and the real import of real
+  employee metadata (Step 1.5c-3, separately authorized).
 
 ## Attendance event storage
 

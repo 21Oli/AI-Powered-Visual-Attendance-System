@@ -3,6 +3,84 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 33 — Phase 3 Step 1.5c-2: offline employee-metadata importer (2026-11-03)
+
+**Importer implemented against the Step 1.5c-1 artifact; no database was
+contacted and no real import has run.** The owner supplied the exact
+reconciliation policy (create-if-absent, skip-if-identical,
+report-conflict-without-updating, reject invalid/duplicate records,
+stop-on-operational-error); this step implements it with an injected
+repository and verifies it entirely offline. Baseline observed at start:
+branch `main`, HEAD `ed7ef99` (the owner had committed Step 1.5c-1),
+clean tree, nothing staged; all 1.5c-1 work is preserved.
+
+* **`src/employee_import.py` (new):** strict JSONL validator plus
+  reconciler over the five-key artifact contract — JSON object only, all
+  five keys and no others, integer `schema_version` 1, employee
+  ID/name validated **through the `Employee` model** with any
+  normalization change rejected, real bool `is_active`, tz-aware
+  ISO-8601 `created_at` preserved as supplied (never import time).
+  Typed rejections (12 codes) carry line number and readable ID only.
+  Duplicate IDs inside the artifact reject **every** occurrence. The
+  repository surface is narrowed to a two-method
+  `EmployeeRepositoryLike` protocol (`get`, `create`): no update, no
+  deactivation, no listing path exists, so a conflict cannot become a
+  write and `created_at` cannot be modified. `EmployeeAlreadyExists`
+  during a create is a conflict with no retry; any other repository
+  exception stops the run immediately, recording only the exception's
+  **type name** (never its text). Records are processed in
+  `employee_id` order, so import order does not depend on file order.
+* **Modes:** `validate-only` (no repository, no database),
+  `dry-run` (classifies identical / would-create / conflict without
+  writing) and `apply` (approved creates only). Reports are JSON with
+  counts, employee IDs, differing field **names**, line numbers and
+  reason codes — no names, timestamps, record contents, DSNs or driver
+  text.
+* **`tools/import_employee_metadata.py` (new):** operator CLI —
+  `--input` (defaults to `<DATA_DIR>/exports/employee_metadata.jsonl`),
+  `--validate-only`, `--apply`, `--report`, `--overwrite-report`. Exit
+  codes `0` clean, `1` rejections/conflicts/stopped/report failure,
+  `2` CLI or configuration refusal. Because the psycopg-backed runtime
+  wiring is **Step 1.5c-3's** deliverable and explicitly out of scope,
+  the CLI refuses both repository-backed modes (default dry run and
+  `--apply`) with exit 2 *before any database access*, directing the
+  operator to `--validate-only`. Reports are written atomically and an
+  existing report is never replaced without `--overwrite-report`
+  (refused before any work starts).
+* **Testing (offline only):** new `tests/test_employee_import.py` →
+  **96 passed** (no skips). Coverage: dry run performs only `get` calls
+  and mutates nothing; `--apply` creates missing employees with the
+  artifact's `created_at` instant; identical rows are skipped; a
+  difference in each field (`full_name`, `is_active`, `created_at`) is a
+  conflict with the differing field names and zero mutation; an
+  `EmployeeAlreadyExists` race is a conflict with a single `create`
+  attempt and no retry; invalid records are rejected while valid ones
+  continue; duplicate IDs reject every occurrence and import nothing;
+  unsupported schema versions, missing/extra keys, malformed JSON,
+  non-UTF-8 input, invalid ID/name/status/timestamp, and
+  normalization-changing values all reject with typed codes; repository
+  errors stop the run safely (including after a successful create) with
+  no driver text in the report; reports contain no names or timestamps;
+  report creation/refusal/overwrite/atomic-failure behavior; every CLI
+  exit code and refusal path, including the missing-wiring refusal
+  making no repository call; and a behavioral proof that the importer
+  never touches `update_full_name`, `deactivate`, or `list` (the fake
+  records and raises on any such call).
+* **Verification:** focused `pytest tests/test_employee_import.py -q` →
+  **96 passed**; importer + repository + exporter suites → **215
+  passed, 4 skipped** (the 4 skips are the exporter's platform-limited
+  symlink/permission cases); full offline sweep (camera /
+  enrollment-CLI / YUNET-download suites excluded) → **1478 passed, 0
+  failed, 4 skipped, exit 0**, against a **1382** baseline at `ed7ef99`
+  (delta exactly the 96 new tests); `git diff --check` clean. Nothing
+  staged or committed.
+* **Deliberately NOT in this step:** the psycopg-backed repository
+  wiring, any DSN read, connection, SQL, migration or Tier-2 run (Step
+  1.5c-3); the real import of real employee metadata; any API endpoint
+  or recognition change. Never-enrolled and deleted employees remain
+  outside the population, and the manifest-vs-database active-status
+  divergence remains documented, not resolved.
+
 ## Step 32 — Phase 3 Step 1.5c-1: employee-metadata export from enrollment manifests (2026-11-03)
 
 **Owner-approved source decision, export half only — nothing is
