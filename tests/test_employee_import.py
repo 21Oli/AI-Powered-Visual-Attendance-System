@@ -11,13 +11,15 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from src import employee_import
+from src import db_employee_repository, employee_import
 from src.config import AppSettings
 from src.employee import Employee
 from src.employee_export import EXPORT_FILENAME, EXPORT_SCHEMA_VERSION
@@ -38,11 +40,8 @@ from src.employee_import import (
 )
 from src.employee_repository import EmployeeAlreadyExists
 
-_TOOL_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "tools"
-    / "import_employee_metadata.py"
-)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_TOOL_PATH = PROJECT_ROOT / "tools" / "import_employee_metadata.py"
 spec = importlib.util.spec_from_file_location(
     "import_employee_metadata", _TOOL_PATH
 )
@@ -690,19 +689,22 @@ class TestCli:
         assert "reason=malformed_json" in joined
         assert "nothing was imported" in joined
 
-    def test_default_mode_without_wiring_is_refused(
+    def test_runner_refuses_repository_mode_without_a_repository(
         self, tmp_path: Path
     ) -> None:
+        # Defensive library contract: the CLI always supplies one now (the
+        # production wiring or an injected factory), so a bare runner call
+        # with no repository must still refuse instead of guessing.
         code, out = _run_cli(tmp_path, repository=None)
         assert code == 2
         joined = "\n".join(out)
-        assert "Step 1.5c-3" in joined
+        assert "no repository was supplied" in joined
         assert "Nothing was read from or written to a database" in joined
 
-    def test_apply_without_wiring_is_refused(self, tmp_path: Path) -> None:
+    def test_runner_refuses_apply_without_a_repository(self, tmp_path: Path) -> None:
         code, out = _run_cli(tmp_path, apply=True)
         assert code == 2
-        assert any("Step 1.5c-3" in line for line in out)
+        assert any("no repository was supplied" in line for line in out)
 
     def test_apply_and_validate_only_are_mutually_exclusive(
         self, tmp_path: Path
@@ -881,3 +883,144 @@ class TestContractHygiene:
         employee = record.to_employee()
         assert isinstance(employee, Employee)
         assert employee.created_at == CREATED_DT
+
+
+# ---------------------------------------------------------------------------
+# 8. Production wiring selection (Step 1.5c-3a)
+# ---------------------------------------------------------------------------
+
+
+def _settings_with_artifact(tmp_path: Path) -> AppSettings:
+    """Settings whose export artifact exists — nothing else is created."""
+    settings = AppSettings(
+        data_dir=tmp_path / "data", log_dir=tmp_path / "logs"
+    )
+    settings.exports_dir.mkdir(parents=True)
+    (settings.exports_dir / EXPORT_FILENAME).write_text(
+        _artifact(_record_line()), encoding="utf-8"
+    )
+    return settings
+
+
+class TestProductionWiringSelection:
+    """The CLI builds the real wiring only for repository-backed modes.
+
+    The production factory is replaced here, so no test in this file ever
+    constructs the psycopg-backed wiring or touches a DSN.
+    """
+
+    def test_validate_only_never_builds_the_wiring(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        def refuse(*, apply: bool) -> None:
+            raise AssertionError("--validate-only must not build the wiring")
+
+        monkeypatch.setattr(cli, "_default_repository_factory", refuse)
+        code = cli.main(
+            ["--validate-only"], settings=_settings_with_artifact(tmp_path)
+        )
+        assert code == 0
+        assert "validation passed" in capsys.readouterr().out
+
+    def test_dry_run_builds_a_read_only_wiring(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        requested: list[bool] = []
+        repository = FakeRepository()
+
+        def factory(*, apply: bool) -> Any:
+            requested.append(apply)
+            return lambda: repository
+
+        monkeypatch.setattr(cli, "_default_repository_factory", factory)
+        code = cli.main([], settings=_settings_with_artifact(tmp_path))
+        assert code == 0
+        # apply=False → the wiring is asked for a read-only repository.
+        assert requested == [False]
+        assert repository.calls == [("get", "E-001")]
+        assert repository.rows == {}
+        capsys.readouterr()
+
+    def test_apply_builds_a_writable_wiring(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        requested: list[bool] = []
+        repository = FakeRepository()
+
+        def factory(*, apply: bool) -> Any:
+            requested.append(apply)
+            return lambda: repository
+
+        monkeypatch.setattr(cli, "_default_repository_factory", factory)
+        code = cli.main(["--apply"], settings=_settings_with_artifact(tmp_path))
+        assert code == 0
+        assert requested == [True]
+        assert set(repository.rows) == {"E-001"}
+        capsys.readouterr()
+
+    def test_injected_factory_wins_over_the_production_wiring(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        def refuse(*, apply: bool) -> None:
+            raise AssertionError("an injected factory must win")
+
+        monkeypatch.setattr(cli, "_default_repository_factory", refuse)
+        repository = FakeRepository()
+        code = cli.main(
+            [],
+            settings=_settings_with_artifact(tmp_path),
+            repository_factory=lambda: repository,
+        )
+        assert code == 0
+        assert repository.calls == [("get", "E-001")]
+        capsys.readouterr()
+
+    def test_default_factory_maps_the_mode_to_read_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[dict[str, Any]] = []
+
+        def fake_open(**kwargs: Any) -> object:
+            captured.append(kwargs)
+            return object()
+
+        monkeypatch.setattr(
+            db_employee_repository, "open_employee_repository", fake_open
+        )
+        cli._default_repository_factory(apply=False)()
+        cli._default_repository_factory(apply=True)()
+
+        assert captured == [{"read_only": True}, {"read_only": False}]
+
+    def test_importing_the_cli_does_not_import_the_database_wiring(self) -> None:
+        code = (
+            "import importlib.util, sys;"
+            f"sys.path.insert(0, r'{PROJECT_ROOT}');"
+            "spec = importlib.util.spec_from_file_location("
+            f"'cli_probe', r'{_TOOL_PATH}');"
+            "module = importlib.util.module_from_spec(spec);"
+            "spec.loader.exec_module(module);"
+            "print('src.db_employee_repository' in sys.modules);"
+            "print('psycopg' in sys.modules)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=str(PROJECT_ROOT),
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["False", "False"]

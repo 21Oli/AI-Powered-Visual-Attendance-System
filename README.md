@@ -299,15 +299,21 @@ python tools/export_employee_metadata.py --allow-partial    # valid records only
   IDs, and optionally writes a JSON report of counts, employee IDs,
   differing field names, and reason codes — never names. Exit codes: `0`
   clean, `1` rejected records, `2` CLI/configuration refusal.
-* **Import policy (needs the Step 1.5c-3 wiring):** when a repository is
-  supplied, the importer creates employees that are absent, skips ones
-  that match exactly, reports conflicts **without ever updating them**,
-  and never deactivates anyone. The psycopg-backed wiring is not
-  implemented yet, so `--apply` — and the default dry run, which
-  classifies against the database — is refused with exit 2 before any
-  database access; nothing is read from or written to PostgreSQL.
-* **Not yet implemented:** the runtime wiring and the real import of real
-  employee metadata (Step 1.5c-3, separately authorized).
+* **Import policy:** the importer creates employees that are absent,
+  skips ones that match exactly, reports conflicts **without ever
+  updating them**, and never deactivates anyone.
+* **Dry run (default):** classifies against PostgreSQL over a
+  **server-enforced read-only** connection — every connection is put in
+  read-only mode before the first statement, so a write cannot happen
+  even by mistake. `--apply` is the only mode that gets a read-write
+  connection, and it only inserts missing employees.
+* **Configuration:** `ATTENDANCE_DATABASE_URL` (see `.env.example`).
+  `--validate-only` needs no configured DSN, no driver, and no
+  connectivity; it never builds the repository.
+* **Not yet verified against a server:** the repository wiring is
+  **offline-tested only**. The real import of real employee metadata
+  (Tier-2, Step 1.5c-3) is separately authorized and still requires the
+  owner-provisioned dedicated test database and its marker.
 
 ## Attendance event storage
 

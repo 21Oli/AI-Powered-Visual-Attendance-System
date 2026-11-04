@@ -1,4 +1,4 @@
-"""Operator CLI for the employee-metadata importer (Phase 3 — Step 1.5c-2).
+"""Operator CLI for the employee-metadata importer (Phase 3 — Step 1.5c-2/3a).
 
 Reads the Step 1.5c-1 JSONL export, validates it strictly, and reconciles
 it with the employee-metadata repository under the approved policy:
@@ -9,22 +9,27 @@ Modes
 -----
 
 * ``--validate-only`` — **no database**: schema and duplicate validation
-  only. This is the mode available in this step, because the runtime
-  wiring that builds a repository over the approved connection layer is
-  Step 1.5c-3's deliverable.
+  only. It never imports the database wiring, so it needs no DSN, no
+  psycopg, and no connectivity.
 * default (no flags) — **dry run**: validate and classify against the
-  repository (identical / would-create / conflict) without writing.
-* ``--apply`` — perform the approved creates only.
+  repository (identical / would-create / conflict) without writing. The
+  wiring opens every connection read-only, so PostgreSQL itself refuses
+  any write even if this tool tried one.
+* ``--apply`` — perform the approved creates only, on a read-write
+  connection.
 
-Both repository-backed modes require the authorized runtime wiring. When
-it is not present the CLI refuses (exit 2) *before* anything is read from
-or written to a database, and points at ``--validate-only``.
+Repository-backed modes build their repository from
+:func:`src.db_employee_repository.open_employee_repository` — lazily, at
+invocation time, so importing this tool touches no database code. When no
+repository is supplied at all (direct library call), the runner still
+refuses (exit 2) *before* reading anything, and points at
+``--validate-only``.
 
 Guarantees
 ----------
 
-* No database connection, DSN access, SQL, migration, or existing
-  database wiring is touched by this tool in this step.
+* No SQL, migration, or DDL lives here: the repository remains the only
+  statement owner, and this tool only calls ``get`` and ``create``.
 * The importer never updates or deactivates an employee; a conflict is
   reported, never resolved.
 * Output and reports carry counts, employee IDs, differing field
@@ -35,16 +40,18 @@ Exit codes
 ----------
 
 ``0``  clean run (no rejections, no conflicts, nothing unprocessed).
-``1``  rejections, conflicts, a stopped run, or a report write failure.
+``1``  rejections, conflicts, a stopped run (including an unavailable
+       database, reported by exception **type** only), or a report write
+       failure.
 ``2``  CLI/configuration refusal: bad flags, missing/unreadable input,
-       report already present, or missing database wiring. Nothing is
+       report already present, or no repository at all. Nothing is
        written to a database in any exit-2 path.
 
 Usage::
 
     python tools/import_employee_metadata.py --validate-only
     python tools/import_employee_metadata.py --report reports/import.json
-    python tools/import_employee_metadata.py --apply   # needs 1.5c-3 wiring
+    python tools/import_employee_metadata.py --apply
 """
 
 from __future__ import annotations
@@ -75,12 +82,29 @@ from src.employee_import import (  # noqa: E402
 
 _PREFIX = "[import-cli]"
 
-_NO_WIRING = (
-    "no database wiring is available in this step (Step 1.5c-3 owns the "
-    "runtime wiring that builds a repository over the approved connection "
-    "layer). Nothing was read from or written to a database. Re-run with "
-    "--validate-only for a database-free validation."
+_NO_REPOSITORY = (
+    "no repository was supplied for a repository-backed mode. Nothing was "
+    "read from or written to a database. Re-run with --validate-only for a "
+    "database-free validation."
 )
+
+
+def _default_repository_factory(
+    *, apply: bool
+) -> Callable[[], EmployeeRepositoryLike]:
+    """Build the production repository factory (wiring imported lazily).
+
+    The import happens here, not at module import time, so
+    ``--validate-only`` never loads the database wiring or psycopg. The
+    returned factory itself still opens no connection: the wiring resolves
+    the DSN and connects on the first repository call, so a configuration
+    failure surfaces as a typed stop rather than at construction.
+
+    Read-only is the default: only ``--apply`` gets a writable connection.
+    """
+    from src.db_employee_repository import open_employee_repository
+
+    return lambda: open_employee_repository(read_only=not apply)
 
 
 def _summary(report: ImportReport, out: Callable[..., None]) -> None:
@@ -103,7 +127,7 @@ def _summary(report: ImportReport, out: Callable[..., None]) -> None:
     if report.mode == "validate-only":
         out(
             f"{_PREFIX} validation only: no employee rows were read or "
-            "written (classification needs the Step 1.5c-3 wiring)."
+            "written (no database was contacted)."
         )
     for result in report.conflicts:
         out(
@@ -162,7 +186,7 @@ def run_import_cli(
         return 2
 
     if not validate_only and repository is None:
-        out(f"{_PREFIX} refused — {_NO_WIRING}")
+        out(f"{_PREFIX} refused — {_NO_REPOSITORY}")
         return 2
 
     if report_path is not None:
@@ -260,9 +284,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--apply",
         action="store_true",
         help=(
-            "Perform the approved creates. Requires the Step 1.5c-3 runtime "
-            "wiring; without it the run is refused (exit 2) before anything "
-            "is read or written."
+            "Perform the approved creates only (never updates). Without "
+            "this flag the run is a read-only dry run: its connections are "
+            "put in server-enforced read-only mode."
         ),
     )
     parser.add_argument(
@@ -309,8 +333,14 @@ def main(
 
     repository: EmployeeRepositoryLike | None = None
     if not args.validate_only:
-        # Production wiring deliberately does not exist yet (Step 1.5c-3).
-        repository = repository_factory() if repository_factory else None
+        # Production wiring is built only when a repository-backed mode is
+        # actually invoked; --validate-only never reaches this branch.
+        factory = (
+            repository_factory
+            if repository_factory is not None
+            else _default_repository_factory(apply=args.apply)
+        )
+        repository = factory()
 
     try:
         return run_import_cli(

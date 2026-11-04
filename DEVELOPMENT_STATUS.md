@@ -3,6 +3,87 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 34 — Phase 3 Step 1.5c-3a: PostgreSQL employee-repository wiring (2026-11-04)
+
+**Wiring implemented and verified offline; no PostgreSQL connection was
+opened and no real import ran.** Baseline observed at start: branch
+`main`, HEAD `120a497` (the owner had committed Step 1.5c-2), clean tree,
+nothing staged.
+
+* **`src/db_employee_repository.py` (new):** production wiring that binds
+the approved `EmployeeRepository` to `src.db.open_connection`. It defines
+**no SQL**, no second persistence implementation, no retry and no
+fallback source — statement ownership and typed errors stay in the
+repository. `open_employee_repository(dsn=None, *, read_only=False,
+connection_opener=None)` returns the repository **without opening a
+connection**; the first repository call connects. `src.db` (and
+psycopg) is imported lazily inside the default opener, so importing the
+module loads no driver and reads no DSN.
+* **Lifecycle (one operation = one connection):** open → (read-only
+  requested and read back before any statement, when
+  `read_only=True`) → the repository's single `execute` → `commit()` on
+  success → `rollback()` + re-raise the *same* exception on failure →
+  `close()` on every path. A rollback error is swallowed while another
+  exception is propagating; a close error is attached as an `add_note`
+  note instead of replacing the original, and is raised when nothing else
+  failed. Read-only that cannot be set or does not report back is refused
+  (`EmployeeRepositoryWiringError`, fail closed). Cursors stay
+  driver-owned and are released with the connection.
+* **`tools/import_employee_metadata.py` (changed):** repository-backed
+  modes now build the production wiring lazily via
+  `_default_repository_factory(apply=...)` →
+  `open_employee_repository(read_only=not apply)`. `--validate-only`
+  never imports the wiring (`--apply` help text and mode text updated).
+  The runner keeps a defensive refusal (exit 2, no database access) for a
+  direct library call with no repository at all. No DSN, driver message,
+  employee name or report content is printed; a stopped run still reports
+  only the exception **type name**.
+* **Testing (offline only):** new `tests/test_db_employee_repository.py`
+  → **38 passed**: an in-memory psycopg-3-shaped fake server (rows,
+  `sqlstate`-carrying violations, settable/readable `read_only`,
+  observable commit/rollback/close) drives the **real** repository SQL —
+  construction opens nothing, `get`/`create` bind the approved
+  parameters, `23505` becomes `EmployeeAlreadyExists` while `23502` and
+  a sqlstate-less error do not, read-only is requested **before** the
+  first statement, writable repositories never request it, every failure
+  path rolls back and closes (including rollback- and close-failure
+  masking), availability errors propagate unchanged, the DSN reaches the
+  opener verbatim while `None` stays the connection layer's business,
+  non-boolean `read_only` is refused, the module defines no SQL and
+  imports no driver, and a fresh-process check proves importing it loads
+  neither `src.db` nor psycopg. The importer is then run over that wiring
+  (dry run reads and never inserts; `--apply` inserts only missing rows
+  with the artifact's `created_at`; conflicts and create races never
+  write; an unavailable database stops the run and the report contains
+  only the exception type).
+* **`tests/test_employee_import.py` (changed):** **96 → 102 passed** — 6
+  new tests that `--validate-only` never builds the wiring, dry run
+  requests `read_only=True`, `--apply` requests `read_only=False`, an
+  injected factory wins over production, the mode→read-only mapping is
+  exact, and importing the CLI loads neither the wiring nor psycopg. Two
+  obsolete tests were **renamed and rescoped, not weakened**: the former
+  "missing wiring is refused" cases now assert the runner's defensive
+  no-repository refusal (exit 2, no repository call), because the CLI now
+  always supplies the production wiring.
+* **Verification:** focused `pytest tests/test_db_employee_repository.py
+  tests/test_employee_import.py -q` → **140 passed**; repository +
+  exporter + migration + test-database guard + API + `src.db` suites →
+  **263 passed, 4 skipped**; full offline sweep (camera /
+  enrollment-CLI / YUNET-download suites excluded) → **1522 passed, 0
+  failed, 4 skipped, exit 0**, against a **1478** baseline at `120a497`
+  (delta exactly the 44 new tests). The 4 skips are the exporter's
+  platform-limited symlink/permission cases. `git diff --check` clean.
+  Nothing staged or committed.
+* **Deliberately NOT verified (and not claimed):** that PostgreSQL
+  actually refuses a write in the read-only transaction (the fake cannot
+  model server-side enforcement), real psycopg connect/commit/close
+  behaviour, DSN resolution from a live environment, migrations, and the
+  Tier-2 real import. Those require the separately authorized Step 1.5c-3
+  run against the owner-provisioned dedicated test database.
+* **Not changed:** `requirements.txt` / dependencies, `.env.example`,
+  `src/config.py`, the repository, migration runner, guard, API,
+  recognition, enrollment, and attendance behaviour.
+
 ## Step 33 — Phase 3 Step 1.5c-2: offline employee-metadata importer (2026-11-03)
 
 **Importer implemented against the Step 1.5c-1 artifact; no database was

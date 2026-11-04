@@ -19,9 +19,11 @@ the audit repairs below, **113** after them, **126** after the Option B
 lock-lifecycle tests of Step 31). Still **not implemented
 and not verified against a real PostgreSQL server**: the real
 psycopg-backed `MigrationExecutor`, the no-serve-during-migration
-runtime wiring, any Tier-2 integration test (requires the
+runtime wiring, and any Tier-2 integration test (requires the
 owner-provisioned dedicated test database with an established marker,
-Step 1.5b-3), and the Step 1.5c importer.
+Step 1.5b-3). The employee-metadata exporter, importer and their
+psycopg-backed repository wiring **are** implemented, but offline only
+(Sections 9–11); the live import remains Step 1.5c-3.
 
 **Audit-repair update (Step 1.5b follow-up):** an independent read-only
 audit of the 1.5b work found real defects, now fixed offline —
@@ -251,8 +253,10 @@ silently chosen:
 `src/employee_repository.py`, tested against injected fakes
 (`tests/test_employee_repository.py`). No database has been connected
 to, so the persistence behavior is contract-verified only. The
-remaining unimplemented parts of this design are the API endpoints that
-would consume the repository (a later gate).
+production connection source is now bound by the Step 1.5c-3a wiring
+(Section 11), also offline-tested only. The remaining unimplemented
+parts of this design are the API endpoints that would consume the
+repository (a later gate).
 
 The contract below is unchanged by implementation; it is aligned with
 the existing model and API decisions (D2, D7). The repository injects a
@@ -459,7 +463,7 @@ means a PostgreSQL connection is required (Section 5.2 contract).
 | 1.5b-5 | Regression + docs | `DEVELOPMENT_STATUS.md`, `README.md`, `CHANGELOG.md` | No | Owner review of actual evidence |
 | 1.5c-1 | **Employee-metadata export** from the enrollment manifests (read-only) | `src/employee_export.py`, `tools/export_employee_metadata.py`, `tests/test_employee_export.py` | No | **Implemented (offline) in Step 1.5c-1** |
 | 1.5c-2 | Importer over the exported JSONL (fake-backed tests only) | `src/employee_import.py`, `tools/import_employee_metadata.py`, `tests/test_employee_import.py` | No | **Implemented (offline) in Step 1.5c-2** under the approved reconciliation policy (Section 10) |
-| 1.5c-3 | Real import into PostgreSQL | none (owner-run) | **Yes** | Requires 1.5b-3 (provisioned DSN + marker) and the psycopg-backed runtime wiring |
+| 1.5c-3 | Real import into PostgreSQL | `src/db_employee_repository.py`, `tests/test_db_employee_repository.py` (wiring), then none (owner-run) | **Yes** for the run itself | **Wiring implemented (offline) in Step 1.5c-3a** (Section 11); the real import remains owner-gated and additionally requires 1.5b-3 (provisioned DSN + marker) |
 | 1.5c+ | DB-backed API endpoints; checkout endpoint | not yet designed | Yes | later gate, separate design |
 
 **Acceptance criteria before any Step 1.5 code milestone is accepted:**
@@ -648,29 +652,112 @@ deactivation path, and therefore no way for a conflict to become a write.
 ### 10.3 Modes and exit codes
 
 * `validate-only` (CLI `--validate-only`) — no repository, no database:
-  schema/duplicate validation only.
+  schema/duplicate validation only. It never imports the wiring, so it
+  needs no DSN, no driver, and no connectivity.
 * `dry-run` — validates **and classifies** against the repository and
-  writes nothing. This is the CLI default, and it requires the runtime
-  wiring that Step 1.5c-3 owns; without that wiring the CLI refuses
-  (exit 2) before any database access and directs the operator to
-  `--validate-only`.
-* `apply` (CLI `--apply`) — performs the approved creates only, under the
-  same wiring requirement.
+  writes nothing. This is the CLI default. Since Step 1.5c-3a the CLI
+  builds the production wiring for this mode with **server-enforced
+  read-only connections** (Section 11); before that wiring existed it
+  refused with exit 2.
+* `apply` (CLI `--apply`) — performs the approved creates only, on a
+  read-write connection.
 
-Exit codes: `0` clean; `1` rejections, conflicts, a stopped run, or a
-report-write failure; `2` CLI/configuration refusal (bad flag combination,
-missing/unreadable input, existing report without `--overwrite-report`,
-missing database wiring) with nothing written to a database. Reports are
-JSON containing counts, employee IDs, differing field names, line numbers,
-and reason codes only — no names, timestamps, record contents, DSNs, or
-driver text.
+Exit codes: `0` clean; `1` rejections, conflicts, a stopped run
+(including an unavailable database, whose reason is recorded by
+**exception type name** only), or a report-write failure; `2`
+CLI/configuration refusal (bad flag combination, missing/unreadable
+input, existing report without `--overwrite-report`, or no repository at
+all) with nothing written to a database. Reports are JSON containing
+counts, employee IDs, differing field names, line numbers, and reason
+codes only — no names, timestamps, record contents, DSNs, or driver text.
 
-### 10.4 Not done here (Step 1.5c-3)
+### 10.4 Not done in Step 1.5c-2 (moved to 1.5c-3)
 
-* No psycopg-backed wiring, connection factory, DSN read, SQL, migration,
-  or Tier-2 verification exists; the importer's repository is injected,
-  and its `apply` path is exercised only against in-memory fakes.
+* The psycopg-backed wiring did not exist in 1.5c-2: that step injected
+  the repository and exercised `apply` only against in-memory fakes.
+  The wiring itself is now implemented offline in Step 1.5c-3a
+  (Section 11).
 * No real employee data has been imported; the population limits of
   Section 9.1 (never-enrolled and deleted employees) still apply.
 * The interim divergence between manifest-based recognition gating and
   future database reads remains recorded, not resolved.
+
+## 11. Step 1.5c-3a — PostgreSQL repository wiring (implemented offline)
+
+**Status: implemented and tested offline; no PostgreSQL server was
+contacted.** This step supplies the production wiring that Step 1.5c-3's
+real import needs. It does **not** import employee data, run migrations,
+or verify anything against a live database.
+
+### 11.1 Shape
+
+| Concern | Decision |
+|---|---|
+| Module | `src/db_employee_repository.py` — wiring only: **no SQL**, no second persistence implementation, no retry, no fallback source |
+| Bound repository | the approved `EmployeeRepository` (Section 4); statements and typed errors stay there |
+| Connection source | `src.db.open_connection` (Step 1.2), imported **lazily** inside the default opener |
+| DSN | explicit argument, or `None` → `ATTENDANCE_DATABASE_URL` re-read per attempt by the connection layer (never cached in the wiring) |
+| Import hygiene | importing the wiring imports neither `src.db` nor psycopg, opens nothing, reads no DSN |
+| Entry point | `open_employee_repository(dsn=None, *, read_only=False, connection_opener=None)` |
+
+`connection_opener` is a documented test seam only: production callers
+never pass it, and the production CLI passes `read_only=not apply`.
+
+### 11.2 One operation = one connection
+
+Every repository call acquires a fresh connection through a scope that
+owns the complete lifecycle:
+
+1. open (availability failures propagate unchanged as
+   `DatabaseUnavailableError`);
+2. for `read_only=True`, request **and read back** read-only mode before
+   any statement is issued — a connection that cannot be set or does not
+   report read-only is refused (fail closed);
+3. yield the connection to the repository's single `execute`;
+4. `commit()` on success (a read-only transaction commits as a no-op);
+5. `rollback()` when the body raises, then re-raise the **same**
+   exception object (its type is the importer's stop reason);
+6. always `close()`.
+
+Cleanup never replaces the real failure: a rollback error is swallowed
+while another exception is propagating, and a close error is attached as
+an `add_note` note to that exception. A close error with nothing else in
+flight is raised, because a leaked connection is a fault rather than a
+footnote. Cursors are driver-owned and are released with the connection;
+the wiring does not invent a cursor policy of its own.
+
+### 11.3 Dry run vs apply
+
+* `dry-run` (CLI default): repository built with `read_only=True`, so
+  PostgreSQL itself refuses any write the code might attempt. "Only
+  SELECTs are sent" is explicitly **not** treated as equivalent.
+* `apply`: repository built with `read_only=False`; only the approved
+  `create` path writes, and only for absent employees.
+* `validate-only`: no repository at all; the wiring module is never
+  imported, so no DSN, driver, or connectivity is required.
+
+### 11.4 What is verified offline, and what is not
+
+Offline tests (`tests/test_db_employee_repository.py`, plus the CLI
+selection tests in `tests/test_employee_import.py`) run the **real**
+repository SQL against a fake psycopg-3-shaped server: statement text and
+bound parameters, duplicate detection via `sqlstate == "23505"`,
+read-only requested before the first statement, close on every path,
+rollback on failure, unchanged error propagation, DSN pass-through, and
+module import hygiene. The importer is exercised end-to-end over that
+wiring (dry run never writes; apply creates only missing rows; conflicts
+and create races never write).
+
+**Not verified, and not claimed:** that PostgreSQL actually refuses the
+write in a read-only transaction (the fake cannot model server-side
+enforcement), real psycopg connection/commit/close behaviour, DSN
+resolution from a real environment, and everything Tier-2 covers
+(provisioned database, marker, real import). The fake models the *shape*
+the wiring relies on, not driver or server behaviour.
+
+### 11.5 Trust boundary
+
+`read_only` and `connection_opener` are ordinary in-process arguments: the
+wiring is a fail-closed mistake guard for callers, not a defence against
+malicious code running in the same interpreter. Its guarantees are about
+the code paths this project actually writes.
