@@ -3,6 +3,89 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 35 — Phase 3 Step 1.5c-3b-prep: Tier-2 PostgreSQL verification harness prepared (2026-11-05)
+
+**Harness prepared and verified offline; not executed.** No PostgreSQL
+connection was opened, no DSN value was read, and no Tier-2 scenario ran:
+the committed baseline (branch `main`, HEAD `1692cb9`) required the
+dedicated test database, which is still owner-provisioning territory.
+
+* **`tests/test_tier2_employee_repository.py` (new):** the opt-in Tier-2
+harness. It cannot run in the ordinary offline suite: without
+`ATTENDANCE_TIER2_OPT_IN=1` every item skips itself at collection with a
+reason naming the switch (proven by a fresh-subprocess run), and a skip is
+never reported as a pass. With the opt-in on, the module still refuses to
+start unless both `ATTENDANCE_TEST_DATABASE_URL` and
+`ATTENDANCE_DATABASE_URL` are configured (pre-flight, presence-only,
+before any opener), and then hands both DSNs to the existing
+unmodified `src.test_database_guard.verify_test_database` — identity
+declaration, real connection, read-only enforcement, connected identity,
+marker literal, marker/ledger agreement. Any blocked outcome skips with
+the guard's own typed reason code; the harness never weakens, bypasses,
+or re-implements a guard check.
+* **Targeting discipline:** every repository is built explicitly via
+`open_employee_repository(dsn=<test DSN>, read_only=…)`. The wiring's
+default resolution would read the application DSN, so the default is
+never used; the application DSN reaches only the guard, for its
+distinctness proof. No connection opens on a missing test DSN.
+* **Live scenarios (all opt-in):** real connection opens/closes/answers;
+PostgreSQL refusing a write in a read-only transaction (asserted via
+`sqlstate == "25006"`, no row created); dry-run classification against a
+read-only repository; `--apply` creating the synthetic employee;
+repeated import identical; each differing field (`full_name`,
+`is_active`, `created_at`) a conflict that never updates; duplicate
+direct create → `EmployeeAlreadyExists`; a create race (miss-then-create
+wrapper) reported as a conflict; rollback/cleanup on failure leaving a
+reusable connection; and a spy repository proving the importer never
+reaches `update_full_name`/`deactivate`/`list`.
+* **Synthetic rows:** every row uses a per-run namespace
+(`T2-<8-hex-run>-<slot>` with a synthetic name and fixed timestamp), a
+fixture records each intended row, and teardown runs guarded cleanup.
+* **Guarded cleanup:** the harness's only write is
+`cleanup_synthetic_employees` — it refuses without a guard-produced
+`VerifiedTestTarget`, requires the single authorized action against an
+explicit one-entry manifest via
+`src.test_database_guard.require_destructive_action` **before**
+connecting, accepts only harness-shaped IDs, re-reads each candidate and
+deletes only rows whose stored tuple equals exactly what the run wrote,
+uses one bound-parameter `DELETE … = ANY(%s)` (no `LIKE`, no prefix
+match, no DDL), reports `deleted`/`absent`/`left`, and closes the
+connection on success and failure. Records that cannot be positively
+claimed are left untouched.
+* **`tests/test_tier2_harness_control.py` (new):** 25 offline harness-
+control tests, all fake-driven (a genuine unforgeable `VerifiedTestTarget`
+is produced through the real guard with an injected connection and a
+stdlib DSN parser, keeping the shared pytest process psycopg-free):
+opt-in semantics, pre-flight ordering (opt-in → test DSN → app DSN,
+verifier/openers never run on a missing input), skip-with-typed-reason,
+repository built only with the explicit test DSN (application DSN only
+ever reaches the guard), no direct `VerifiedTestTarget` construction,
+cleanup manifest/ownership/shape gating, exact-match-only deletion
+(sibling prefix IDs never eligible), connection closed on success and
+failure, exact statement/parameter audit, and an AST scan proving the
+module's SQL is exactly the two bound-parameter statements — no CREATE,
+ALTER, TRUNCATE, INSERT, or UPDATE anywhere in any string literal.
+* **`pytest.ini`:** registered the `tier2` marker so opt-in skips are
+explicit configuration, not unknown-mark noise.
+* **`CHANGELOG.md`, `DB_DESIGN.md` §11.6, `.env.example`:** documented
+the prepared harness, the opt-in switch, and what owner provisioning
+must supply before a real run.
+
+**Owner provisioning (required before any Tier-2 run):** provision a
+dedicated, disposable local PostgreSQL test database; establish the
+`_phase3_test_guard` marker row with the
+`VISUAL_ATTENDANCE_PHASE3_TEST_ONLY` literal (per DB_DESIGN §5.3) with a
+timezone-aware `created_at` and a `schema_version` equal to the applied
+migration ledger's `MAX(version)`; set `ATTENDANCE_TEST_DATABASE_URL`,
+`ATTENDANCE_DATABASE_URL`, and `ATTENDANCE_TIER2_OPT_IN=1` in the shell
+that runs the harness. Nothing in this step licenses pointing any
+variable at a shared or production database.
+
+**Not verified, and not claimed:** everything that needs PostgreSQL —
+server-side read-only refusal, real connection lifecycle, marker
+evidence, the import against a real database, and the guarded cleanup
+against real rows. The harness is prepared but has never executed.
+
 ## Step 34 — Phase 3 Step 1.5c-3a: PostgreSQL employee-repository wiring (2026-11-04)
 
 **Wiring implemented and verified offline; no PostgreSQL connection was

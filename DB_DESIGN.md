@@ -761,3 +761,34 @@ the wiring relies on, not driver or server behaviour.
 wiring is a fail-closed mistake guard for callers, not a defence against
 malicious code running in the same interpreter. Its guarantees are about
 the code paths this project actually writes.
+
+### 11.6 Tier-2 verification harness (prepared, not executed)
+
+`tests/test_tier2_employee_repository.py` will exercise everything §11.1–
+11.5 describe against the real server once the owner-provisioned test
+database exists. It is deliberately unable to run uninvited: every item
+skips itself at collection unless `ATTENDANCE_TIER2_OPT_IN=1`, and with
+the opt-in on it still refuses to start unless both the test DSN and the
+application DSN are configured — then the unmodified guard
+(`src/test_database_guard.py`) decides, and any blocked outcome skips
+with the guard's typed reason. Repositories are built only with an
+explicit `dsn=<test DSN>`; the application DSN travels to the guard
+alone, for the distinctness proof.
+
+The harness touches the schema in exactly one way: guarded cleanup of
+rows it created. Deletion requires a guard-produced `VerifiedTestTarget`,
+the single authorized operation in an explicit manifest
+(`require_destructive_action`), harness-shaped synthetic IDs only
+(`T2-<8-hex-run>-<slot>`), and an exact re-read match of the stored
+`(full_name, is_active, created_at)` tuple — one bound-parameter
+`DELETE … = ANY(%s)`, never `LIKE`, never DDL, and rows whose ownership
+cannot be positively established are left untouched and reported.
+Harness-control tests (`tests/test_tier2_harness_control.py`) keep that
+boundary offline-tested: pre-flight ordering, explicit test-DSN
+targeting, manifest and ownership gating, and an AST audit that the
+module's SQL is exactly a bound-parameter SELECT and DELETE.
+
+What this section does **not** yet know anything about: real server
+behaviour. Until a live run passes, the §11.4 "not verified" list applies
+unchanged; the marker row and migration ledger must be established by
+the owner during provisioning (§5.3), never by any automated step.

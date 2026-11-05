@@ -4,6 +4,23 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 3, Step 1.5c-3b-prep: Tier-2 verification harness prepared
+
+### Added
+
+* `tests/test_tier2_employee_repository.py`: the opt-in Tier-2 PostgreSQL verification harness. It cannot run in the ordinary offline suite — without the exact `ATTENDANCE_TIER2_OPT_IN=1` per-shell setting every item skips itself at collection with a reason naming the switch (proven in a fresh subprocess), and a missing prerequisite is reported as a skip with a typed reason, never as a pass. With the opt-in on, it refuses to start unless both `ATTENDANCE_TEST_DATABASE_URL` and `ATTENDANCE_DATABASE_URL` are configured, then runs the unmodified `src/test_database_guard.py` ordered positive verification and skips with the guard's typed reason on any blocked outcome — no guard check is weakened, bypassed, or re-implemented. Every repository is built with an explicit `dsn=` (the application DSN reaches only the guard's distinctness proof, never the repository); prepared scenarios cover connection open/close, server-side read-only write refusal (`sqlstate == "25006"`), dry-run classification, apply creating the synthetic employee, identical repeats, each differing field as a never-updated conflict, duplicate creates as `EmployeeAlreadyExists`, create races reported as conflicts, rollback/connection cleanup, and a spy proving the importer never updates, deactivates, or enumerates. Synthetic rows live in a per-run `T2-<8-hex>-<slot>` namespace with a fixture tracking intent, and the harness's only write is guarded cleanup: `require_destructive_action` against an explicit one-entry manifest before connecting, only harness-shaped IDs, deletion restricted to rows whose stored `(full_name, is_active, created_at)` equals exactly what the run wrote, one bound-parameter `DELETE … = ANY(%s)` (no `LIKE`, no DDL), `deleted`/`absent`/`left` accounting, and closing the connection on every path. Rows whose ownership cannot be positively established are left untouched.
+* `tests/test_tier2_harness_control.py`: 25 fake-driven offline harness-control tests — opt-in semantics, pre-flight ordering (no opener run on a missing input), skip-with-typed-reason, repositories built only with the explicit guarded test DSN, refused direct `VerifiedTestTarget` construction (genuine targets produced through the real guard over an injected connection with a stdlib DSN parser, keeping the shared process psycopg-free), cleanup manifest/ownership/shape gating with exact-match-only deletion (sibling prefix IDs never eligible and connection closed on success and failure), and an AST scan proving every string literal in the harness is free of `INSERT`, `UPDATE`, `CREATE`, `DROP`, `ALTER`, and `TRUNCATE`.
+
+### Changed
+
+* `pytest.ini`: registered the `tier2` marker so the opt-in skips are explicit configuration rather than unknown-mark warnings.
+* `.env.example`: documented `ATTENDANCE_TIER2_OPT_IN=1` next to the test DSN.
+
+### Security notes
+
+* No PostgreSQL connection, DSN value read, SQL execution, migration, marker write, or Tier-2 scenario occurred in this step: the harness is **prepared, not executed**, and every test runs offline against fakes or a skipped subprocess. The database, its `_phase3_test_guard` marker row, and its migration ledger remain owner-provisioning work; no variable in this step may ever point at a shared or production database.
+* **Not verified, and not claimed:** server-side read-only refusal, real connection lifecycle, marker evidence, a live import, and guarded cleanup against real rows.
+
 ## [Unreleased] — Phase 3, Step 1.5c-3a: PostgreSQL employee-repository wiring
 
 ### Added
