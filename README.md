@@ -315,6 +315,46 @@ python tools/export_employee_metadata.py --allow-partial    # valid records only
   (Tier-2, Step 1.5c-3) is separately authorized and still requires the
   owner-provisioned dedicated test database and its marker.
 
+## Applying schema migrations (Phase 3)
+
+`tools/run_migrations.py` inspects and applies the SQL migrations in
+`migrations/` against the configured application database
+(`ATTENDANCE_DATABASE_URL`; there is no default and no fallback).
+
+```bash
+./.venv/Scripts/python.exe tools/run_migrations.py status
+./.venv/Scripts/python.exe tools/run_migrations.py status --json
+./.venv/Scripts/python.exe tools/run_migrations.py apply
+```
+
+* `status` is **read-only**: one `REPEATABLE READ READ ONLY` transaction,
+  no advisory lock, no ledger creation, no writes.
+* Output describes the target as `dbname=… host=… port=…` only — never a
+  DSN, a user name, a password, or driver text.
+* A target whose normalized identity equals
+  `ATTENDANCE_TEST_DATABASE_URL` (the disposable Tier-2 database) is
+  refused, and a configured-but-unreadable test DSN also refuses: the
+  check fails closed, and there is no override flag.
+* `apply` takes the fixed advisory lock, validates (or creates) the
+  ledger, and runs each pending migration in its own transaction together
+  with its ledger row; a failed script rolls back entirely. Migrations
+  are forward-only — recovery is a verified backup restore, not a
+down-migration.
+
+| Exit | Meaning |
+|---|---|
+| 0 | success |
+| 1 | unexpected internal error |
+| 2 | configuration/target refusal (missing, malformed, ambiguous, or the test database) |
+| 3 | another run holds the advisory lock |
+| 4 | database unavailable / driver failure |
+| 5 | migration refused or failed (file, checksum, integrity, gap, missing script, application) |
+| 6 | run completed but lock cleanup failed (outcome unconfirmed) |
+
+No migration has been executed against an application database in this
+project's history. The executor's live verification is read/lock-only
+against the dedicated test database (DB_DESIGN.md §3.4, §3.7, §11.7).
+
 ## Attendance event storage
 
 Accepted attendance events are durably journalled as JSON Lines at

@@ -4,6 +4,43 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 3, Step 1.5b-6: real migration executor and migration CLI
+
+### Added
+
+* `src/db_migrate_executor.py`: the real psycopg-backed `PsycopgMigrationExecutor`. It requires an explicit, non-blank DSN (there is deliberately no fallback to `ATTENDANCE_DATABASE_URL`, which is how a mis-targeted run would reach the wrong database), opens nothing at construction, and owns one dedicated session connection for a nonblocking `pg_try_advisory_lock` held across the whole run — a refused acquisition closes the connection and holds nothing, and release is idempotent and raises only after closing. The ledger is created only when `to_regclass` reports it absent; an existing ledger's documented column structure is validated from `information_schema.columns` and any divergence is a typed `MigrationIntegrityError`, never a repair. Each migration's SQL is executed verbatim and parameterless (so psycopg's simple-query path runs the file's statements inside the executor's transaction), then its ledger row is inserted, then one commit — any failure rolls the whole transaction back. `read_snapshot()` is the one method the ABC does not carry: a single `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` transaction reads tables, ledger presence and ledger rows from one MVCC snapshot, then rolls back and closes, so `status` never sees a table list and version list from different points in time. Availability and DSN errors propagate unchanged; unexpected driver failures become fixed-message `MigrationDriverError`s with `__cause__` preserved, and cleanup never masks a primary exception it handled (G7: scoped to ordinary `Exception`s).
+* `src/db_target.py`: `normalized_target_identity()` and `same_target()`. Identity is dbname/host/normalized-port with textual local aliases collapsed and credentials excluded; `hostaddr`, `service`, a missing host, a missing database name, or a non-numeric port yield **no** identity, so ambiguity can never masquerade as proof that two targets differ.
+* `src/db_migrate.py`: `MigrationSnapshot`, `MigrationState` and the pure `read_state(snapshot, migrations_dir=None)`, appended without changing `migrate()`, `_reconcile()`, checksum or script validation, `ADVISORY_LOCK_KEY`, V001, the six-method ABC, or `FakeExecutor`. `read_state()` reuses `load_migrations()` and `_reconcile()` for every judgement (checksum drift, duplicate rows, gaps, applied-but-missing scripts, `employee` without a ledger) and refuses a snapshot that claims ledger rows without a ledger.
+* `tools/run_migrations.py`: `status`, `status --json` and `apply`. The target is the configured application DSN only; it refuses a target whose normalized identity equals the configured test DSN and fails closed when a configured test DSN cannot be normalized — there is no `--allow-test-target` escape. `status` uses only `read_snapshot()` and `read_state()` (no lock, no ledger creation, no writes). Exit codes: `0` success, `1` unexpected internal error, `2` configuration/target refusal, `3` lock contention, `4` database unavailable/driver failure, `5` migration refused or failed, `6` run completed but lock cleanup failed. Output names the target as `dbname=… host=… port=…` and never prints a DSN, user, password, or driver text.
+* `tests/test_db_target.py`, `tests/test_db_migrate_executor.py`, `tests/test_run_migrations_cli.py`: 82 fake-driven Tier-1 tests covering identity normalization, statement text and bound parameters, presence-before-CREATE ordering, four divergent ledger shapes, rollback on failed script and failed ledger insert, the close/rollback non-masking matrix, lock lifecycle, the single read-only snapshot, `read_state()`'s delegation, every exit code, credentials-free output, and import hygiene.
+* `tests/tier2_support.py`, `tests/test_tier2_migration_executor.py`: the opt-in live harness. It binds every executor to the guard-verified test DSN (`bind_target_to_dsn`, with explicit refusals for an unverified target, a blank DSN and a different database), fingerprints the catalog read-only, and asserts inventory equality before and after each scenario.
+
+### Verified
+
+* Full offline suite: **1629 passed, 31 skipped** (`1629 passed, 31 skipped in 225.87s`, exit 0), the 31 skips being the two opt-in Tier-2 modules (17 pre-existing + 14 new).
+* Live Tier-2, read/lock only: `ATTENDANCE_TIER2_OPT_IN=1 ./.venv/Scripts/python.exe -m pytest tests/test_tier2_migration_executor.py -m tier2 -v` → **14 passed, 0 failed, 0 skipped** against `visual_attendance_tier2_test` (`localhost:5432`), with the unmodified guard reporting `READY`. Observed: one consistent snapshot whose ledger rows equal the catalog baseline, `ensure_ledger()` as a no-op under a role without `CREATE`, `migrate()` as a no-op on a fully applied target, advisory-lock contention and release, a deliberately failing migration that committed nothing and left no `version = 999` row, and unchanged catalog inventory (relations, columns, constraints, indexes, ledger rows, employee count, guard rows). `ATTENDANCE_DATABASE_URL` was never connected to.
+
+### Not claimed
+
+* No committed migration, no DDL/DML, no employee/ledger/guard-row change, and no cleanup delete occurred. `apply` against a live schema and `ensure_ledger()`'s CREATE path remain fake-verified only. G2 (no startup enforcement), G3 (migration files are validated, not hardened) and G7's scope are documented in DB_DESIGN.md §3.7.
+
+## [Unreleased] — Phase 3, Step 1.5c-3b: live Tier-2 PostgreSQL verification executed
+
+### Verified
+
+* `tests/test_tier2_employee_repository.py` ran for the first time against a real PostgreSQL instance: the owner-provisioned, dedicated `visual_attendance_tier2_test` database, reached only through `ATTENDANCE_TEST_DATABASE_URL` as the least-privilege role `attendance_tier2_runtime`. `ATTENDANCE_DATABASE_URL` was never connected to and reached only the guard's distinctness proof. Command: `ATTENDANCE_TIER2_OPT_IN=1 ./.venv/Scripts/python.exe -m pytest tests/test_tier2_employee_repository.py -m tier2 -v` — **13 passed, 0 failed, 0 skipped, 0 errors** in 12.02s. This is live verification and does not replace or expand the offline suite's results.
+* The unmodified `src/test_database_guard.py` preflight reported `READY`: declared and connected identity matched the dedicated test target and differed from the application's, server-side read-only was enforced before any verification query, `_phase3_test_guard` held exactly one row with the approved literal and a timezone-aware `created_at`, and its claimed `schema_version` (1) matched the migration ledger's recorded version (1).
+* Live scope actually exercised, because nothing skipped: real connection open/close, PostgreSQL refusing a write in a read-only transaction, dry-run classification, `--apply` creating the synthetic employee, identical repeat, each differing field (`full_name`, `is_active`, `created_at`) as a never-updated conflict, duplicate create → `EmployeeAlreadyExists`, create race → conflict, failed transaction leaving no state with a reusable connection, typed not-found on update without writing, and the spy proving the importer never updates or deactivates.
+* Guarded cleanup left **zero** synthetic rows: the harness's teardown asserts that and would have failed the run otherwise, and a post-run read-only count showed `public.employee` at 0 rows total with 0 rows in the harness's `T2-` namespace. The harness's per-run `deleted`/`absent` counters are exposed only through `report.left`, so **separate deleted/absent counts were not observed and are not claimed**.
+
+### Changed
+
+* No production code, test, schema, migration, dependency, or configuration file changed in this verification step: the committed harness, guard, and repository wiring ran unmodified, and the opt-in switch was set inline for the single invocation rather than persisted to `.env` (where the key is absent, so it can no longer be inherited from the file).
+
+### Not claimed
+
+* No production-readiness claim, and no real-camera, real-employee, photo, embedding, or attendance-record validation: only the disposable test database and its synthetic namespace were touched. The ledger and marker rows remain at one each, and the earlier exposure of the test role's password in a pytest assertion still stands as a rotation recommendation.
+
 ## [Unreleased] — Phase 3, Step 1.5c-3b-prep: Tier-2 verification harness prepared
 
 ### Added

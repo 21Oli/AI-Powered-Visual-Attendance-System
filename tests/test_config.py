@@ -23,6 +23,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VENV_PYTHON = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
 
+import src.config as config_module
 from src.config import (
     APP_NAME,
     ATTENDANCE,
@@ -140,6 +141,21 @@ def test_constants_are_frozen() -> None:
 # ---------------------------------------------------------------------------
 # 4. Environment overrides work where intentionally supported
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolate_from_project_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep every config test hermetic with respect to the developer's .env.
+
+    ``load_settings()`` calls ``load_dotenv(override=False)``, so a real
+    process environment always wins, but a local ``.env`` file still fills
+    in anything this module deletes or leaves unset. These tests describe
+    the environment -> ``AppSettings`` mapping, not the developer's machine
+    setup, so the dotenv read is suppressed here and nowhere else; the
+    production contract (environment wins, ``.env`` is a convenience) is
+    untouched.
+    """
+    monkeypatch.setattr(config_module, "load_dotenv", lambda *a, **k: None)
 
 
 def test_env_overrides_app_env_and_debug(

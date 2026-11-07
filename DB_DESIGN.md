@@ -162,6 +162,42 @@ applied version list, and **sanitized error classes** — never a driver
 exception string, never the DSN. Wherever a DSN could reach output, the
 existing `src/db.py` `_redact()` machinery is reused (D4).
 
+**Step 1.5b-6 status: implemented; the read path is live-verified and
+strictly read-only.**
+
+* **Snapshot semantics.** `PsycopgMigrationExecutor.read_snapshot()`
+  opens one connection and issues `BEGIN ISOLATION LEVEL REPEATABLE READ
+  READ ONLY`, reads ledger presence (`to_regclass`), the public
+  table/partition list, and — only when that same transaction reported
+  the ledger present — its `(version, checksum)` rows, then `ROLLBACK`s
+  and closes. Tables, ledger presence and ledger rows therefore come from
+  **one** MVCC snapshot: `status` cannot report a table list from before
+  a runner's commit and a version list from after it. It never takes the
+  advisory lock, never creates the ledger, and never commits.
+* **Derivation is pure.** `read_state(snapshot, migrations_dir=None)`
+  performs no database I/O and no writes: it reads the migration files
+  through `load_migrations()` and applies `_reconcile()`, so checksum
+  drift, duplicate ledger rows, gaps,
+  applied-but-missing scripts, and `employee`-without-ledger are judged
+  by the exact rules the runner uses, then reports `previous_version`,
+  `applied` and `pending`. It refuses an inconsistent snapshot (rows but
+  no ledger) instead of deriving a version from contradictory evidence.
+* **CLI.** `tools/run_migrations.py status` uses only those two; `apply`
+  runs the unchanged `migrate()` over the real executor. The target is
+  the configured `ATTENDANCE_DATABASE_URL` only (no default, no
+  fallback), printed as `dbname=… host=… port=…`. It refuses a target
+  whose normalized identity equals the configured test DSN, and fails
+  closed (exit `2`) when a configured test DSN cannot be normalized —
+  there is no override flag.
+* **Exit codes:** `0` success; `1` unexpected internal error; `2`
+  configuration/target refusal; `3` advisory lock held by another run;
+  `4` database unavailable/driver failure; `5` migration refused or
+  failed (file, checksum, integrity, gap, missing script, application);
+  `6` the run completed but lock cleanup failed (outcome unconfirmed).
+* **Not claimed:** `status` reports state, not correctness — a ledger
+  whose rows match the files says nothing about the server-side schema
+  beyond the checks the runner already performs.
+
 ### 3.5 Rollback contract
 
 **Operational rollback is non-destructive** (D5):
@@ -226,9 +262,12 @@ silently chosen:
   If the dedicated lock connection itself dies mid-run, PostgreSQL
   releases the session lock and the run aborts — there is no
   re-acquire, no retry and no recovery attempt. Implemented and
-  offline-tested in `src/db_migrate.py`; **not** exercised against a live
-  server (no psycopg-backed executor exists yet). See
-  DEVELOPMENT_STATUS.md Step 31.
+  offline-tested in `src/db_migrate.py`, and the real executor
+  (`PsycopgMigrationExecutor`, Step 1.5b-6) takes and releases this lock
+  on a dedicated session connection. Live verification is read/lock-only
+  against the dedicated test database (contention and release observed);
+  a committed migration has never been executed. See
+  DEVELOPMENT_STATUS.md Steps 31 and 37.
 * **[OQ-2 — RESOLVED, owner-approved]** Version-ledger shape: one row
   per applied migration with checksum (Section 3.1 above), keeping
   automated drift detection; the previously proposed minimal single-row
@@ -243,9 +282,39 @@ silently chosen:
   executor-managed transaction; `CREATE DATABASE` and
   `CREATE INDEX CONCURRENTLY` are prohibited (non-transactional, would
   break the commit-atomicity guarantee). Runtime statement execution
-  goes through the re-used `src/db.py` connection layer **in the later
-  runtime-wiring step** — not implemented in 1.5b. Not executed against
-  PostgreSQL during 1.5b.
+  goes through the re-used `src/db.py` connection layer: the executor
+  opens connections with an **explicit** DSN (never the application
+  default) and runs each file with a parameterless simple query, so the
+  file's statements share its transaction. Implemented in Step 1.5b-6;
+  no migration has been executed against an application database.
+
+### 3.7 Known migration-executor gaps (owner-approved, out of scope)
+
+Recorded so the guarantees above are not read as broader than they are.
+None of these is repaired in Step 1.5b-6.
+
+* **G2 — no startup enforcement.** Nothing in the application compares
+  the database's recorded version with the code's expected version when
+  the API starts; "migrate → then serve" remains an operational runbook
+  contract. Running the API against an out-of-date schema is not blocked
+  by code (approved as out of scope in the Step 1.5b audit).
+* **G3 — migration files are validated, not hardened.** The loader
+  enforces naming, ordering, and checksums; it does not statically
+  analyse or sandbox SQL content (no statement allow-list, no content
+  provenance). A reviewed script runs with the runner's privileges by
+  design (approved as out of scope in the same audit).
+* **G7 — cleanup non-masking is scoped to `Exception`.** When the
+  executor handles an ordinary `Exception`, cleanup never replaces it: a
+  failed rollback is swallowed while the error propagates, and a failed
+  close becomes a note on it. A failed close with nothing else in flight
+  is itself a typed `MigrationDriverError`. The guarantee does **not**
+  extend to a `BaseException` that is not an `Exception` (e.g.
+  `SystemExit`): those handlers do not catch it, so no cleanup failure is
+  recorded against it — and if the final close then also fails, that
+  `MigrationDriverError` replaces the propagating `BaseException`.
+  `acquire_advisory_lock` likewise closes its connection only on
+  `Exception`, and the pre-existing `migrate()` cleanup path catches only
+  `Exception` from `release_advisory_lock()`.
 
 ## 4. Employee repository interface (Section C)
 
@@ -365,8 +434,11 @@ and offline-tested** (`src/test_database_guard.py`,
 before the first query) rather than merely being a property of the
 statements the guard happens to issue. The guard opens one connection
 and always closes it, on success and on every blocked path, without
-committing. **No PostgreSQL server has been contacted**: no marker
-exists anywhere yet, and the chain has never run against a live target.
+committing. **Live status:** this chain has since run against the
+owner-provisioned dedicated test database only — `READY` in Step 1.5c-3b
+(marker and ledger both at version 1) — and the migration executor's
+read/lock paths were verified against that same target in Step 1.5b-6.
+No application database has ever been contacted.
 
 An integration test may touch the database only after **all** of the
 following pass, in order; any failure or ambiguity → typed **BLOCKED**,
@@ -461,6 +533,7 @@ means a PostgreSQL connection is required (Section 5.2 contract).
 | 1.5b-3 | Owner provisions the dedicated test database and establishes the `phase3_test_guard` marker; `ATTENDANCE_TEST_DATABASE_URL` set locally (never committed) | none (owner-run) | Yes — provisioning is owner-only | Owner confirms target & marker |
 | 1.5b-4 | Tier-2 integration tests under the Section 5.2 contract | `tests/test_employee_repository_integration.py` | **Yes** | Explicit owner authorization for *this specific* DB access |
 | 1.5b-5 | Regression + docs | `DEVELOPMENT_STATUS.md`, `README.md`, `CHANGELOG.md` | No | Owner review of actual evidence |
+| 1.5b-6 | Real psycopg executor, read-only `status` snapshot, migration CLI, Tier-1 + Tier-2 verification | `src/db_migrate_executor.py`, `src/db_target.py`, `src/db_migrate.py` (state types), `tools/run_migrations.py`, `tests/test_db_migrate_executor.py`, `tests/test_db_target.py`, `tests/test_run_migrations_cli.py`, `tests/tier2_support.py`, `tests/test_tier2_migration_executor.py` | **Yes** (read/lock only) | **Implemented and verified in Step 1.5b-6** (Sections 3.4, 3.7, 11.7) |
 | 1.5c-1 | **Employee-metadata export** from the enrollment manifests (read-only) | `src/employee_export.py`, `tools/export_employee_metadata.py`, `tests/test_employee_export.py` | No | **Implemented (offline) in Step 1.5c-1** |
 | 1.5c-2 | Importer over the exported JSONL (fake-backed tests only) | `src/employee_import.py`, `tools/import_employee_metadata.py`, `tests/test_employee_import.py` | No | **Implemented (offline) in Step 1.5c-2** under the approved reconciliation policy (Section 10) |
 | 1.5c-3 | Real import into PostgreSQL | `src/db_employee_repository.py`, `tests/test_db_employee_repository.py` (wiring), then none (owner-run) | **Yes** for the run itself | **Wiring implemented (offline) in Step 1.5c-3a** (Section 11); the real import remains owner-gated and additionally requires 1.5b-3 (provisioned DSN + marker) |
@@ -475,8 +548,10 @@ means a PostgreSQL connection is required (Section 5.2 contract).
 * Tier 2 green only under the Section 5.2 contract; an
   unmet/ambiguous condition produces the typed BLOCKED, not a weakened
   assertion.
-* Existing suites remain green (265 attendance core + 120 config/db/API
-  + 14 guard + 153 integration, as last verified at `bb95559`).
+* Existing suites remain green (last full offline run after Step 1.5b-6:
+  **1629 passed, 31 skipped**; the 31 skips are the two opt-in Tier-2
+  modules, and 82 of the passing tests are Step 1.5b-6's own Tier-1
+  additions).
 * Docs updated only with actually observed evidence, per the
   `DEVELOPMENT_STATUS.md` convention ("updated after every verified
   step — never ahead of implementation").
@@ -764,9 +839,9 @@ the code paths this project actually writes.
 
 ### 11.6 Tier-2 verification harness (prepared, not executed)
 
-`tests/test_tier2_employee_repository.py` will exercise everything §11.1–
-11.5 describe against the real server once the owner-provisioned test
-database exists. It is deliberately unable to run uninvited: every item
+`tests/test_tier2_employee_repository.py` exercises everything §11.1–
+11.5 describe against the real server; it has run against the
+owner-provisioned test database (Step 1.5c-3b: 13 passed, 0 skipped). It is deliberately unable to run uninvited: every item
 skips itself at collection unless `ATTENDANCE_TIER2_OPT_IN=1`, and with
 the opt-in on it still refuses to start unless both the test DSN and the
 application DSN are configured — then the unmodified guard
@@ -788,7 +863,45 @@ boundary offline-tested: pre-flight ordering, explicit test-DSN
 targeting, manifest and ownership gating, and an AST audit that the
 module's SQL is exactly a bound-parameter SELECT and DELETE.
 
-What this section does **not** yet know anything about: real server
-behaviour. Until a live run passes, the §11.4 "not verified" list applies
-unchanged; the marker row and migration ledger must be established by
-the owner during provisioning (§5.3), never by any automated step.
+What this section does **not** cover: server behaviour beyond what the
+live runs exercised. Step 1.5c-3b ran the harness against the provisioned
+test database (13 passed, 0 skipped), so the §11.4 "not verified" list no
+longer applies unchanged to the repository wiring. The marker row and
+migration ledger remain owner-established during provisioning (§5.3),
+never by any automated step; §11.7 records the executor's own live scope.
+
+### 11.7 Migration executor verification (Step 1.5b-6)
+
+`src/db_migrate_executor.py` implements the six-method runner contract
+against real psycopg connections, plus `read_snapshot()` for `status`
+(Section 3.4) which the ABC deliberately does not carry. Offline coverage
+(`tests/test_db_migrate_executor.py`, `tests/test_db_target.py`,
+`tests/test_run_migrations_cli.py`) drives a recording fake connection and
+pins: statement text and bound parameters, ledger-presence-before-CREATE
+ordering, shape refusal for four divergent ledgers, rollback on a failed
+script and on a failed ledger insert, the three cleanup combinations that
+actually exist (a failing close with a primary error in flight — note
+added, primary preserved; a failing close with nothing else in flight —
+typed `MigrationDriverError`; a failing rollback with a primary error in
+flight — swallowed, primary preserved), the lock
+lifecycle including a refused acquisition that leaves nothing open, the
+single read-only snapshot, every CLI exit code, credentials-free output,
+and import hygiene (no driver import at module load).
+
+Live Tier-2 coverage (`tests/test_tier2_migration_executor.py`, read/lock
+only) ran against `visual_attendance_tier2_test` through the guard: one
+consistent snapshot whose ledger rows equal the catalog baseline,
+`ensure_ledger()` as a no-op under a role without `CREATE`, `migrate()` as
+a no-op on a fully applied target, advisory-lock contention and release, a
+deliberately failing migration that committed nothing, and a catalog
+inventory (relations of every relevant kind including indexes, columns,
+constraints, functions, non-internal triggers, policies, rules,
+user-defined enum/domain/composite types, schemas, extensions, ledger
+rows and count, employee count, guard rows and count) read in one
+`REPEATABLE READ READ ONLY` transaction and identical before and after.
+
+**Not verified, and not claimed:** a committed migration against any
+database, application-database connectivity, `apply` against a live
+schema, and any startup behaviour (G2). Because the test role has no
+`CREATE`/`ALTER` privilege, `ensure_ledger()`'s create path is
+fake-verified only. G7's exact scope is stated in Section 3.7.

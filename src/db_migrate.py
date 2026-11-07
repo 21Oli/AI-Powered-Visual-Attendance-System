@@ -107,8 +107,11 @@ __all__ = [
     "MigrationIntegrityError",
     "MigrationMissingScriptError",
     "MigrationScript",
+    "MigrationSnapshot",
+    "MigrationState",
     "load_migrations",
     "migrate",
+    "read_state",
 ]
 
 # ---------------------------------------------------------------------------
@@ -640,3 +643,105 @@ def _reconcile(
                 "employee table exists but the migration ledger records "
                 "no applied migration; refusing to proceed"
             )
+
+
+# ---------------------------------------------------------------------------
+# Read-only state inspection (Step 1.5b-6)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MigrationSnapshot:
+    """One consistent database observation of migration-relevant state.
+
+    Produced by a real executor from a **single** read-only transaction, so
+    ``tables``, ``ledger_present`` and ``applied`` cannot disagree with each
+    other (the failure mode of reading them over separate connections while
+    a runner is committing). ``applied`` is empty when ``ledger_present`` is
+    False — a missing ledger has no rows to fetch, and reading them would
+    raise undefined-table.
+    """
+
+    tables: frozenset[str]
+    ledger_present: bool
+    applied: tuple[tuple[int, str], ...]
+
+
+@dataclass(frozen=True)
+class MigrationState:
+    """Derived, read-only view of a :class:`MigrationSnapshot`.
+
+    Pure data: what the ledger records, and which versions a run would apply.
+    Producing it never writes, never creates the ledger, and never takes the
+    advisory lock.
+    """
+
+    ledger_present: bool
+    previous_version: int
+    applied: tuple[tuple[int, str], ...]
+    pending: tuple[int, ...]
+
+
+def read_state(
+    snapshot: MigrationSnapshot,
+    migrations_dir: Path | None = None,
+) -> MigrationState:
+    """Derive the migration state from one snapshot.
+
+    Performs no database I/O and writes nothing: it reads the migration
+    files through :func:`load_migrations` (file reads only) and then
+    delegates every semantic decision to the **existing** contract:
+    :func:`load_migrations` validates and checksums the files, and
+    :func:`_reconcile` applies every ledger-vs-files rule (checksum drift,
+    duplicate ledger rows, non-contiguous versions, applied-but-missing
+    scripts, and ``employee`` present without a ledger row). This function
+    only reports; it never repairs, never creates, and never re-derives a
+    version.
+
+    Raises
+    ------
+    MigrationIntegrityError
+        If the snapshot claims ledger rows while reporting no ledger (an
+        inconsistent snapshot), or for any condition :func:`_reconcile`
+        refuses.
+    MigrationChecksumError / MigrationMissingScriptError / MigrationGapError
+        Propagated unchanged from the existing reconciliation and ordering
+        rules.
+    """
+    scripts = load_migrations(migrations_dir)
+
+    if not snapshot.ledger_present and snapshot.applied:
+        raise MigrationIntegrityError(
+            "the migration snapshot reports ledger rows for a database with "
+            "no ledger; refusing to derive a version from inconsistent evidence"
+        )
+
+    tables = frozenset(snapshot.tables)
+    applied: tuple[tuple[int, str], ...] = (
+        tuple(snapshot.applied) if snapshot.ledger_present else ()
+    )
+
+    _reconcile(applied, tables, scripts)
+
+    previous_version = max((version for version, _ in applied), default=0)
+    applied_versions = {version for version, _ in applied}
+
+    pending: list[int] = []
+    expected = previous_version + 1
+    for script in scripts:
+        if script.version in applied_versions:
+            continue
+        if script.version != expected:
+            raise MigrationGapError(
+                f"migration sequence has a gap: expected version {expected} "
+                f"next, found {script.version}"
+            )
+        pending.append(script.version)
+        expected += 1
+
+    return MigrationState(
+        ledger_present=snapshot.ledger_present,
+        previous_version=previous_version,
+        applied=applied,
+        pending=tuple(pending),
+    )
