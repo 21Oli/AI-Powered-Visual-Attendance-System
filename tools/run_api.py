@@ -26,9 +26,12 @@ Safety contract
   guard file never blocks a later startup. POSIX platforms are out of
   scope for the guard (explicit typed failure, no fallback). This
   remains a development safeguard, not a security boundary.
-* No database activity: starting or importing this runner never
-  connects to PostgreSQL (uvicorn is imported lazily inside the run
-  path).
+* Read-only schema verification (G2): the serving path performs one
+  read-only startup verification against ``ATTENDANCE_DATABASE_URL``
+  (:mod:`src.startup_schema`) before uvicorn is imported. A refusal
+  prints one sanitized diagnostic line naming the stable code and exits
+  ``4``. Importing this module and ``--print-bind`` never connect to
+  PostgreSQL.
 """
 
 from __future__ import annotations
@@ -117,9 +120,17 @@ def main(argv: list[str] | None = None) -> int:
     # Lazy server-runtime import: importing this module starts nothing.
     from src.api import run_server
     from src.api_guard import StartupGuardError
+    from src.startup_schema import StartupSchemaError
 
     try:
         run_server(settings)
+    except StartupSchemaError as exc:
+        # G2 schema-compatibility refusal: the typed error's message is
+        # "<CODE>: <fixed message>" — never a DSN, credential, SQL text,
+        # driver text, or traceback. Exit 4 is distinct from 2 (invalid
+        # configuration) and 3 (startup-guard contention).
+        print(f"run-api: {exc}", file=sys.stderr)
+        return 4
     except StartupGuardError as exc:
         # Documented step 1.4 startup-code: the single-instance guard
         # refused startup (contention) or is unsupported on this

@@ -4,6 +4,30 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 3, Step 38: G2 startup schema compatibility gate
+
+### Added
+
+* `src/db_migrate_executor.py::verify_schema_locked()`: the additive one-connection operation G2 needs, because `acquire_advisory_lock()` and `read_snapshot()` each own a different connection and the snapshot closes its own. It opens exactly one connection and runs the approved order — `pg_try_advisory_lock` (nonblocking, never retried; `False` is a typed `MigrationContentionError`), the existing `REPEATABLE READ READ ONLY` snapshot **on that connection** (now including the existing ledger-shape query, so a malformed ledger is a typed `MigrationIntegrityError` rather than a driver failure), the caller's evaluation while the lock is still held, `pg_advisory_unlock` whose boolean **must** be `True`, then close. Unconfirmed release, an unlock error, or a close failure is a `MigrationCleanupError`; a refusal already in flight is never masked (G7 scope: `Exception`). The six-method ABC, `read_snapshot()`'s ownership contract, and the migration CLI are unchanged; the snapshot SQL is shared through one private helper instead of being duplicated.
+* `src/startup_schema.py`: the G2 gate. `resolve_startup_targets()` requires both `ATTENDANCE_DATABASE_URL` and `ATTENDANCE_TEST_DATABASE_URL`, normalizes both through the existing `src/db_target.py` (so `localhost`/`127.0.0.1`/`::1` are one server), refuses ambiguous or identical targets, and returns the application DSN as the only value ever passed to an opener — the test DSN is compared and nothing else. `evaluate_migration_state()` delegates every existing judgement to `read_state()`/`_reconcile()` and adds only the G2 rules the loader deliberately treats as benign: a non-empty shipped set, a present ledger, a set beginning at V001, and no pending versions. `verify_startup_schema()` maps failures to the 13 approved codes and raises the typed `StartupSchemaError` with a fixed sanitized message (no DSN, credential, SQL text, driver text, path, or traceback).
+* `src/api.py::run_server(..., startup_verifier=None)`: the G2 hook runs **after** the single-process guard is acquired and **before** Uvicorn is imported, so a refusal releases the guard and never constructs a server. The default is the real verifier; the keyword is the approved test seam, and there is deliberately no environment-variable bypass or warning-only mode. `create_app()` and importing the module remain database-side-effect-free.
+* `tools/run_api.py`: a G2 refusal prints one sanitized `run-api: <CODE>: <message>` line to stderr and exits **4**, distinct from `2` (configuration) and `3` (guard). `--print-bind` still skips the gate and never connects.
+* `tests/test_startup_schema.py`, `tests/test_api_startup_gate.py`: 69 new offline tests — the full policy table (allow plus every refusal code), target safety (both DSNs mandatory, malformed/ambiguous refused, equal identities rejected, the test DSN never reaching an opener), a recording factory plus `src.db._connect` tripwire proving every invalid-target category refuses **before** executor construction and before any connect, executor-construction failures inside the sanitized diagnostic path (ordinary exception → `SCHEMA_VERIFICATION_FAILED` with the fixed message and no DSN/secret/traceback, a specific `StartupSchemaError` still propagating unchanged), the one-connection lifecycle order with a recording fake connection, no snapshot after a refused lock, no retry, the cleanup matrix, guard → verification → Uvicorn ordering, guard release on refusal, no production bypass, and the runner's `0`/`3`/`4` codes with sanitized stderr.
+
+### Changed
+
+* `tests/test_api_guard.py`: the two real-server cases inject the approved no-op verifier (they own guard lifetime, not schema compatibility) so the API suite stays database-free; `tests/test_api.py`'s autouse tripwire now checks that psycopg is not imported **by the API test that is running**, because the G2 target check legitimately uses psycopg's DSN parser without connecting — the fresh-subprocess import test still proves `import src.api` alone pulls no driver.
+* Documentation: `DB_DESIGN.md` §3.2/§3.3 (startup no longer described as running migrations), §3.7 (G2 gap retired), new §3.8 (gate contract, one-connection lifecycle, codes, out-of-scope physical drift), §6 row 1.5b-7, new §11.8 (verification scope); `README.md` (exit `4`, read-only startup verification, apply-before-serve); `.env.example` (both DSNs required for startup, test DSN comparison-only).
+
+### Verified
+
+* Focused: `tests/test_api.py tests/test_startup_schema.py tests/test_api_startup_gate.py tests/test_api_guard.py` → **107 passed** (exit 0), including the real-subprocess guard/lifetime cases.
+* Full offline suite: `pytest -q` → **1705 passed, 32 skipped** (`1705 passed, 32 skipped in 219.93s`, exit 0). The 32 skips are the same pre-existing opt-in Tier-2 modules; no previously passing test started skipping and no new skip was introduced.
+
+### Not claimed
+
+* **No application-database verification was performed.** `ATTENDANCE_DATABASE_URL` was never connected to, no migration ran, no DDL/DML was executed, and no Git, dependency, or configuration-file change was made. The gate is offline-contract-verified only; the separately authorized read-only live check remains outstanding.
+
 ## [Unreleased] — Phase 3, Step 1.5b-6: real migration executor and migration CLI
 
 ### Added

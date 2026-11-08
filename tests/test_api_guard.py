@@ -382,6 +382,33 @@ def _runner(
     )
 
 
+def _serving_script() -> str:
+    """Fresh interpreter that serves with the G2 verifier stubbed out.
+
+    The real verifier needs an application database; the guard-lifetime and
+    shutdown cases below must stay database-free, so they inject the approved
+    ``run_server`` seam instead of going through ``tools/run_api.py``.
+    """
+    return (
+        "import sys\n"
+        f"sys.path.insert(0, r'{PROJECT_ROOT}')\n"
+        "from src.api import run_server\n"
+        "from src.config import load_settings\n"
+        "run_server(load_settings(), startup_verifier=lambda settings: None)\n"
+    )
+
+
+def _serving_runner(tmp_path: Path, port: int) -> subprocess.Popen:
+    return subprocess.Popen(
+        [sys.executable, "-c", _serving_script()],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=_child_env(tmp_path, API_HOST="127.0.0.1", API_PORT=str(port)),
+        cwd=str(PROJECT_ROOT),
+    )
+
+
 def _reap_runner(runner: subprocess.Popen) -> tuple[int, str, str]:
     """Kill+reap unconditionally; return (returncode, stdout, stderr)."""
     try:
@@ -465,7 +492,7 @@ def test_guard_held_for_serving_lifetime_then_released_by_crash(
 ) -> None:
     """Real serving process: lock held while healthy; OS releases on kill."""
     port = _free_loopback_port()
-    runner = _runner(tmp_path, port)
+    runner = _serving_runner(tmp_path, port)
     try:
         status, body = _poll_health(f"http://127.0.0.1:{port}")
         assert status == 200 and body == '{"status":"ok"}'
@@ -523,7 +550,9 @@ def test_orderly_uvicorn_shutdown_releases_the_lock(
 
     def serve() -> None:
         try:
-            run_server(settings)
+            # G2 seam as a no-op: this case owns the guard's lifetime, and
+            # the API suite stays database-free.
+            run_server(settings, startup_verifier=lambda _settings: None)
         except BaseException as exc:  # surfaced via join/assert below
             thread_error.append(exc)
 

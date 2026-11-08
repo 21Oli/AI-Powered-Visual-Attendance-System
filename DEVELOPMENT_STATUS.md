@@ -3,6 +3,63 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 38 — Phase 3 G2: startup schema compatibility gate (2026-11-08)
+
+**Implemented and offline-verified. No application database was contacted and
+no migration was executed; live startup verification is not claimed.**
+
+* **Added `src/startup_schema.py`** (the gate): both DSNs are mandatory;
+  targets are normalized through the existing `src/db_target.py` and an
+  ambiguous, malformed, missing, or identical target is refused before any
+  connection; only the application DSN is ever opened. Policy reuses
+  `read_state()`/`_reconcile()` and adds only the G2 rules the loader treats
+  as benign — non-empty shipped set, present ledger, set beginning at V001,
+  nothing pending. Refusals are a typed `StartupSchemaError` with one of the
+  13 approved stable codes and a fixed sanitized message; the cause stays on
+  `__cause__` for trusted diagnostics only.
+* **Added `PsycopgMigrationExecutor.verify_schema_locked()`**: the one-connection
+  operation the design requires. Connect → `pg_try_advisory_lock` (nonblocking,
+  no retry) → `REPEATABLE READ READ ONLY` snapshot plus the existing
+  ledger-shape query → evaluation while the lock is held →
+  `pg_advisory_unlock` confirmed by its boolean → close. A refused lock raises
+  `MigrationContentionError`; an unconfirmed/erroring unlock or a close failure
+  raises `MigrationCleanupError`; a refusal in flight is preserved with the
+  cleanup failure attached as a note. The six-method ABC, `read_snapshot()`'s
+  ownership contract, and the migration CLI are unchanged; the snapshot SQL is
+  shared through one private helper.
+* **Wired `src/api.py::run_server(..., startup_verifier=None)`**: guard → G2 →
+  Uvicorn, so a refusal releases the guard and never imports or constructs a
+  server. Default is the real verifier; the keyword is the approved test seam
+  (no environment bypass, no warning-only mode). `create_app()` and module
+  import stay database-free.
+* **`tools/run_api.py`**: G2 refusal → one sanitized stderr line and exit `4`;
+  `--print-bind` still skips the gate; exits `0`/`2`/`3` unchanged.
+* **Tests:** new `tests/test_startup_schema.py` and
+  `tests/test_api_startup_gate.py` (55 offline tests: policy table, target
+  safety, one-connection order, no snapshot after a refused lock, no retry,
+  cleanup matrix, guard/verification/Uvicorn order, guard release on refusal,
+  no-bypass default, runner `0`/`3`/`4` with sanitized stderr).
+  `tests/test_api_guard.py`'s real-server cases inject the no-op verifier so
+  the API suite stays database-free, and `tests/test_api.py`'s driver tripwire
+  now checks the running test's own imports (the G2 target check legitimately
+  uses psycopg's DSN parser without connecting; the fresh-subprocess import
+  test still proves `import src.api` pulls no driver).
+* **Verification:** focused `tests/test_api.py tests/test_startup_schema.py
+  tests/test_api_startup_gate.py tests/test_api_guard.py` → **107 passed**;
+  full offline suite `pytest -q` → **1705 passed, 32 skipped in 219.93s**
+  (exit 0), the 32 skips being the unchanged opt-in Tier-2 modules.
+* **Safety evidence:** no `ATTENDANCE_DATABASE_URL` connection, no migration,
+  no DDL/DML, no dependency change, no configuration-value change, and no Git
+  operation. Existing work was preserved (the tree was clean at the start of
+  this step).
+* **Limitations / not claimed:** the gate is offline-contract-verified only.
+  A read-only live check against the application database (documented
+  procedure in `DB_DESIGN.md` §11.8) has **not** run, so startup behavior on a
+  real ledger is not verified. Physical schema drift remains outside G2.
+* **Docs:** `DB_DESIGN.md` §3.2, §3.3, §3.7 (G2 gap retired), new §3.8, §6
+  row 1.5b-7, new §11.8; `README.md` (exit `4`, read-only startup
+  verification, apply-before-serve); `CHANGELOG.md`; `.env.example`.
+
 ## Step 37 — Phase 3 Step 1.5b-6: real migration executor and migration CLI (2026-11-07)
 
 **Implemented, offline-verified, and read/lock-verified live. No migration

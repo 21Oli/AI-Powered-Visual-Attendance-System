@@ -200,13 +200,25 @@ def api_server():
 
 @pytest.fixture(autouse=True)
 def forbid_real_database(monkeypatch: pytest.MonkeyPatch):
-    """Any DB connection attempt fails loud; psycopg must stay unloaded."""
+    """Any DB connection attempt fails loud; the API loads no driver.
+
+    The driver check is a **transition** assertion: this test must not load
+    psycopg. It is not an absolute process-wide check because other offline
+    suites legitimately use psycopg's DSN parser without connecting (the G2
+    target check in ``src/db_target.py``, which never opens a connection).
+    The separate fresh-subprocess import test above still proves that
+    importing :mod:`src.api` alone pulls in no driver.
+    """
+
     def forbidden(*args, **kwargs):  # pragma: no cover - tripwire
         raise AssertionError("src.db._connect was invoked (offline-only rule)")
 
     monkeypatch.setattr("src.db._connect", forbidden)
+    driver_loaded_at_setup = "psycopg" in sys.modules
     yield
-    assert "psycopg" not in sys.modules, "psycopg was imported during API tests"
+    assert driver_loaded_at_setup or "psycopg" not in sys.modules, (
+        "psycopg was imported during an API test (offline-only rule)"
+    )
 
 
 def test_health_endpoint_over_real_loopback_server(api_server) -> None:

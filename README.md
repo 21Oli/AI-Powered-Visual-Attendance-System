@@ -115,7 +115,8 @@ python tools/run_api.py --print-bind # print the validated bind, then exit
   boundary**.
 - Runner exit codes: `0` success, `2` invalid/non-loopback
   configuration, `3` startup-guard failure (contention or unsupported
-  platform), `1` for other unexpected runtime failures.
+  platform), `4` G2 schema-compatibility refusal (below), `1` for other
+  unexpected runtime failures. `run_migrations.py` uses its own map.
 - Error responses use one stable envelope:
   `{"error": {"code": <machine_code>, "message": <sanitized>}}`, with
   machine codes (`HTTP_ERROR`, `NOT_IMPLEMENTED`, `REQUEST_INVALID`,
@@ -130,10 +131,20 @@ python tools/run_api.py --print-bind # print the validated bind, then exit
   documentation UI (`/docs`, `/redoc`, `/openapi.json` are disabled).
   Any network exposure would require an approved auth/RBAC design in a
   later phase.
-- Nothing in this step connects to PostgreSQL, changes the database
-  schema, runs a migration, touches the attendance journal, opens a
-  camera, or stores biometric data. Starting or importing the API is
-  side-effect free (test-enforced).
+- **Read-only startup verification (G2, Step 38):** after the process
+  guard is acquired and before Uvicorn is imported, `run_server()` opens
+  **one** connection to `ATTENDANCE_DATABASE_URL`, takes the migration
+  advisory lock, reads one `REPEATABLE READ READ ONLY` snapshot, checks the
+  ledger against the shipped `migrations/` files, confirms the unlock, and
+  closes. Both `ATTENDANCE_DATABASE_URL` and `ATTENDANCE_TEST_DATABASE_URL`
+  are required; the test DSN is used only for a normalized distinctness
+  check and is never connected to. Nothing is written, no migration is
+  applied, and a missing ledger is refused rather than created. A mismatch
+  refuses startup with a stable diagnostic code and exit `4`.
+- Importing the API and `create_app()` remain database-side-effect-free
+  (test-enforced). The API still does not change the schema, run a
+  migration, touch the attendance journal, open a camera, or store
+  biometric data.
 
 ## Face-detection model (manual download)
 
@@ -337,9 +348,15 @@ python tools/export_employee_metadata.py --allow-partial    # valid records only
   check fails closed, and there is no override flag.
 * `apply` takes the fixed advisory lock, validates (or creates) the
   ledger, and runs each pending migration in its own transaction together
-  with its ledger row; a failed script rolls back entirely. Migrations
-  are forward-only — recovery is a verified backup restore, not a
-down-migration.
+  with its ledger row; a failed script rolls back entirely. Migrations  are forward-only — recovery is a verified backup restore, not a
+  down-migration.
+* **The API checks this before serving (G2):** `tools/run_api.py` requires
+  both DSNs and refuses to start (exit `4`, stable diagnostic code such as
+  `MIGRATIONS_PENDING` or `MIGRATION_CHECKSUM_MISMATCH`) unless the ledger
+  exactly matches the shipped files: non-empty set, ledger present, set
+  beginning at V001, nothing pending, consistent versions and checksums.
+  Verification is read-only and never applies anything — run `apply`
+  first.
 
 | Exit | Meaning |
 |---|---|

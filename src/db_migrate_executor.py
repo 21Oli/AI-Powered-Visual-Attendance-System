@@ -33,6 +33,13 @@ Connection ownership
 * **One short-lived work connection per call** for ``ensure_ledger``,
   ``list_tables``, ``fetch_applied``, ``apply_migration`` and
   ``read_snapshot``. Every one is closed on every path.
+* **One connection for the whole G2 startup verification**, owned by
+  :meth:`~PsycopgMigrationExecutor.verify_schema_locked`: it takes the
+  session lock, reads the snapshot and evaluates it on the same
+  connection, then releases the lock, confirms the release and closes.
+  The operation is additive (the six-method ABC is unchanged) precisely
+  because the lock connection and the work connection above cannot be
+  the same connection through the separate methods.
 
 Target discipline
 -----------------
@@ -74,6 +81,8 @@ from typing import Any, Final
 from src.db_migrate import (
     ADVISORY_LOCK_KEY,
     LEDGER_TABLE,
+    MigrationCleanupError,
+    MigrationContentionError,
     MigrationError,
     MigrationExecutor,
     MigrationIntegrityError,
@@ -192,6 +201,53 @@ def _close(connection: Any, failure: BaseException | None) -> None:
         failure.add_note(
             f"closing the connection also failed: {type(exc).__name__}"
         )
+
+
+def _finish_verification(connection: Any, *, lock_held: bool) -> Exception | None:
+    """Release the verification lock (confirmed) and close; never raises.
+
+    Returns the cleanup failure, or ``None`` when both the release and the
+    close succeeded. The ``pg_advisory_unlock`` result is **required to be
+    ``True``**: a ``False`` means PostgreSQL did not release the key, so
+    reporting success would be a false claim (G2 contract).
+
+    The caller decides how to report a failure: a note on an exception in
+    flight, or the returned typed error when nothing else failed.
+    """
+    release_failure: Exception | None = None
+    if lock_held:
+        try:
+            row = connection.execute(_UNLOCK_SQL, (ADVISORY_LOCK_KEY,)).fetchone()
+            if not (row is not None and row[0] is True):
+                release_failure = MigrationCleanupError(
+                    "the schema-verification advisory lock release could not "
+                    "be confirmed"
+                )
+        except Exception as exc:
+            error = MigrationCleanupError(
+                "the schema-verification advisory lock could not be released"
+            )
+            error.__cause__ = exc
+            release_failure = error
+
+    close_failure: Exception | None = None
+    try:
+        connection.close()
+    except Exception as exc:
+        error = MigrationCleanupError(
+            "the schema-verification connection could not be closed"
+        )
+        error.__cause__ = exc
+        close_failure = error
+
+    if release_failure is not None:
+        if close_failure is not None:
+            release_failure.add_note(
+                f"closing the connection also failed "
+                f"({type(close_failure).__name__})"
+            )
+        return release_failure
+    return close_failure
 
 
 def _default_opener(dsn: str) -> Any:
@@ -392,6 +448,50 @@ class PsycopgMigrationExecutor(MigrationExecutor):
         finally:
             _close(connection, failure)
 
+    def _read_snapshot_on(
+        self, connection: Any, *, validate_ledger_shape: bool = False
+    ) -> MigrationSnapshot:
+        """Read the migration snapshot on a **caller-owned** connection.
+
+        Shared by :meth:`read_snapshot` (which owns and closes its own
+        connection) and :meth:`verify_schema_locked` (which already holds the
+        one verification connection), so the snapshot SQL exists exactly once.
+        The caller is responsible for rolling back a failed transaction and for
+        closing the connection; this helper only issues the statements.
+
+        ``validate_ledger_shape`` adds the existing ledger-shape query to the
+        same read-only transaction. It is opt-in because ``read_snapshot``'s
+        ``status`` behaviour is an established contract; the startup gate
+        needs it to distinguish a malformed ledger from an unavailable one.
+        """
+        connection.execute(_BEGIN_SNAPSHOT_SQL)
+
+        row = connection.execute(_LEDGER_PRESENT_SQL).fetchone()
+        ledger_present = row is not None and row[0] is not None
+
+        if validate_ledger_shape and ledger_present:
+            # Refuses a malformed ledger before its rows are interpreted, so
+            # the refusal is a typed integrity error rather than a driver
+            # failure on the row query.
+            self._validate_ledger_shape(connection)
+
+        tables = frozenset(
+            str(table_row[0])
+            for table_row in connection.execute(_TABLES_SQL).fetchall()
+        )
+
+        applied: tuple[tuple[int, str], ...] = ()
+        if ledger_present:
+            applied = tuple(
+                (int(applied_row[0]), str(applied_row[1]))
+                for applied_row in connection.execute(_APPLIED_SQL).fetchall()
+            )
+
+        connection.execute(_ROLLBACK_SQL)
+        return MigrationSnapshot(
+            tables=tables, ledger_present=ledger_present, applied=applied
+        )
+
     def read_snapshot(self) -> MigrationSnapshot:
         """Read tables, ledger presence and ledger rows from **one** snapshot.
 
@@ -410,27 +510,7 @@ class PsycopgMigrationExecutor(MigrationExecutor):
         failure: BaseException | None = None
         try:
             connection.autocommit = True
-            connection.execute(_BEGIN_SNAPSHOT_SQL)
-
-            row = connection.execute(_LEDGER_PRESENT_SQL).fetchone()
-            ledger_present = row is not None and row[0] is not None
-
-            tables = frozenset(
-                str(table_row[0])
-                for table_row in connection.execute(_TABLES_SQL).fetchall()
-            )
-
-            applied: tuple[tuple[int, str], ...] = ()
-            if ledger_present:
-                applied = tuple(
-                    (int(applied_row[0]), str(applied_row[1]))
-                    for applied_row in connection.execute(_APPLIED_SQL).fetchall()
-                )
-
-            connection.execute(_ROLLBACK_SQL)
-            return MigrationSnapshot(
-                tables=tables, ledger_present=ledger_present, applied=applied
-            )
+            return self._read_snapshot_on(connection)
         except MigrationError:
             _rollback_quietly(connection)
             raise
@@ -443,6 +523,79 @@ class PsycopgMigrationExecutor(MigrationExecutor):
             raise error from exc
         finally:
             _close(connection, failure)
+
+    def verify_schema_locked(
+        self, evaluate: Callable[[MigrationSnapshot], None]
+    ) -> MigrationSnapshot:
+        """Lock, snapshot, evaluate, unlock and close on **one** connection.
+
+        G2's startup gate must hold the advisory lock across the snapshot *and*
+        the evaluation. :meth:`acquire_advisory_lock` and
+        :meth:`read_snapshot` cannot express that: each owns a different
+        connection and the snapshot method closes its own, so sharing one is
+        impossible without changing its ownership contract. This additive
+        concrete-class operation keeps that contract intact and reuses the same
+        statements, the same snapshot reader and the same lock key.
+
+        Sequence (any deviation is a refusal, never a retry):
+
+        1. one connection, ``autocommit`` on;
+        2. ``pg_try_advisory_lock`` — ``False`` →
+           :class:`~src.db_migrate.MigrationContentionError`;
+        3. the read-only ``REPEATABLE READ`` snapshot **on that connection**,
+           including the ledger-shape check;
+        4. ``evaluate(snapshot)`` while the lock is still held (it may raise a
+           typed refusal, which propagates unchanged);
+        5. ``pg_advisory_unlock`` with its boolean **required** to be ``True``;
+        6. close, and only then return.
+
+        A cleanup failure never masks an exception already in flight (G7 scope:
+        ``Exception``): it is attached as a note and the primary failure —
+        including a refusal raised by ``evaluate`` — is preserved.
+        """
+        connection = self._opener(self._dsn)  # availability errors propagate
+        primary: BaseException | None = None
+        lock_held = False
+        try:
+            connection.autocommit = True
+            row = connection.execute(
+                _TRY_LOCK_SQL, (ADVISORY_LOCK_KEY,)
+            ).fetchone()
+            if not (row is not None and row[0] is True):
+                raise MigrationContentionError(
+                    "another migration run holds the advisory lock; refusing "
+                    "to verify the schema (fail-fast, by contract)"
+                )
+            lock_held = True
+
+            try:
+                snapshot = self._read_snapshot_on(
+                    connection, validate_ledger_shape=True
+                )
+            except MigrationError:
+                raise
+            except Exception as exc:
+                raise MigrationDriverError(
+                    "the migration state snapshot could not be read"
+                ) from exc
+
+            evaluate(snapshot)
+            return snapshot
+        except BaseException as exc:
+            primary = exc
+            raise
+        finally:
+            _rollback_quietly(connection)
+            cleanup_error = _finish_verification(connection, lock_held=lock_held)
+            if cleanup_error is not None:
+                if primary is not None:
+                    primary.add_note(
+                        "schema-verification cleanup also failed "
+                        f"({type(cleanup_error).__name__}); the advisory lock "
+                        "may still be held"
+                    )
+                else:
+                    raise cleanup_error
 
     # -- apply -------------------------------------------------------------
 

@@ -47,6 +47,7 @@ Design rules
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Literal
 
 from fastapi import FastAPI, Request
@@ -337,7 +338,24 @@ def build_server_config(settings: AppSettings):
     )
 
 
-def run_server(settings: AppSettings | None = None) -> None:
+def _default_startup_verifier(settings: AppSettings) -> None:
+    """G2: the real startup schema-compatibility verifier.
+
+    Imported lazily so that importing :mod:`src.api` still pulls in no
+    migration or database machinery (the guard must be acquired before G2
+    runs, and import hygiene is test-enforced). A refusal raises
+    :class:`src.startup_schema.StartupSchemaError`.
+    """
+    from src.startup_schema import verify_startup_schema
+
+    verify_startup_schema(settings)
+
+
+def run_server(
+    settings: AppSettings | None = None,
+    *,
+    startup_verifier: Callable[[AppSettings], None] | None = None,
+) -> None:
     """Run the settings-driven loopback server to completion (guarded).
 
     Step 1.4: acquiring the Windows single-process startup guard
@@ -349,22 +367,46 @@ def run_server(settings: AppSettings | None = None) -> None:
     is never started, so ``--print-bind`` (which does not serve) and any
     library caller of this entry point get the same protection.
 
+    G2: **after** the guard is acquired and **before** Uvicorn is imported
+    or constructed, the startup schema-compatibility verifier runs. Any
+    refusal raises :class:`src.startup_schema.StartupSchemaError`; the
+    ``with`` block then releases the guard, so a refused start leaves
+    neither a served request nor a held process guard behind.
+
     Uses a fresh :func:`load_settings()` by default (current environment,
     consistent with :mod:`src.db`), then serves on the validated loopback
     host/port. A separate runner (``tools/run_api.py``) owns nothing
-    beyond settings resolution and translating the typed guard failure
-    into its documented startup exit code — binding cannot bypass the
-    loopback contract.
+    beyond settings resolution and translating the typed guard/schema
+    failures into their documented startup exit codes — binding cannot
+    bypass the loopback contract.
+
+    Parameters
+    ----------
+    settings:
+        Validated settings; loaded from the environment when omitted.
+    startup_verifier:
+        Test seam only. Production uses the real G2 verifier by default;
+        there is deliberately no environment-variable bypass or
+        warning-only switch, so a production start can never skip G2.
     """
     if settings is None:
         settings = load_settings()
     from src.api_guard import acquire_startup_guard  # lazy, side-effect free
 
+    verify = (
+        _default_startup_verifier if startup_verifier is None else startup_verifier
+    )
+
     with acquire_startup_guard(settings) as guard:
         # Structured trusted diagnostics only; client/console output
         # never includes paths.
         _logger.info("startup guard acquired (%s)", guard.lock_path.name)
-        import uvicorn  # lazy: only after successful guard acquisition
+
+        # G2: refuse before the server runtime is even imported. A refusal
+        # propagates out of the ``with`` block, releasing the guard.
+        verify(settings)
+
+        import uvicorn  # lazy: only after guard and schema verification
 
         server = uvicorn.Server(build_server_config(settings))
         server.run()

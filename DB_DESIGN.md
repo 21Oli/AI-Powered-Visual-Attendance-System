@@ -134,23 +134,31 @@ implemented and offline-tested]
   same transaction, so the recorded version and the applied DDL commit
   atomically — a half-applied schema with a stale version row is
   structurally impossible.
-* The runner is the only permitted writer of schema DDL; the application
-  may not serve requests while the runner owns the connection (runtime
-  contract: migrate → then serve; enforced in the Step 1.5b integration
-  wiring).
+* The runner is the only permitted writer of schema DDL. The API never
+  runs a migration: at startup the G2 gate (§3.8) verifies **read-only**
+  that the ledger exactly matches the shipped files, taking the same
+  advisory lock, and an incompatible schema is refused before Uvicorn
+  starts (implemented in Step 38). Startup schema verification is
+  serialized against migration execution through that lock, and the lock
+  is released before the API begins serving — so this guarantees that
+  **startup verification cannot overlap a migration run**; it does not
+  prevent a migration run from starting while an already-running API is
+  serving.
 
 ### 3.3 Partial-failure handling
 
 * A failure mid-script rolls that migration's transaction back entirely;
   the database remains at its previous version, unmodified by the failed
   script. Nothing is marked "partially applied".
-* Any failed migration **aborts startup** with a single sanitized line
-  ("migration <N> failed; refusing to start the API") — never a raw
-  driver message, never a DSN. Trusted detail stays server-side in the
-  log via the existing `src.logging_setup` contract, following the Gate
-  1.2 redaction discipline and the same "no traceback to the console"
-  pattern the runner already uses for configuration (exit 2) and guard
-  (exit 3) failures.
+* A failed migration aborts that **operator-run** migration pass with a
+  sanitized message; the API never executes migrations, so startup is
+  never where a script runs (§3.8). A database left at its previous
+  version is then refused at API startup with the G2 diagnostic for the
+  mismatch — never a raw driver message, never a DSN. Trusted detail
+  stays server-side in the log via the existing `src.logging_setup`
+  contract, following the Gate 1.2 redaction discipline and the same
+  "no traceback to the console" pattern the runner already uses for
+  configuration (exit 2) and guard (exit 3) failures.
 * Retrying a failed migration is an operator decision, never automatic
   (same no-implicit-retry rule as `src/db.py` connections and
   `PERSISTENCE_UNCONFIRMED` writes).
@@ -293,11 +301,10 @@ silently chosen:
 Recorded so the guarantees above are not read as broader than they are.
 None of these is repaired in Step 1.5b-6.
 
-* **G2 — no startup enforcement.** Nothing in the application compares
-  the database's recorded version with the code's expected version when
-  the API starts; "migrate → then serve" remains an operational runbook
-  contract. Running the API against an out-of-date schema is not blocked
-  by code (approved as out of scope in the Step 1.5b audit).
+* **G2 — implemented in Step 38; see §3.8.** The API now refuses to start
+  unless the ledger matches the shipped files exactly. The gate is
+  offline-tested only; live verification against an application database
+  has not been run (§11.8).
 * **G3 — migration files are validated, not hardened.** The loader
   enforces naming, ordering, and checksums; it does not statically
   analyse or sandbox SQL content (no statement allow-list, no content
@@ -315,6 +322,54 @@ None of these is repaired in Step 1.5b-6.
   `acquire_advisory_lock` likewise closes its connection only on
   `Exception`, and the pre-existing `migrate()` cleanup path catches only
   `Exception` from `release_advisory_lock()`.
+
+### 3.8 Startup schema compatibility gate (G2, Step 38)
+
+**Implemented and offline-tested; not yet run against an application
+database.** `src/startup_schema.py` is the gate; `src/api.py::run_server`
+calls it *after* acquiring the single-process guard and *before* Uvicorn is
+imported.
+
+* **Strict refusal.** No warning-only mode and no environment bypass: a
+  refusal raises the typed `StartupSchemaError`, `tools/run_api.py` prints
+  one sanitized line naming the stable code and returns exit `4`.
+  Importing the API and `create_app()` stay database-side-effect-free;
+  only `run_server()` verifies. `--print-bind` skips the gate entirely.
+* **Read-only, one connection.**
+  `PsycopgMigrationExecutor.verify_schema_locked()` performs the whole
+  lifecycle on **one** physical connection: `pg_try_advisory_lock`
+  (nonblocking, no retry) → `BEGIN ISOLATION LEVEL REPEATABLE READ READ
+  ONLY` → ledger presence, ledger-shape validation, public table list,
+  `(version, checksum)` rows → `ROLLBACK` → state evaluation while the
+  lock is still held → `pg_advisory_unlock` whose boolean **must** be
+  `True` → close. A `False` from either advisory-lock call is a refusal;
+  cleanup never masks a refusal already in flight (G7 scope: `Exception`).
+  The six-method ABC and `read_snapshot()`'s ownership contract are
+  unchanged; the snapshot SQL is shared through one private helper.
+* **Configuration.** `ATTENDANCE_DATABASE_URL` and
+  `ATTENDANCE_TEST_DATABASE_URL` are both mandatory for startup. Only the
+  application DSN is ever opened; the test DSN is normalized
+  (`src/db_target.py`) and compared only, so an application target equal to
+  the test target is refused. Missing/blank, malformed, and unidentifiable
+  targets are all refused before any connection.
+* **Migration rules.** The gate reuses `read_state()`/`_reconcile()` and
+  adds only what an exactly-up-to-date database requires: a non-empty
+  shipped set, a present ledger, a set beginning at V001, and no pending
+  versions. Checksums, unknown versions, duplicates, non-contiguous
+  history, malformed files, and `employee`-without-ledger keep their
+  existing rules. `migrate()` and `ensure_ledger()` are never called, so a
+  missing ledger is refused, never created or repaired.
+* **Out of scope.** Physical drift (tables, columns, indexes, constraints,
+  triggers, functions) is not inspected; the only physical fact involved is
+  the pre-existing `employee`-without-ledger integrity rule.
+* **Diagnostic codes** (stable machine surface, fixed sanitized messages):
+  `DATABASE_CONFIGURATION_INVALID`, `DATABASE_TARGET_INVALID`,
+  `TEST_DATABASE_TARGET_REJECTED`, `DATABASE_UNAVAILABLE`,
+  `MIGRATION_LOCK_UNAVAILABLE`, `MIGRATION_LOCK_RELEASE_FAILED`,
+  `MIGRATION_SET_EMPTY`, `MIGRATION_LEDGER_MISSING`,
+  `MIGRATIONS_PENDING`, `MIGRATION_CHECKSUM_MISMATCH`,
+  `UNKNOWN_MIGRATION`, `MIGRATION_HISTORY_INVALID`,
+  `SCHEMA_VERIFICATION_FAILED`.
 
 ## 4. Employee repository interface (Section C)
 
@@ -534,6 +589,7 @@ means a PostgreSQL connection is required (Section 5.2 contract).
 | 1.5b-4 | Tier-2 integration tests under the Section 5.2 contract | `tests/test_employee_repository_integration.py` | **Yes** | Explicit owner authorization for *this specific* DB access |
 | 1.5b-5 | Regression + docs | `DEVELOPMENT_STATUS.md`, `README.md`, `CHANGELOG.md` | No | Owner review of actual evidence |
 | 1.5b-6 | Real psycopg executor, read-only `status` snapshot, migration CLI, Tier-1 + Tier-2 verification | `src/db_migrate_executor.py`, `src/db_target.py`, `src/db_migrate.py` (state types), `tools/run_migrations.py`, `tests/test_db_migrate_executor.py`, `tests/test_db_target.py`, `tests/test_run_migrations_cli.py`, `tests/tier2_support.py`, `tests/test_tier2_migration_executor.py` | **Yes** (read/lock only) | **Implemented and verified in Step 1.5b-6** (Sections 3.4, 3.7, 11.7) |
+| 1.5b-7 | G2 startup schema compatibility gate (read-only verification in `run_server`, exit `4`) | `src/startup_schema.py`, `src/db_migrate_executor.py`, `src/api.py`, `tools/run_api.py`, `tests/test_startup_schema.py`, `tests/test_api_startup_gate.py` | **Yes** (read/lock only, **not yet run**) | **Implemented (offline) in Step 38** (Sections 3.8, 11.8); live application-database verification pending separate authorization |
 | 1.5c-1 | **Employee-metadata export** from the enrollment manifests (read-only) | `src/employee_export.py`, `tools/export_employee_metadata.py`, `tests/test_employee_export.py` | No | **Implemented (offline) in Step 1.5c-1** |
 | 1.5c-2 | Importer over the exported JSONL (fake-backed tests only) | `src/employee_import.py`, `tools/import_employee_metadata.py`, `tests/test_employee_import.py` | No | **Implemented (offline) in Step 1.5c-2** under the approved reconciliation policy (Section 10) |
 | 1.5c-3 | Real import into PostgreSQL | `src/db_employee_repository.py`, `tests/test_db_employee_repository.py` (wiring), then none (owner-run) | **Yes** for the run itself | **Wiring implemented (offline) in Step 1.5c-3a** (Section 11); the real import remains owner-gated and additionally requires 1.5b-3 (provisioned DSN + marker) |
@@ -901,7 +957,23 @@ rows and count, employee count, guard rows and count) read in one
 `REPEATABLE READ READ ONLY` transaction and identical before and after.
 
 **Not verified, and not claimed:** a committed migration against any
-database, application-database connectivity, `apply` against a live
-schema, and any startup behaviour (G2). Because the test role has no
-`CREATE`/`ALTER` privilege, `ensure_ledger()`'s create path is
-fake-verified only. G7's exact scope is stated in Section 3.7.
+database, application-database connectivity, and `apply` against a live
+schema. Because the test role has no `CREATE`/`ALTER` privilege,
+`ensure_ledger()`'s create path is fake-verified only. G7's exact scope is
+stated in Section 3.7. G2's startup gate is implemented and offline-tested
+(§3.8) but has **not** been run against an application database (§11.8).
+
+### 11.8 Startup schema gate verification (G2, Step 38)
+
+Offline only, and it stays that way until a separately authorized read-only
+run. `tests/test_startup_schema.py` drives a recording fake connection and
+pins: the one-connection order (connect → lock → snapshot → evaluate →
+confirmed unlock → close), no snapshot after a refused lock, no retry, the
+cleanup-never-masks-a-primary-refusal behavior, every policy code, and the
+target-safety rules (both DSNs mandatory, malformed/ambiguous refused, the
+test DSN never reaching an opener, local host aliases treated as one
+server). `tests/test_api_startup_gate.py` pins guard → verification →
+Uvicorn, release of the guard on refusal, that the production default is
+the real verifier (no bypass), and the runner's exit codes `0`/`3`/`4` with
+sanitized stderr. `ATTENDANCE_DATABASE_URL` was not contacted: no live
+application-database startup verification has been performed.
