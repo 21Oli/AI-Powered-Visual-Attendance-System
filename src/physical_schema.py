@@ -63,9 +63,9 @@ For each contracted table, in contract order (``employee``, then
    **partitioned** table (``p``) is reported as
    ``SCHEMA_TABLE_KIND_UNCONFIRMED``: the S1 contract describes the ordinary
    table ``V001`` creates and says nothing about partitioned acceptance, so S3
-   neither accepts it silently nor calls it drift. That is an owner decision
-   (see ``DB_DESIGN.md`` §3.9), and until it is made the result is
-   indeterminate, which the gate must refuse.
+   neither accepts it silently nor calls it drift. The final owner decision
+   (recorded in ``DB_DESIGN.md`` §3.9) keeps the result indeterminate, and the
+   S5 startup gate refuses an indeterminate verdict.
 3. **Columns.** Each contracted column must exist (``SCHEMA_COLUMN_MISSING``),
    have the contracted canonical type
    (``SCHEMA_COLUMN_TYPE_MISMATCH``), nullability
@@ -129,8 +129,9 @@ cannot distinguish ``INCLUDE`` columns from key columns, so comparing
 (that needs a connection, and belongs to the integration stages); it does not
 read triggers, rules, policies, functions, types, extensions, ACLs or storage
 parameters (S2 does not collect them, and none expresses a G8 requirement); it
-does not repair, migrate, or write anything; and it does not enforce anything
-at startup — that is S5, which does not exist yet.
+does not repair, migrate, or write anything; and it does not itself enforce a
+startup refusal — S3 stays a pure evaluator, and the S5 startup gate
+(:mod:`src.startup_schema`) refuses its non-``COMPATIBLE`` verdict.
 """
 
 from __future__ import annotations
@@ -195,8 +196,8 @@ SCHEMA_OBJECT_PROHIBITED: Final[str] = "SCHEMA_OBJECT_PROHIBITED"
 SCHEMA_TABLE_MISSING: Final[str] = "SCHEMA_TABLE_MISSING"
 #: A contracted table exists as something that is not an ordinary table.
 SCHEMA_TABLE_KIND_MISMATCH: Final[str] = "SCHEMA_TABLE_KIND_MISMATCH"
-#: A contracted table exists as a *partitioned* table, which the contract does
-#: not describe either way (owner decision pending).
+#: A contracted table exists as a *partitioned* table; the final owner decision
+#: keeps it indeterminate, so the startup gate refuses it.
 SCHEMA_TABLE_KIND_UNCONFIRMED: Final[str] = "SCHEMA_TABLE_KIND_UNCONFIRMED"
 #: A contracted column is absent.
 SCHEMA_COLUMN_MISSING: Final[str] = "SCHEMA_COLUMN_MISSING"

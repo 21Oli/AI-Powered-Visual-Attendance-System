@@ -172,10 +172,12 @@ database was contacted. S6–S8 remain pending.**
   `tests/test_db_migrate_executor_catalog.py` → **34 passed**, the existing G2
   suites (`test_startup_schema`, `test_api_startup_gate`,
   `test_db_migrate_executor`, `test_db_migrate`) → **161 passed**, and the G2
-  API/guard slice (`test_api_guard`, `test_api`) → **107 passed** (all exit 0);
+  API/guard slice (`test_api_guard` + `test_api`) → **38 passed** (all exit 0);
   full offline suite `pytest -q` → **1989 passed, 32 skipped in 223.68s**
-  (exit 0, +22 over the S4 baseline of 1967; the 32 skips are the unchanged
-  opt-in Tier-2 modules, so no database was contacted). `git diff --check`
+  (exit 0, +22 over the S4 baseline of 1967; the 32 skips are 28 unchanged
+  opt-in Tier-2 items and 4 platform-specific items — `test_employee_export.py`:
+  1 POSIX permission-bit test and 3 symlink-creation tests — so no database was
+  contacted). `git diff --check`
   clean.
 * **Safety evidence:** no PostgreSQL connection, no DDL/DML, no migration, no
   ledger change, no dependency or configuration change, no biometric or

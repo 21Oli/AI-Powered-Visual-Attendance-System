@@ -1,16 +1,18 @@
 """G8 — Step 39, S1: the declarative physical schema contract.
 
 G2 (:mod:`src.startup_schema`) proves that the database's *migration history*
-matches the shipped migration files. It deliberately inspects no physical
-object, so a database whose ledger says ``V001`` while ``employee`` has the
-wrong types, a missing primary key, or a ``created_at`` default still starts.
+matches the shipped migration files, and inspects no physical object of its
+own. G8 closes that gap and is enforced at startup alongside G2: a database
+whose ledger says ``V001`` while ``employee`` has the wrong types, a missing
+primary key, or a ``created_at`` default is refused at startup rather than
+served.
 
-G8 is the stage that closes that gap. **S1 — this module — is the contract
-only**: an explicit, immutable, declarative description of the physical
-schema the application requires. S1 does not inspect a database, run a
-query, open a connection, or read a file at run time; the catalog probe
-(S2), the pure evaluation and its diagnostic codes (S3), the executor hook
-(S4) and the startup integration (S5) are later, separately reviewed steps.
+**S1 — this module — is the contract only**: an explicit, immutable,
+declarative description of the physical schema the application requires. S1
+does not inspect a database, run a query, open a connection, or read a file at
+run time; the catalog probe (S2), the pure evaluation and its diagnostic codes
+(S3), the executor hook (S4) and the startup integration (S5) are separately
+reviewed stages that have since been implemented.
 
 Why an explicit contract instead of deriving expectations from the
 migration SQL
