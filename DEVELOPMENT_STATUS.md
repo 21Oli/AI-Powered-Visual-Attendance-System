@@ -3,6 +3,149 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 39 — Phase 3 G8 (S1–S4): contract, catalog probe, evaluator and executor integration (2026-11-08)
+
+**S1–S4 of G8 implemented and offline-verified. No database was contacted.
+S4 now performs the combined verification on one connection, but nothing
+enforces its verdict at API startup, so G8 is not in force and S5–S8 remain
+pending.**
+
+* **Added `src/schema_contract.py`**: the immutable, explicit declaration of
+  the physical schema G2 does not check — `employee` (four columns, canonical
+  `text`/`boolean`/`timestamp with time zone` spellings, `NOT NULL`
+  throughout, `is_active` defaulting to `true`, `created_at` with no default
+  per approved D2, primary key `(employee_id)`) and `schema_version` (three
+  columns, primary key `(version)`), plus the prohibited-object policy
+  (token-bounded attendance/embedding/biometric/face/enrollment patterns and
+  the exact `_phase3_test_guard` marker) and `migration_set_digest()`, a pure
+  SHA-256 over caller-supplied `(version, checksum)` pairs.
+* **Pinned, never derived**: `CONTRACT_MIGRATION_VERSION = 1` and a hard-coded
+  `MIGRATION_SET_DIGEST` over the shipped set's pairs (checksums come from the
+  existing loader, so no second checksum implementation exists). Nothing is
+  computed from whatever happens to be on disk at import or test time; the
+  re-pin procedure for a future migration is documented in the module
+  docstring, and the tests hard-code the same literals independently.
+* **Module hygiene**: frozen dataclasses plus an immutable mapping, pure
+  standard-library imports only, no filesystem access, no SQL, no driver, no
+  `src.db`/`src.db_migrate` import — enforced by AST checks and a
+  fresh-subprocess import test.
+* **Tests:** new `tests/test_schema_contract.py`, **60 offline tests**: contract
+  structure and immutability, exact type/nullability/default/primary-key
+  expectations, digest pinning plus modified/added/removed/swapped-content
+  detection, prohibited-name cases with token-boundary false positives
+  (`surface_metrics` allowed), and the no-I/O/no-driver guarantees.
+* **Added `src/db_schema_catalog.py`** (S2): the read-only probe — four fixed,
+  schema-qualified `pg_catalog` `SELECT`s (relations of every relevant kind,
+  real-table columns, constraints, indexes) mapped to frozen
+  `RelationFact`/`ColumnFact`/`ConstraintFact`/`IndexFact` records in a
+  deterministically ordered `CatalogSnapshot`. It accepts an existing
+  connection and never opens, closes, commits, rolls back or locks, so it runs
+  inside G2's `REPEATABLE READ READ ONLY` snapshot. `pg_catalog` rather than
+  privilege-filtered `information_schema` is deliberate: the latter would
+  under-report columns for a least-privilege role and cause false refusals.
+  It holds no policy, defines no diagnostic code, imports no test support, and
+  raises one fixed-message `CatalogProbeError` (cause preserved) so a failed
+  read can never look like a smaller valid schema.
+* **Tests:** new `tests/test_db_schema_catalog.py`, **39 offline tests**:
+  statement safety (SELECT-only, `pg_catalog`, no `information_schema`, no
+  parameters or interpolation, no lifecycle calls), fact mapping (kinds,
+  canonical types, nullability, missing-versus-present default,
+  generated/identity, ordered primary-key and index columns), determinism under
+  shuffled row order, immutability, failure propagation without a partial
+  snapshot, sanitized messages, empty-catalog handling and import hygiene.
+* **Added `src/physical_schema.py`** (S3): the pure evaluator. It compares a
+  `CatalogSnapshot` with the S1 contract and returns a frozen
+  `SchemaEvaluation` — `CompatibilityStatus` (`COMPATIBLE` / `INCOMPATIBLE` /
+  `INDETERMINATE`) plus a totally ordered tuple of frozen `Finding`s — with no
+  connection, SQL, filesystem, environment, logging or mutable state.
+  Incompatibility is returned data, never an exception; only an unusable call
+  raises `PhysicalSchemaInputError`. It enforces table presence and kind,
+  column presence/type/nullability/default/generation/identity, ordered
+  primary keys, the S1 prohibited-name policy (every relation kind, with the
+  `_phase3_test_guard` marker classified separately as `test_marker`), and
+  reports absent or contradictory metadata as `SCHEMA_METADATA_INCOMPLETE`
+  rather than as a match. Unrelated public objects produce no finding.
+* **14 stable codes + 1 reserved**: `SCHEMA_OBJECT_PROHIBITED`,
+  `SCHEMA_TABLE_MISSING`, `SCHEMA_TABLE_KIND_MISMATCH`,
+  `SCHEMA_TABLE_KIND_UNCONFIRMED`, `SCHEMA_COLUMN_MISSING`,
+  `SCHEMA_COLUMN_UNEXPECTED`, `SCHEMA_COLUMN_TYPE_MISMATCH`,
+  `SCHEMA_COLUMN_NULLABILITY_MISMATCH`, `SCHEMA_COLUMN_DEFAULT_MISMATCH`,
+  `SCHEMA_COLUMN_GENERATION_MISMATCH`, `SCHEMA_COLUMN_IDENTITY_MISMATCH`,
+  `SCHEMA_PRIMARY_KEY_MISSING`, `SCHEMA_PRIMARY_KEY_MISMATCH`,
+  `SCHEMA_METADATA_INCOMPLETE`; `SCHEMA_CATALOG_UNREADABLE` is reserved for
+  S4/S5 and never emitted by S3.
+* **Tests:** new `tests/test_physical_schema.py`, **129 offline tests**:
+  positive cases (correct schema, reordered columns, unrelated tables/views/
+  indexes/sequences, extra constraints and indexes, normalized `true`),
+  missing tables and every non-table relation kind, partitioned tables,
+  empty/duplicate/incomplete metadata, missing/unexpected columns, every type
+  and alias case, nullability, all default shapes, generated and identity
+  columns, ordered primary keys (including a two-column custom contract),
+  every S1 prohibited pattern plus marker near-misses and substring false
+  positives, shuffled-input determinism, precedence ordering, verdict
+  semantics, argument immutability, import hygiene, a fresh-subprocess check
+  and the input-error matrix.
+* **S4 — executor integration** (`src/db_migrate_executor.py`):
+  `PsycopgMigrationExecutor.verify_schema_locked()` gained keyword-only
+  `catalog_probe` (default `None`) and `physical_evaluator` (default
+  `evaluate_physical_schema`). Without a probe it is byte-for-byte the G2
+  operation and returns the bare `MigrationSnapshot`; with one it returns a
+  frozen `LockedSchemaVerification(migration, physical)` after a single fixed
+  pass: one connection → one nonblocking `pg_try_advisory_lock` → one
+  `REPEATABLE READ READ ONLY` transaction → G2 reads → `evaluate(snapshot)` →
+  catalog probe on the same connection inside the same transaction → pure S3
+  evaluation → `ROLLBACK` → confirmed unlock → close.
+* **G2 precedence preserved**: the catalog is never probed unless
+  `evaluate(snapshot)` accepts the migration history, so no G2 refusal can be
+  masked or replaced; no G2 code changed; the six-method `MigrationExecutor`
+  ABC is untouched (the combined mode and its result live on the concrete
+  class only).
+* **Result exposure**: `COMPATIBLE` / `INCOMPATIBLE` / `INDETERMINATE` all
+  survive unchanged (partitioned tables stay indeterminate, prohibited
+  non-table relations stay prohibited, `_phase3_test_guard` stays
+  `test_marker`). A catalog read failure becomes a fixed-message
+  `MigrationDriverError` (cause preserved), as does a failed `ROLLBACK`: no
+  partial snapshot, no raw driver text, no false success.
+* **Tests:** new `tests/test_db_migrate_executor_catalog.py`, **34 offline
+  tests** driving the real S2 probe and the real S3 evaluator against recording
+  fake connections: unchanged default G2 lifecycle and return type, combined
+  order, same-transaction/same-connection/lock-held guarantees, exactly one
+  connection/lock/transaction, G2 refusal before any catalog read (including
+  through the real `evaluate_migration_state`), outcome preservation, catalog
+  and evaluator failures, the rollback/unlock/close cleanup matrix, primary
+  failure preservation, no writing statements, ABC/signature stability, and
+  source assertions that `run_server`/`run_api` do not activate the gate.
+* **Owner decisions recorded (final):** partitioned tables remain
+  `INDETERMINATE` — neither accepted nor incompatible — and the S1
+  prohibited-name rules apply to every relation type S2 returns.
+* **Verification:** focused `tests/test_schema_contract.py` → **60 passed**,
+  `tests/test_db_schema_catalog.py` → **39 passed**,
+  `tests/test_physical_schema.py` → **129 passed**,
+  `tests/test_db_migrate_executor_catalog.py` → **34 passed**, and the existing
+  G2 suites (`test_startup_schema`, `test_api_startup_gate`,
+  `test_db_migrate_executor`, `test_db_migrate`) → **161 passed** (all exit 0);
+  full offline suite `pytest -q` → **1967 passed, 32 skipped in 187.46s**
+  (exit 0, +34 over the previous 1933 baseline; the 32 skips are the unchanged
+  opt-in Tier-2 modules, so no database was contacted). `git diff --check`
+  clean.
+* **Safety evidence:** no PostgreSQL connection, no DDL/DML, no migration, no
+  ledger change, no dependency or configuration change, no biometric or
+  employee data, and no Git operation.
+* **Limitations / not claimed:** G8 is **not** in force at startup. S4 wires
+  the probe and evaluator into the executor operation, but `run_server()` and
+  `tools/run_api.py` still perform G2 only, so physical schema drift is still
+  unverified at startup (S5 pending) and no live database verification has been
+  performed. The probe's SQL is reviewed but never executed against a server,
+  and it reads `attgenerated`/`attidentity`, so PostgreSQL 12+ remains an
+  unverified prerequisite. Partitioned tables stay `INDETERMINATE` by owner
+  decision, and how a catalog-read failure maps to the reserved
+  `SCHEMA_CATALOG_UNREADABLE` is left to S5.
+* **Docs:** `DB_DESIGN.md` §3.9 (approved architecture, S1 scope, digest
+  maintenance, S2 probe contract, S3 evaluator contract, S4 combined
+  single-connection lifecycle, both final owner decisions, pending stages) and
+  the §3.8 out-of-scope pointer. The §3.7 `G3` migration-hardening entry is
+  deliberately unchanged — G8 is a distinct stage label.
+
 ## Step 38 — Phase 3 G2: startup schema compatibility gate (2026-11-08)
 
 **Implemented and offline-verified. No application database was contacted and

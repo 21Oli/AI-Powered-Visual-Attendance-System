@@ -18,6 +18,9 @@ Exactly six statements and one transaction-control pair, all static text:
 * ``SELECT version, checksum FROM schema_version``
 * ``INSERT INTO schema_version (version, checksum, applied_at) VALUES (%s, %s, %s)``
 * ``BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`` / ``ROLLBACK``
+* the four fixed ``pg_catalog`` reads of :mod:`src.db_schema_catalog` (only
+  when the caller asks :meth:`~PsycopgMigrationExecutor.verify_schema_locked`
+  for a physical-schema assessment; static text, no interpolation)
 
 Migration SQL itself is passed through verbatim (no splitting, no
 interpolation, no parameters), so psycopg uses the simple-query path and
@@ -40,6 +43,11 @@ Connection ownership
   The operation is additive (the six-method ABC is unchanged) precisely
   because the lock connection and the work connection above cannot be
   the same connection through the separate methods.
+* **One connection for the combined G2+G8 verification**: the same method,
+  given a ``catalog_probe``, reads the physical catalog on that connection
+  **inside the same** ``REPEATABLE READ READ ONLY`` transaction, so the
+  migration history and the physical facts come from one consistent snapshot.
+  There is no second connection, transaction or lock for the catalog.
 
 Target discipline
 -----------------
@@ -75,6 +83,7 @@ Error discipline
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
 
@@ -88,8 +97,11 @@ from src.db_migrate import (
     MigrationIntegrityError,
     MigrationSnapshot,
 )
+from src.db_schema_catalog import CatalogProbeError, CatalogSnapshot
+from src.physical_schema import SchemaEvaluation, evaluate_physical_schema
 
 __all__ = [
+    "LockedSchemaVerification",
     "MigrationDriverError",
     "MigrationTargetError",
     "PsycopgMigrationExecutor",
@@ -115,6 +127,24 @@ class MigrationDriverError(MigrationError):
     Infrastructure-class. Messages are fixed, sanitized strings; the original
     driver exception is preserved as ``__cause__`` for trusted diagnostics.
     """
+
+
+@dataclass(frozen=True)
+class LockedSchemaVerification:
+    """Combined G2 + G8 result from **one** locked read-only verification.
+
+    Returned by :meth:`PsycopgMigrationExecutor.verify_schema_locked` only when
+    the caller supplied a ``catalog_probe``; the default call keeps returning
+    the bare :class:`~src.db_migrate.MigrationSnapshot`, so every existing G2
+    caller is unaffected.
+
+    ``migration`` is the history snapshot G2 evaluated and ``physical`` is the
+    immutable S3 evaluation of the catalog facts read from the *same*
+    transaction. Neither field carries SQL, driver text, a DSN or a credential.
+    """
+
+    migration: MigrationSnapshot
+    physical: SchemaEvaluation
 
 
 # ---------------------------------------------------------------------------
@@ -465,7 +495,24 @@ class PsycopgMigrationExecutor(MigrationExecutor):
         needs it to distinguish a malformed ledger from an unavailable one.
         """
         connection.execute(_BEGIN_SNAPSHOT_SQL)
+        snapshot = self._read_snapshot_statements(
+            connection, validate_ledger_shape=validate_ledger_shape
+        )
+        connection.execute(_ROLLBACK_SQL)
+        return snapshot
 
+    def _read_snapshot_statements(
+        self, connection: Any, *, validate_ledger_shape: bool = False
+    ) -> MigrationSnapshot:
+        """Issue the snapshot reads **inside an already-open transaction**.
+
+        Shared by :meth:`_read_snapshot_on` (which owns the ``BEGIN`` /
+        ``ROLLBACK`` pair) and by the combined G2+G8 verification in
+        :meth:`verify_schema_locked`, which must read the physical catalog
+        inside the *same* transaction and therefore cannot let this helper open
+        or end it. Statement order is identical in both callers: ledger
+        presence, optional ledger shape, tables, applied rows.
+        """
         row = connection.execute(_LEDGER_PRESENT_SQL).fetchone()
         ledger_present = row is not None and row[0] is not None
 
@@ -487,7 +534,6 @@ class PsycopgMigrationExecutor(MigrationExecutor):
                 for applied_row in connection.execute(_APPLIED_SQL).fetchall()
             )
 
-        connection.execute(_ROLLBACK_SQL)
         return MigrationSnapshot(
             tables=tables, ledger_present=ledger_present, applied=applied
         )
@@ -525,8 +571,14 @@ class PsycopgMigrationExecutor(MigrationExecutor):
             _close(connection, failure)
 
     def verify_schema_locked(
-        self, evaluate: Callable[[MigrationSnapshot], None]
-    ) -> MigrationSnapshot:
+        self,
+        evaluate: Callable[[MigrationSnapshot], None],
+        *,
+        catalog_probe: Callable[[Any], CatalogSnapshot] | None = None,
+        physical_evaluator: Callable[[CatalogSnapshot], SchemaEvaluation] = (
+            evaluate_physical_schema
+        ),
+    ) -> MigrationSnapshot | LockedSchemaVerification:
         """Lock, snapshot, evaluate, unlock and close on **one** connection.
 
         G2's startup gate must hold the advisory lock across the snapshot *and*
@@ -552,7 +604,39 @@ class PsycopgMigrationExecutor(MigrationExecutor):
         A cleanup failure never masks an exception already in flight (G7 scope:
         ``Exception``): it is attached as a note and the primary failure —
         including a refusal raised by ``evaluate`` — is preserved.
+
+        Combined physical verification (G8 S4)
+        -------------------------------------
+        Supplying ``catalog_probe`` (normally
+        :func:`src.db_schema_catalog.read_public_catalog`) adds the physical
+        read to that same transaction and returns a
+        :class:`LockedSchemaVerification`. The order is contractual:
+
+        1. one connection, ``autocommit`` on, **one** advisory-lock attempt;
+        2. **one** ``REPEATABLE READ READ ONLY`` transaction;
+        3. the migration snapshot, reusing the G2 read statements;
+        4. ``evaluate(snapshot)`` — G2 **first**: a history refusal raises
+           before a single catalog statement runs, so a physical result can
+           never pre-empt or mask a G2 refusal;
+        5. ``catalog_probe(connection)`` on the same connection, still inside
+           that transaction, so history and catalog share one snapshot;
+        6. ``physical_evaluator(catalog)`` (pure; the default is
+           :func:`src.physical_schema.evaluate_physical_schema`);
+        7. ``ROLLBACK`` ends the transaction, then the confirmed unlock and
+           close described above.
+
+        A probe failure is :class:`~src.db_schema_catalog.CatalogProbeError`;
+        it is re-raised as a fixed-message :class:`MigrationDriverError` with
+        the cause preserved, so no partial snapshot and no raw driver text
+        leaves this boundary. Without ``catalog_probe`` the method is the G2
+        operation it has always been and returns the bare
+        :class:`~src.db_migrate.MigrationSnapshot`.
         """
+        if catalog_probe is not None and not callable(catalog_probe):
+            raise TypeError("catalog_probe must be callable")
+        if not callable(physical_evaluator):
+            raise TypeError("physical_evaluator must be callable")
+
         connection = self._opener(self._dsn)  # availability errors propagate
         primary: BaseException | None = None
         lock_held = False
@@ -568,8 +652,24 @@ class PsycopgMigrationExecutor(MigrationExecutor):
                 )
             lock_held = True
 
+            if catalog_probe is None:
+                try:
+                    snapshot = self._read_snapshot_on(
+                        connection, validate_ledger_shape=True
+                    )
+                except MigrationError:
+                    raise
+                except Exception as exc:
+                    raise MigrationDriverError(
+                        "the migration state snapshot could not be read"
+                    ) from exc
+
+                evaluate(snapshot)
+                return snapshot
+
+            connection.execute(_BEGIN_SNAPSHOT_SQL)
             try:
-                snapshot = self._read_snapshot_on(
+                snapshot = self._read_snapshot_statements(
                     connection, validate_ledger_shape=True
                 )
             except MigrationError:
@@ -579,8 +679,31 @@ class PsycopgMigrationExecutor(MigrationExecutor):
                     "the migration state snapshot could not be read"
                 ) from exc
 
+            # G2 precedence: nothing is probed unless the history is valid.
             evaluate(snapshot)
-            return snapshot
+
+            try:
+                catalog = catalog_probe(connection)
+            except CatalogProbeError as exc:
+                raise MigrationDriverError(
+                    "the physical schema catalog could not be read for "
+                    "verification"
+                ) from exc
+
+            physical = physical_evaluator(catalog)
+
+            try:
+                connection.execute(_ROLLBACK_SQL)
+            except MigrationError:
+                raise
+            except Exception as exc:
+                raise MigrationDriverError(
+                    "the schema verification transaction could not be ended"
+                ) from exc
+
+            return LockedSchemaVerification(
+                migration=snapshot, physical=physical
+            )
         except BaseException as exc:
             primary = exc
             raise
