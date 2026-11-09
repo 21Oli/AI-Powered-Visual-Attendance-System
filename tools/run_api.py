@@ -125,11 +125,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         run_server(settings)
     except StartupSchemaError as exc:
-        # G2 schema-compatibility refusal: the typed error's message is
+        # G2/G8 schema-compatibility refusal: the typed error's message is
         # "<CODE>: <fixed message>" — never a DSN, credential, SQL text,
         # driver text, or traceback. Exit 4 is distinct from 2 (invalid
-        # configuration) and 3 (startup-guard contention).
+        # configuration) and 3 (startup-guard contention). A physical
+        # refusal also prints its findings' stable codes and identifiers
+        # (bounded), which carry no values or driver detail.
         print(f"run-api: {exc}", file=sys.stderr)
+        for finding in exc.findings[:8]:
+            print(
+                f"run-api: schema finding: {finding.code} {finding.label}",
+                file=sys.stderr,
+            )
         return 4
     except StartupGuardError as exc:
         # Documented step 1.4 startup-code: the single-instance guard

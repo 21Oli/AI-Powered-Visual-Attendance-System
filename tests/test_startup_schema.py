@@ -62,6 +62,83 @@ EXPECTED_SHAPE = [
     ("applied_at", "timestamp with time zone", "NO"),
 ]
 
+#: Healthy physical catalog rows (G8). The gate now also verifies the physical
+#: schema, so the shared fake connection must answer the four S2 statements;
+#: these rows describe exactly the contracted schema.
+CATALOG_RELATIONS = [
+    ("public", "employee", "r"),
+    ("public", "employee_pkey", "i"),
+    ("public", "schema_version", "r"),
+    ("public", "schema_version_pkey", "i"),
+]
+CATALOG_COLUMNS = [
+    ("public", "employee", "employee_id", "text", True, None, "", "", 1),
+    ("public", "employee", "full_name", "text", True, None, "", "", 2),
+    ("public", "employee", "is_active", "boolean", True, "true", "", "", 3),
+    (
+        "public",
+        "employee",
+        "created_at",
+        "timestamp with time zone",
+        True,
+        None,
+        "",
+        "",
+        4,
+    ),
+    ("public", "schema_version", "version", "integer", True, None, "", "", 1),
+    ("public", "schema_version", "checksum", "text", True, None, "", "", 2),
+    (
+        "public",
+        "schema_version",
+        "applied_at",
+        "timestamp with time zone",
+        True,
+        None,
+        "",
+        "",
+        3,
+    ),
+]
+CATALOG_CONSTRAINTS = [
+    (
+        "public",
+        "employee",
+        "employee_pkey",
+        "p",
+        "PRIMARY KEY (employee_id)",
+        ["employee_id"],
+    ),
+    (
+        "public",
+        "schema_version",
+        "schema_version_pkey",
+        "p",
+        "PRIMARY KEY (version)",
+        ["version"],
+    ),
+]
+CATALOG_INDEXES = [
+    (
+        "public",
+        "employee",
+        "employee_pkey",
+        True,
+        True,
+        "CREATE UNIQUE INDEX employee_pkey ON public.employee USING btree (employee_id)",
+        ["employee_id"],
+    ),
+    (
+        "public",
+        "schema_version",
+        "schema_version_pkey",
+        True,
+        True,
+        "CREATE UNIQUE INDEX schema_version_pkey ON public.schema_version USING btree (version)",
+        ["version"],
+    ),
+]
+
 
 # ---------------------------------------------------------------------------
 # Recording fakes
@@ -150,6 +227,16 @@ def _handler(
             return [(unlock_result,)]
         if "information_schema.columns" in sql:
             return list(effective_shape)
+        # G8 catalog statements (checked before the generic ``pg_class``
+        # branch, which would otherwise answer them with table names).
+        if "format_type" in sql:
+            return list(CATALOG_COLUMNS)
+        if "pg_constraint" in sql:
+            return list(CATALOG_CONSTRAINTS)
+        if "pg_index" in sql:
+            return list(CATALOG_INDEXES)
+        if "n.nspname, c.relname, c.relkind" in sql:
+            return list(CATALOG_RELATIONS)
         if "pg_class" in sql:
             return [(name,) for name in tables]
         if "SELECT version, checksum" in sql:

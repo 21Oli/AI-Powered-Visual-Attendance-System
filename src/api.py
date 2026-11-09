@@ -339,12 +339,13 @@ def build_server_config(settings: AppSettings):
 
 
 def _default_startup_verifier(settings: AppSettings) -> None:
-    """G2: the real startup schema-compatibility verifier.
+    """G2+G8: the real startup schema-compatibility verifier.
 
     Imported lazily so that importing :mod:`src.api` still pulls in no
-    migration or database machinery (the guard must be acquired before G2
-    runs, and import hygiene is test-enforced). A refusal raises
-    :class:`src.startup_schema.StartupSchemaError`.
+    migration or database machinery (the guard must be acquired before the
+    verifier runs, and import hygiene is test-enforced). The verifier checks
+    the migration history **and** the physical schema, and refuses unless both
+    pass; a refusal raises :class:`src.startup_schema.StartupSchemaError`.
     """
     from src.startup_schema import verify_startup_schema
 
@@ -367,11 +368,14 @@ def run_server(
     is never started, so ``--print-bind`` (which does not serve) and any
     library caller of this entry point get the same protection.
 
-    G2: **after** the guard is acquired and **before** Uvicorn is imported
-    or constructed, the startup schema-compatibility verifier runs. Any
-    refusal raises :class:`src.startup_schema.StartupSchemaError`; the
-    ``with`` block then releases the guard, so a refused start leaves
-    neither a served request nor a held process guard behind.
+    G2+G8: **after** the guard is acquired and **before** Uvicorn is imported
+    or constructed, the startup schema-compatibility verifier runs — migration
+    history first, then the physical schema, both on one connection inside one
+    read-only snapshot. Any refusal raises
+    :class:`src.startup_schema.StartupSchemaError`; the ``with`` block then
+    releases the guard, so a refused start leaves neither a served request nor
+    a held process guard behind. Only a fully ``COMPATIBLE`` verification
+    reaches Uvicorn.
 
     Uses a fresh :func:`load_settings()` by default (current environment,
     consistent with :mod:`src.db`), then serves on the validated loopback

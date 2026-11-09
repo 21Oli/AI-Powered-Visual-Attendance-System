@@ -362,7 +362,8 @@ imported.
 * **Out of scope.** Physical drift (tables, columns, indexes, constraints,
   triggers, functions) is not inspected; the only physical fact involved is
   the pre-existing `employee`-without-ledger integrity rule. G8 (§3.9) is the
-  later stage for exactly that gap, and only its S1 contract exists so far.
+  later stage for exactly that gap; it is now enforced at startup alongside
+  this gate.
 * **Diagnostic codes** (stable machine surface, fixed sanitized messages):
   `DATABASE_CONFIGURATION_INVALID`, `DATABASE_TARGET_INVALID`,
   `TEST_DATABASE_TARGET_REJECTED`, `DATABASE_UNAVAILABLE`,
@@ -374,11 +375,12 @@ imported.
 
 ### 3.9 Physical schema compatibility verification (G8, Step 39)
 
-**S1–S4 implemented (the declarative contract, the read-only catalog probe, the
-pure evaluator and the executor integration). Nothing enforces the verdict at
-startup yet, so G8 is not in force.** G2 (§3.8) verifies the migration
-*history*; G8 verifies the *physical* schema the application requires, inside
-the same one-connection, one-snapshot read-only operation.
+**S1–S5 implemented (the declarative contract, the read-only catalog probe, the
+pure evaluator, the executor integration and the startup gate). G8 is in force:
+API startup proceeds only when the combined verification returns
+`COMPATIBLE`.** G2 (§3.8) verifies the migration *history*; G8 verifies the
+*physical* schema the application requires, inside the same one-connection,
+one-snapshot read-only operation.
 
 * **Approved architecture (owner sign-off).** Stage name **G8** — the `G3`
   entry in §3.7 is a different, owner-approved gap (migration-file hardening)
@@ -471,8 +473,8 @@ the same one-connection, one-snapshot read-only operation.
   `SCHEMA_COLUMN_DEFAULT_MISMATCH`, `SCHEMA_COLUMN_GENERATION_MISMATCH`,
   `SCHEMA_COLUMN_IDENTITY_MISMATCH`, `SCHEMA_PRIMARY_KEY_MISSING`,
   `SCHEMA_PRIMARY_KEY_MISMATCH` and `SCHEMA_METADATA_INCOMPLETE`.
-  `SCHEMA_CATALOG_UNREADABLE` is **reserved** for S4/S5 (a catalog-read failure
-  is S2's `CatalogProbeError`); S3 never emits it.
+  `SCHEMA_CATALOG_UNREADABLE` is emitted by neither S3 nor S4 (a catalog-read
+  failure is S2's `CatalogProbeError`); S5 owns it, as described below.
 * **Precedence.** Findings are ordered by that code sequence, then by the S1
   rule category (so the test marker leads), then schema, object, column, code
   and detail — a total order independent of snapshot order, verified by feeding
@@ -534,20 +536,68 @@ the same one-connection, one-snapshot read-only operation.
   `COMPATIBLE`, `INCOMPATIBLE` and `INDETERMINATE` all survive, findings are
   never dropped, and no G2 diagnostic code is added or altered. A catalog read
   failure is re-raised as a fixed-message `MigrationDriverError` with the cause
-  preserved — no partial snapshot, no raw driver text. Turning this result into
-  a startup refusal, and deciding how catalog unreadability maps to the
-  reserved `SCHEMA_CATALOG_UNREADABLE`, is S5's job.
+  preserved — no partial snapshot, no raw driver text. Turning that result into
+  a startup refusal is S5's job (below); S4 itself enforces nothing.
 * **Cleanup unchanged.** Exactly one connection attempt, one lock attempt, no
   retry; an unconfirmed or erroring `pg_advisory_unlock`, or a close failure, is
   a `MigrationCleanupError` and never a success; a failure already in flight is
   preserved with the cleanup failure attached as a note (G7 scope: `Exception`).
   A failed `ROLLBACK` is a `MigrationDriverError` (*the schema verification
   transaction could not be ended*) and is also never a success.
-* **Pending.** S5 (gate wiring and startup refusal), S6 (documentation), S7
-  (owner-run negative-database provisioning) and S8 (separately authorized live
-  read-only verification) remain. Nothing in this repository may describe G8 as
-  verifying a database until S5 lands, and `run_server()`/`run_api.py` still
-  perform G2 only.
+* **S5 — startup gate (`src/startup_schema.py`, `src/api.py`,
+  `tools/run_api.py`) (this step).** `verify_startup_schema()` now calls the
+  existing S4 combined operation exactly once —
+  `verify_schema_locked(evaluate, catalog_probe=read_public_catalog,
+  physical_evaluator=evaluate_physical_schema)` — and then enforces its result.
+  The startup layer supplies the production probe and evaluator to the existing
+  seam; it never calls S2 or S3 itself, never opens a second connection, never
+  takes a second lock and never starts a second transaction. There is one gate
+  and no weaker second entry point.
+* **Strict fail-closed decision rule.** Startup is permitted only by a
+  `LockedSchemaVerification` whose physical status is `COMPATIBLE`. Every other
+  outcome refuses: `INCOMPATIBLE` → `SCHEMA_INCOMPATIBLE`, `INDETERMINATE` →
+  `SCHEMA_INDETERMINATE` (partitioned tables therefore refuse startup while
+  still being reported as unconfirmed rather than as drift), a catalog-read
+  failure → `SCHEMA_CATALOG_UNREADABLE`, an unexpected result object or an
+  evaluator exception → `SCHEMA_VERIFICATION_FAILED`, and a cleanup failure
+  (rollback, unlock or close) keeps its existing `MIGRATION_LOCK_RELEASE_FAILED`
+  / `MIGRATION_HISTORY_INVALID` meaning and wins before any physical verdict is
+  read, because the refusal is raised only after `verify_schema_locked()` has
+  returned. A missing findings tuple, an empty snapshot, an unknown status and
+  an exception are never treated as compatibility. A bare `MigrationSnapshot`
+  (the no-probe form) is not a successful combined verification, so it refuses
+  `SCHEMA_VERIFICATION_FAILED` instead of silently skipping G8.
+* **G2 precedence preserved.** Because S4 probes the catalog only after the
+  migration history is accepted, every G2 code keeps its existing meaning,
+  ordering and message, and a history failure is never replaced by a physical
+  finding. On the physical side the S3 codes keep their vocabulary and total
+  order: they are carried unchanged in `StartupSchemaError.findings` (a frozen
+  tuple of the same frozen `Finding` objects) and exposed as `finding_codes`, so
+  `str(error)` is still exactly `"<CODE>: <message>"`.
+* **Diagnostic mapping.** Two gate-level codes are added for the two S3
+  statuses (`SCHEMA_INCOMPATIBLE`, `SCHEMA_INDETERMINATE`);
+  `SCHEMA_CATALOG_UNREADABLE` is reused from the reserved S3 vocabulary and is
+  recognised by inspecting the preserved `CatalogProbeError` cause on S4's
+  `MigrationDriverError`, so a catalog failure never becomes an empty snapshot
+  or an ordinary mismatch and S4 needed no change. `MIGRATION_LOCK_RELEASE_FAILED`
+  and `MIGRATION_HISTORY_INVALID` are untouched.
+* **Startup sequence and refusal.** The order is unchanged — single-process
+  guard, configuration and target validation, combined G2+G8 verification,
+  then Uvicorn. A refusal raises the typed `StartupSchemaError` after
+  `verify_schema_locked()` has already rolled back, unlocked and closed, so the
+  gate releases the single-process guard through the existing established path
+  and Uvicorn is never imported or started. `run_api.py` keeps exit code `4`
+  (no new exit code per finding) and prints the one existing sanitized refusal
+  line followed by at most eight `run-api: schema finding: <CODE>
+  <schema.object[.column]>` lines — stable codes and identifiers only, never a
+  DSN, credential, SQL text, default expression, driver message or traceback.
+  `--print-bind`, `create_app()` and module import remain database-independent
+  and side-effect-free, and the six-method executor ABC is unchanged.
+* **Pending.** S6 (audit/documentation completion), S7 (owner-run negative
+  database provisioning) and S8 (separately authorized live read-only
+  verification) remain. G8 is enforced at startup and offline-verified only:
+  the probe and the gate have never been executed against a PostgreSQL server,
+  and PostgreSQL 12+ remains an unverified prerequisite.
 
 ## 4. Employee repository interface (Section C)
 

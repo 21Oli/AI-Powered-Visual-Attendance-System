@@ -809,13 +809,29 @@ def test_combined_verification_issues_no_writing_statement() -> None:
         assert forbidden.search(upper) is None, upper
 
 
-def test_startup_path_does_not_activate_physical_verification() -> None:
-    for relative in ("src/startup_schema.py", "src/api.py", "tools/run_api.py"):
+def test_startup_path_activates_physical_verification_through_this_operation() -> None:
+    """S5 activates the gate here, in one place, with the production seams.
+
+    S4 recorded that startup did *not* yet enforce the verdict; S5 deliberately
+    reverses that, so this test now pins the active wiring instead. The gate
+    must hand the real probe and evaluator to this combined operation (a bare
+    ``MigrationSnapshot`` is not a successful verification), and the API/CLI
+    layers must stay thin rather than call S2 or S3 themselves.
+    """
+    gate = (PROJECT_ROOT / "src" / "startup_schema.py").read_text(encoding="utf-8")
+    for symbol in (
+        "catalog_probe=read_public_catalog",
+        "physical_evaluator=evaluate_physical_schema",
+        "LockedSchemaVerification",
+        "if evaluation.compatible:",
+        "CompatibilityStatus.INDETERMINATE",
+    ):
+        assert symbol in gate, f"src/startup_schema.py must reference {symbol}"
+    for relative in ("src/api.py", "tools/run_api.py"):
         source = (PROJECT_ROOT / relative).read_text(encoding="utf-8")
         for symbol in (
             "catalog_probe",
             "read_public_catalog",
-            "physical_schema",
             "evaluate_physical_schema",
             "LockedSchemaVerification",
         ):

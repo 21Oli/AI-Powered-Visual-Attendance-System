@@ -3,12 +3,11 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
-## Step 39 — Phase 3 G8 (S1–S4): contract, catalog probe, evaluator and executor integration (2026-11-08)
+## Step 39 — Phase 3 G8 (S1–S5): contract, catalog probe, evaluator, executor integration and startup gate (2026-11-08)
 
-**S1–S4 of G8 implemented and offline-verified. No database was contacted.
-S4 now performs the combined verification on one connection, but nothing
-enforces its verdict at API startup, so G8 is not in force and S5–S8 remain
-pending.**
+**S1–S5 of G8 implemented and offline-verified, and G8 is now in force: API
+startup proceeds only when the combined verification reports `COMPATIBLE`. No
+database was contacted. S6–S8 remain pending.**
 
 * **Added `src/schema_contract.py`**: the immutable, explicit declaration of
   the physical schema G2 does not check — `employee` (four columns, canonical
@@ -118,33 +117,84 @@ pending.**
 * **Owner decisions recorded (final):** partitioned tables remain
   `INDETERMINATE` — neither accepted nor incompatible — and the S1
   prohibited-name rules apply to every relation type S2 returns.
-* **Verification:** focused `tests/test_schema_contract.py` → **60 passed**,
+* **S5 — startup gate activated (this step, `src/startup_schema.py`).**
+  `verify_startup_schema()` now performs the whole G2+G8 gate: it calls the
+  existing S4 operation exactly once with the production probe and evaluator
+  (`verify_schema_locked(evaluate, catalog_probe=read_public_catalog,
+  physical_evaluator=evaluate_physical_schema)`) and then enforces the result.
+  The startup layer never calls S2 or S3 itself and adds no connection, lock or
+  transaction — there is one gate and no weaker second entry point.
+* **Fail-closed rule:** only physical status `COMPATIBLE` permits Uvicorn.
+  `INCOMPATIBLE` → `SCHEMA_INCOMPATIBLE`, `INDETERMINATE` →
+  `SCHEMA_INDETERMINATE` (partitioned tables therefore refuse startup while
+  still reading as unconfirmed rather than as drift), a catalog-read failure →
+  `SCHEMA_CATALOG_UNREADABLE`, an unexpected result or evaluator exception →
+  `SCHEMA_VERIFICATION_FAILED`. A bare `MigrationSnapshot`, an empty findings
+  tuple, an unknown status and an exception are never compatibility.
+* **G2 precedence and diagnostics:** because the catalog is probed only after
+  the history is accepted, every G2 code keeps its meaning and order and no
+  history failure is replaced by a physical finding. Physical refusals are
+  raised only after `verify_schema_locked()` has returned, so rollback, unlock
+  and close failures keep their existing codes and win. The S3 codes are
+  carried unchanged in `StartupSchemaError.findings` (and `finding_codes`),
+  while `str(error)` stays exactly `"<CODE>: <message>"`.
+* **Catalog failure is distinguishable:** it is recognised by the preserved
+  `CatalogProbeError` cause on S4's `MigrationDriverError`, so unreadable
+  catalog never becomes an empty snapshot or an ordinary mismatch, and S4
+  needed no change.
+* **Refusal behaviour:** the single-process guard is released through the
+  existing path, Uvicorn is never imported or started, and `run_api.py` keeps
+  exit code `4` — one sanitized refusal line plus at most eight
+  `run-api: schema finding: <CODE> <schema.object[.column]>` lines. No DSN,
+  credential, SQL text, default expression, driver message or traceback.
+  `--print-bind`, `create_app()` and imports remain database-independent, and
+  the six-method ABC is unchanged.
+* **Tests:** new `tests/test_api_physical_gate.py`, **22 offline tests**: the
+  full decision matrix (allow only on `COMPATIBLE`; `INCOMPATIBLE`,
+  `INDETERMINATE`, catalog unreadable, evaluator failure, unexpected result and
+  cleanup failure all refuse), G2 precedence with no catalog read after a
+  history refusal, the real S2 probe and S3 evaluator through the real gateway
+  (findings survive, partitioned stays indeterminate, prohibited non-table
+  relations stay prohibited, unrelated objects stay allowed), the
+  one-connection/one-lock/one-transaction/same-snapshot/rollback→unlock→close
+  lifecycle, guard release on refusal, exit code `4` with sanitized runner
+  output, `--print-bind` independence and import hygiene. The shared
+  `tests/test_startup_schema.py` handler was extended with healthy catalog rows
+  so its existing G2 "allow" cases still mean what they meant; no existing
+  assertion was changed or weakened. One S4 test
+  (`test_startup_path_does_not_activate_physical_verification`) asserted the
+  pre-S5 state this step deliberately reverses, so it was rewritten to pin the
+  active wiring instead; no other S1–S4 assertion changed.
+* **Verification (S5):** focused `tests/test_api_physical_gate.py` →
+  **22 passed**; `tests/test_schema_contract.py` → **60 passed**,
   `tests/test_db_schema_catalog.py` → **39 passed**,
   `tests/test_physical_schema.py` → **129 passed**,
-  `tests/test_db_migrate_executor_catalog.py` → **34 passed**, and the existing
-  G2 suites (`test_startup_schema`, `test_api_startup_gate`,
-  `test_db_migrate_executor`, `test_db_migrate`) → **161 passed** (all exit 0);
-  full offline suite `pytest -q` → **1967 passed, 32 skipped in 187.46s**
-  (exit 0, +34 over the previous 1933 baseline; the 32 skips are the unchanged
+  `tests/test_db_migrate_executor_catalog.py` → **34 passed**, the existing G2
+  suites (`test_startup_schema`, `test_api_startup_gate`,
+  `test_db_migrate_executor`, `test_db_migrate`) → **161 passed**, and the G2
+  API/guard slice (`test_api_guard`, `test_api`) → **107 passed** (all exit 0);
+  full offline suite `pytest -q` → **1989 passed, 32 skipped in 223.68s**
+  (exit 0, +22 over the S4 baseline of 1967; the 32 skips are the unchanged
   opt-in Tier-2 modules, so no database was contacted). `git diff --check`
   clean.
 * **Safety evidence:** no PostgreSQL connection, no DDL/DML, no migration, no
   ledger change, no dependency or configuration change, no biometric or
   employee data, and no Git operation.
-* **Limitations / not claimed:** G8 is **not** in force at startup. S4 wires
-  the probe and evaluator into the executor operation, but `run_server()` and
-  `tools/run_api.py` still perform G2 only, so physical schema drift is still
-  unverified at startup (S5 pending) and no live database verification has been
-  performed. The probe's SQL is reviewed but never executed against a server,
+* **Limitations / not claimed:** no live database verification has been
+  performed. G8 is enforced at startup and offline-verified only: the gate now
+  refuses drift, but the probe's SQL has never been executed against a server,
   and it reads `attgenerated`/`attidentity`, so PostgreSQL 12+ remains an
-  unverified prerequisite. Partitioned tables stay `INDETERMINATE` by owner
-  decision, and how a catalog-read failure maps to the reserved
-  `SCHEMA_CATALOG_UNREADABLE` is left to S5.
+  unverified prerequisite. S6 (audit/documentation completion), S7 (owner-run
+  negative database provisioning) and S8 (separately authorized live read-only
+  verification) remain pending. Partitioned tables stay `INDETERMINATE` and
+  refuse startup by owner decision; prohibited names cover every relation type
+  by owner decision.
 * **Docs:** `DB_DESIGN.md` §3.9 (approved architecture, S1 scope, digest
   maintenance, S2 probe contract, S3 evaluator contract, S4 combined
-  single-connection lifecycle, both final owner decisions, pending stages) and
-  the §3.8 out-of-scope pointer. The §3.7 `G3` migration-hardening entry is
-  deliberately unchanged — G8 is a distinct stage label.
+  single-connection lifecycle, S5 startup gate and decision rules, both final
+  owner decisions, pending stages) and the §3.8 out-of-scope pointer. The §3.7
+  `G3` migration-hardening entry is deliberately unchanged — G8 is a distinct
+  stage label.
 
 ## Step 38 — Phase 3 G2: startup schema compatibility gate (2026-11-08)
 
