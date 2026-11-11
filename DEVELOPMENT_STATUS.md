@@ -3,6 +3,69 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 41 — Phase 4 P4.2: frontend scaffold and design system (2026-11-11)
+
+**The Next.js 16 frontend exists under `frontend/` with the approved design
+tokens and a flash-free light/dark theme. No dashboard screen, navigation shell
+or backend proxy was created, no Python file changed, and no database was
+contacted.**
+
+* **Baseline preserved**: branch `main`, HEAD `55f0dae`, clean tree; the Phase 3
+  backend is untouched and no Git operation was performed at any point.
+* **Dependencies installed (exact pins only)**: `next 16.4.6`, `react 19.3.1`,
+  `react-dom 19.3.1`; `typescript 5.9.3`, `@types/node 24.19.2`,
+  `@types/react 19.3.0`, `@types/react-dom 19.3.0`, `eslint 10.14.0`,
+  `eslint-config-next 16.4.6`, `vitest 5.1.0`, `vite 8.3.8`, `jsdom 31.0.0`,
+  `@testing-library/react 16.3.3`, `@testing-library/dom 10.4.2`,
+  `@testing-library/user-event 14.6.9`. `vite` was pinned to **8.3.8** because
+  Vitest 5 lists it as a required peer (`^6.4 || ^7 || ^8`) and it supports
+  Node 24. `package-lock.json` is written and `npm ci` is the reproducible
+  install.
+* **No `@eslint/eslintrc` needed**: `eslint-config-next@16.4.6` exports a
+  ready-made flat config array (`exports: .`, `./core-web-vitals`,
+  `./typescript`), so `eslint.config.mjs` imports it directly. `next lint` was
+  removed in Next 16, so the `lint` script is `eslint .`.
+* **Design system** (`src/app/globals.css`): dark graphite + teal with a light
+  theme, all colour tokens declared in **both** `:root, [data-theme="dark"]` and
+  `[data-theme="light"]`, plus spacing (`--space-1…8`), typography
+  (`--font-*`, `--text-xs…3xl`, leading/weights), radii, shadows
+  (`--shadow-sm|md|focus`), transitions and a `:focus-visible` ring. Component
+  styling is CSS Modules only — no Tailwind, no UI framework, no icon package.
+* **Theme architecture**: a pre-paint bootstrap script in `<head>` sets
+  `data-theme` and `color-scheme` before first paint (no flash); `data-theme` on
+  `<html>` is the source of truth via an external store (`src/lib/themeStore.ts`)
+  read through `useSyncExternalStore` with a `null` server snapshot (no hydration
+  mismatch); the stored explicit choice wins over `prefers-color-scheme`, and OS
+  changes are followed only while the preference is `system`. Storage and
+  `matchMedia` failures degrade quietly.
+* **Base application**: root layout with a slim brand header and theme toggle
+  (explicitly **not** a navigation shell), a minimal landing placeholder, a
+  `loading.tsx` status region and a sanitized `error.tsx` boundary that shows
+  only Next's opaque digest. Primitives: `Button` (4 variants, 2 sizes) and
+  `ThemeToggle`.
+* **Tests** (`vitest 5` + `jsdom` + Testing Library, no extra dependency):
+  `tests/theme.test.ts` (10), `tests/theme-toggle.test.tsx` (6),
+  `tests/home-page.test.tsx` (2), `tests/design-tokens.test.ts` (38) — **56
+  passed / 56**, including keyboard operation, persistence, stored-value
+  precedence, SSR-safety and dual-theme token coverage.
+* **Verified**: `npm ci` exit 0; `npm ls --depth=0` exit 0 (15 packages, no unmet
+  peers); `npm run lint` exit 0 (0 problems, 14 s); `npm run typecheck` exit 0
+  (9 s, strict); `npm run test` exit 0 (56/56, 12.5 s); `npm run build` exit 0
+  (22 s, static `/` and `/_not-found`).
+* **Fixed during the milestone, not suppressed**: the first lint run raised
+  `react-hooks/set-state-in-effect`; the theme hook was rewritten onto an
+  external store instead of disabling the rule, and one design-token assertion
+  that sliced the stylesheet incorrectly was corrected. No rule was disabled and
+  no test weakened.
+* **Peer note**: `eslint-config-next@16.4.6` bundles `eslint-plugin-react@7.37.5`
+  and `eslint-plugin-jsx-a11y@6.10.2`, whose declared peers stop at ESLint 9.
+  npm resolved them itself (warnings only — no `--force`, no
+  `--legacy-peer-deps`) and lint passes on ESLint 10.14.0.
+* **Not done / not claimed**: no sidebar or navigation, no Overview, Employees,
+  Attendance or System Status screen, no API proxy or typed client, no fixture
+  data, no live backend verification (the G2+G8 startup gate needs PostgreSQL),
+  no auth or RBAC. All of that is P4.3+ and needs separate approval.
+
 ## Step 40 — Phase 3 completion (eight endpoints) and S8 offline verification (2026-11-11)
 
 **All eight approved endpoints are implemented and offline-verified, S8 is

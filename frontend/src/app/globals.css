@@ -1,0 +1,199 @@
+/* ==========================================================================
+   Design tokens — dark graphite + teal.
+   CSS custom properties are the single source of truth: components consume
+   tokens only, and every colour is defined in BOTH theme blocks so a theme
+   switch never leaves an unresolved value.
+   ========================================================================== */
+
+:root {
+  color-scheme: dark light;
+
+  /* Spacing scale (4px base) */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+  --space-8: 4rem;
+
+  /* Typography */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas,
+    "Liberation Mono", monospace;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.5rem;
+  --text-2xl: 2rem;
+  --text-3xl: 2.5rem;
+  --leading-tight: 1.2;
+  --leading-normal: 1.6;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+
+  /* Motion */
+  --transition-fast: 120ms ease;
+  --transition-base: 200ms ease;
+
+  /* Layering */
+  --z-header: 10;
+}
+
+/* Dark theme — the default when no preference has been stored. */
+:root,
+[data-theme="dark"] {
+  --color-bg: #0d1117;
+  --color-bg-raised: #141a22;
+  --color-surface: #161d26;
+  --color-surface-hover: #1c2531;
+  --color-border: #263140;
+  --color-border-strong: #33415a;
+  --color-text: #e6edf6;
+  --color-text-muted: #9aa8bb;
+  --color-text-subtle: #6f7f95;
+  --color-accent: #2dd4bf;
+  --color-accent-hover: #5eead4;
+  --color-accent-contrast: #062b28;
+  --color-focus: #67e8f9;
+  --color-success: #34d399;
+  --color-warning: #fbbf24;
+  --color-danger: #f87171;
+  --color-overlay: rgba(6, 10, 15, 0.72);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --shadow-focus: 0 0 0 3px rgba(45, 212, 191, 0.35);
+}
+
+/* Light theme — every token is overridden, so nothing falls back to dark. */
+[data-theme="light"] {
+  --color-bg: #f5f7fa;
+  --color-bg-raised: #ffffff;
+  --color-surface: #ffffff;
+  --color-surface-hover: #eef2f7;
+  --color-border: #d8e0ea;
+  --color-border-strong: #b9c6d6;
+  --color-text: #101a25;
+  --color-text-muted: #4b5b6e;
+  --color-text-subtle: #6b7b8f;
+  --color-accent: #0f766e;
+  --color-accent-hover: #0d9488;
+  --color-accent-contrast: #f0fdfa;
+  --color-focus: #0e7490;
+  --color-success: #047857;
+  --color-warning: #b45309;
+  --color-danger: #b91c1c;
+  --color-overlay: rgba(15, 23, 42, 0.4);
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.08);
+  --shadow-md: 0 10px 30px rgba(15, 23, 42, 0.1);
+  --shadow-focus: 0 0 0 3px rgba(13, 148, 136, 0.3);
+}
+
+/* ==========================================================================
+   Base layout and element styles
+   ========================================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  transition: background-color var(--transition-base),
+    color var(--transition-base);
+}
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0 0 var(--space-3);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+  letter-spacing: -0.01em;
+}
+
+h1 {
+  font-size: var(--text-3xl);
+}
+
+h2 {
+  font-size: var(--text-xl);
+}
+
+p {
+  margin: 0 0 var(--space-3);
+  color: var(--color-text-muted);
+}
+
+a {
+  color: var(--color-accent);
+  text-underline-offset: 2px;
+}
+
+a:hover {
+  color: var(--color-accent-hover);
+}
+
+code,
+pre {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+}
+
+::selection {
+  background-color: var(--color-accent);
+  color: var(--color-accent-contrast);
+}
+
+/* Keyboard-visible focus for every interactive element. */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  box-shadow: var(--shadow-focus);
+}
+
+@media (max-width: 640px) {
+  h1 {
+    font-size: var(--text-2xl);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

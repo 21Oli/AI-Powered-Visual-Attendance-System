@@ -4,6 +4,33 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 4, P4.2: frontend scaffold and design system
+
+### Added
+
+* `frontend/` — the approved Next.js 16 App Router scaffold: `package.json` with every dependency pinned exactly (`next 16.4.6`, `react`/`react-dom 19.3.1`, `typescript 5.9.3`, `@types/node 24.19.2`, `@types/react`/`@types/react-dom 19.3.0`, `eslint 10.14.0`, `eslint-config-next 16.4.6`, `vitest 5.1.0`, `vite 8.3.8`, `jsdom 31.0.0`, `@testing-library/react 16.3.3`, `@testing-library/dom 10.4.2`, `@testing-library/user-event 14.6.9`), a committed `package-lock.json`, `tsconfig.json` (strict), `next.config.ts`, `eslint.config.mjs`, `vitest.config.mts` and `README.md`.
+* `frontend/src/app/globals.css`: the design system as CSS custom properties — dark graphite + teal, a light theme that overrides every colour token, spacing, typography, radii, shadows, focus and transition tokens, a global `:focus-visible` ring and reduced-motion support. Every colour token is declared in both theme blocks.
+* `frontend/src/lib/theme.ts`: framework-free theme primitives (`isTheme`, `parseThemePreference`, `resolveTheme`, `otherTheme`, `applyTheme`, `readStoredPreference`, `writeStoredPreference`, `systemPrefersDark`) plus `THEME_INIT_SCRIPT`, the pre-paint bootstrap that applies the stored or system theme before first paint so there is no flash.
+* `frontend/src/lib/themeStore.ts` and `frontend/src/hooks/useTheme.ts`: the applied theme lives on `<html>` behind an external store read with `useSyncExternalStore` and a `null` server snapshot — no hydration mismatch, no effect-driven `setState`, OS changes followed only while the preference is `system`.
+* `frontend/src/app/{layout,page,loading,error}.tsx` with their CSS Modules: a root layout carrying the theme bootstrap and a slim brand header, a landing placeholder that claims no dashboard functionality, a `loading.tsx` status region, and a sanitized `error.tsx` boundary that renders only Next's opaque digest.
+* `frontend/src/components/ui/{Button,ThemeToggle}.tsx`: the design-system primitives — a four-variant, two-size button and an accessible, keyboard-operable theme toggle whose pre-mount label is stable.
+* `frontend/tests/` — 56 tests over four suites (`theme.test.ts` 10, `theme-toggle.test.tsx` 6, `home-page.test.tsx` 2, `design-tokens.test.ts` 38) covering resolution precedence, persistence, keyboard operation, SSR safety and dual-theme token coverage.
+* `docs/PHASE4_IMPLEMENTATION_PLAN.md`: the milestone roadmap (P4.1–P4.9) with the approved dependency set, delivered structure, token inventory, theme architecture, verification results and remaining constraints.
+
+### Changed
+
+* `docs/PHASE4_DASHBOARD_PROPOSAL.md`: rewritten from "proposal only, nothing installed" to the approved direction actually implemented — Next 16.4.6 / React 19.3.1 / TypeScript 5.9.3 / ESLint 10 flat config / Vitest + jsdom + Testing Library, the `frontend/` + `src/app/` layout, the verified Node 24.21.0 runtime, and the verified API contract facts (keyset employee paging, no attendance pagination, no employee name in events, bodiless checkout).
+* `DEVELOPMENT_STATUS.md`: added Step 41 recording the P4.2 scaffold, exact versions, theme architecture, measured checks and what remains unbuilt.
+
+### Fixed
+
+* `frontend/src/hooks/useTheme.ts`: the initial implementation set state inside an effect, which the `react-hooks/set-state-in-effect` rule rejects; it was replaced with the external-store pattern rather than suppressing the rule.
+
+### Notes
+
+* `vite` was pinned to **8.3.8**, the version satisfying Vitest 5's required peer range (`^6.4 || ^7 || ^8`) on Node 24. `@eslint/eslintrc` was **not** needed: `eslint-config-next` 16 exports a flat config array directly.
+* Verified: `npm ci`, `npm ls --depth=0`, `npm run lint`, `npm run typecheck`, `npm run test` (56/56) and `npm run build` all exit 0. No backend, database, biometric access or Git operation occurred; no dashboard screen, navigation or proxy was built.
+
 ## [Unreleased] — Phase 3, Step 40: eight implemented endpoints and S8 offline verification
 
 ### Added

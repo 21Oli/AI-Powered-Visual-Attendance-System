@@ -1,0 +1,15 @@
+# Frontend build artefacts and dependencies
+node_modules/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+
+# Local environment files (never commit secrets or backend URLs)
+.env
+.env.*
+!.env.example
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
