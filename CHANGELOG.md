@@ -4,6 +4,32 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 4, P4.3: application shell and navigation
+
+### Added
+
+* `frontend/src/app/(dashboard)/` — the dashboard route group with one shared layout: `/overview`, `/employees`, `/attendance` and `/system-status`, each rendering a clearly labelled structural placeholder, plus `src/app/not-found.tsx` for unmatched paths.
+* `frontend/src/components/layout/` — `AppShell` (skip link, sidebar, header, drawer, `<main id="main-content">`), `Sidebar` (persistent desktop navigation with `aria-current="page"`), `Header` (menu trigger with `aria-expanded`/`aria-controls`, current-area label, theme toggle), `MobileNavigation` (modal drawer with scrim, close button, Escape and close-on-navigation) and `PagePlaceholder`, each with a CSS Module.
+* `frontend/src/components/icons/NavIcon.tsx` — four inline SVG icons drawn with `currentColor` strokes, replacing the need for an icon package.
+* `frontend/src/lib/navigation.ts` — the single source of truth for navigation: `NAV_ITEMS`, `DEFAULT_ROUTE`, `isActivePath` (exact or nested path, never a bare prefix) and `findNavItem`.
+* `frontend/tests/` — four new suites: `navigation.test.ts`, `app-shell.test.tsx`, `mobile-navigation.test.tsx` and `routes.test.tsx`, covering landmarks, all four links and their hrefs, active state, skip link, the root redirect, every placeholder route, `aria-expanded`/`aria-controls`, focus movement, Escape, scrim dismissal and a full keyboard path.
+
+### Changed
+
+* `frontend/src/app/page.tsx`: the landing placeholder is replaced by a redirect to `DEFAULT_ROUTE` (`/overview`), so the root is never a shell without a selected area.
+* `frontend/src/app/layout.tsx`: reduced to document structure — `<html>`, the pre-paint theme bootstrap and `<body>` — with a metadata title template; the header and `<main>` moved into the shell, and page metadata now supplies the area name.
+* `frontend/README.md`, `docs/PHASE4_IMPLEMENTATION_PLAN.md`, `DEVELOPMENT_STATUS.md`: document the routes, the shell, the accessibility behaviour and the P4.3 verification results.
+
+### Removed
+
+* `frontend/src/app/layout.module.css`, `frontend/src/app/page.module.css` and `frontend/tests/home-page.test.tsx` — superseded by the application shell and the routes it hosts. The P4.2 theme and design-token suites are untouched.
+
+### Notes
+
+* No dependency was added, upgraded or removed (15 packages, `npm ls --depth=0` exit 0). Verified: lint exit 0 (0 problems), typecheck exit 0, **85 tests passed / 85 in 7 suites** (up from 56), and `next build` exit 0 with six static routes.
+* Two failures were fixed in implementation rather than by weakening checks: `jest-dom`-only matchers (not in the approved stack) were replaced with plain DOM assertions, and a keyboard test now asserts the real tab order instead of assuming jsdom applies media queries.
+* No backend, database, secret, camera or biometric access, and no Git operation. No dashboard data, proxy or authentication was implemented.
+
 ## [Unreleased] — Phase 4, P4.2: frontend scaffold and design system
 
 ### Added

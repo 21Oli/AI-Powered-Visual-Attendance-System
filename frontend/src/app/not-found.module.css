@@ -1,0 +1,36 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  max-width: 34rem;
+  margin: var(--space-8) auto;
+  padding: var(--space-6);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.code {
+  margin: 0;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.08em;
+  color: var(--color-accent);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--text-xl);
+}
+
+.text {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.link {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}

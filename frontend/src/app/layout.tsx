@@ -1,13 +1,14 @@
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 
-import { ThemeToggle } from "../components/ui/ThemeToggle";
 import { THEME_INIT_SCRIPT } from "../lib/theme";
 import "./globals.css";
-import styles from "./layout.module.css";
 
 export const metadata: Metadata = {
-  title: "Visual Attendance — Dashboard",
+  title: {
+    default: "Visual Attendance — Dashboard",
+    template: "%s — Visual Attendance",
+  },
   description:
     "Operator dashboard for the AI-Powered Visual Attendance System (Phase 4).",
 };
@@ -30,16 +31,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         */}
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
       </head>
-      <body>
-        <header className={styles.header}>
-          <span className={styles.brand}>
-            <span className={styles.mark} aria-hidden="true" />
-            <span className={styles.brandText}>Visual Attendance</span>
-          </span>
-          <ThemeToggle />
-        </header>
-        <main className={styles.main}>{children}</main>
-      </body>
+      <body>{children}</body>
     </html>
   );
 }

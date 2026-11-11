@@ -3,6 +3,56 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 42 — Phase 4 P4.3: application shell and navigation (2026-11-11)
+
+**The dashboard now has a shared shell (sidebar, header, mobile drawer, skip
+link) and four addressable dashboard routes as structural placeholders. No API
+client, proxy, fixture or backend call exists, no Python file changed, and no
+database was contacted.**
+
+* **Baseline preserved**: branch `main`, HEAD `e3ead4d` (P4.2, clean tree); the
+  theme system, design tokens and `Button`/`ThemeToggle` were reused unchanged,
+  and no Git operation was performed.
+* **Routes** (`src/app/(dashboard)/`, one shared layout): `/` redirects to
+  `/overview`; `/overview`, `/employees`, `/attendance`, `/system-status` render
+  `PagePlaceholder`; unmatched paths render a `not-found` page. All six routes
+  are statically prerendered, directly addressable and work with browser
+  history.
+* **Shell** (`src/components/layout/`): `AppShell` (skip link, sidebar, header,
+  drawer, `<main id="main-content">`), `Sidebar` (persistent ≥900 px,
+  `aria-current="page"`), `Header` (menu trigger with `aria-expanded` /
+  `aria-controls`, current-area label, theme toggle), `MobileNavigation` (modal
+  drawer with scrim, close button, Escape, close-on-navigation), and
+  `PagePlaceholder`. Icons are inline SVGs (`NavIcon`) — no icon package.
+* **Single source of truth**: `src/lib/navigation.ts` (`NAV_ITEMS`,
+  `DEFAULT_ROUTE`, `isActivePath`, `findNavItem`) feeds the sidebar, the drawer,
+  the header label and the tests. `isActivePath` matches exact and nested paths
+  but not a bare prefix (`/employees-archive` is not `/employees`).
+* **Focus and keyboard behaviour**: focus moves to the drawer's close button on
+  open, returns to the trigger on explicit close and on Escape, and is not
+  stolen after a link navigation. The drawer unmounts when closed, so its links
+  are never focusable while hidden. Skip link reveals on focus.
+* **Tests**: `navigation.test.ts` (7), `app-shell.test.tsx` (7),
+  `mobile-navigation.test.tsx` (8), `routes.test.tsx` (9) — **85 passed / 85 in
+  7 suites**, up from 56. The P4.2 theme and design-token suites are unchanged
+  and still pass; `tests/home-page.test.tsx` was retired with the landing page it
+  tested, replaced by the root-redirect and route suites.
+* **Verified**: `npm ls --depth=0` exit 0 (15 packages, unchanged);
+  `npm run lint` exit 0 (0 problems); `npm run typecheck` exit 0 (strict);
+  `npm run test` exit 0 (85/85, 21.9 s); `npm run build` exit 0 with static `/`,
+  `/_not-found`, `/attendance`, `/employees`, `/overview`, `/system-status`.
+* **Fixed, not suppressed**: typecheck rejected two `jest-dom` matchers the
+  approved stack does not provide (replaced with plain `getAttribute` assertions),
+  and the keyboard-path test asserted the wrong tab order because jsdom does not
+  apply the sidebar's media query (now asserts the real document order). No rule
+  disabled, no test weakened, no dependency added.
+* **Removed**: `src/app/layout.module.css`, `src/app/page.module.css` and
+  `tests/home-page.test.tsx`, all superseded by the shell.
+* **Not done / not claimed**: no overview metrics or charts, no employee CRUD, no
+  attendance table or checkout control, no health integration, no API client, no
+  proxy, no fixtures, no authentication. Responsive layout is CSS plus component
+  tests only — no browser was driven at 360/768/1280 px.
+
 ## Step 41 — Phase 4 P4.2: frontend scaffold and design system (2026-11-11)
 
 **The Next.js 16 frontend exists under `frontend/` with the approved design

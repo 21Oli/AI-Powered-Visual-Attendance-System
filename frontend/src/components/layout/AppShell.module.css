@@ -1,0 +1,55 @@
+.shell {
+  display: flex;
+  min-height: 100dvh;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+}
+
+.skipLink {
+  position: fixed;
+  top: var(--space-2);
+  left: var(--space-2);
+  z-index: 100;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background-color: var(--color-accent);
+  color: var(--color-accent-contrast);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  text-decoration: none;
+  transform: translateY(-200%);
+  transition: transform var(--transition-fast);
+}
+
+.skipLink:focus-visible {
+  transform: translateY(0);
+}
+
+.column {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.main {
+  flex: 1;
+  padding: var(--space-5) var(--space-4) var(--space-7);
+}
+
+/* The skip link focuses <main>; the focus ring would trace the whole region. */
+.main:focus {
+  outline: none;
+}
+
+.content {
+  width: 100%;
+  max-width: 68rem;
+  margin: 0 auto;
+}
+
+@media (min-width: 900px) {
+  .main {
+    padding: var(--space-6) var(--space-6) var(--space-8);
+  }
+}
