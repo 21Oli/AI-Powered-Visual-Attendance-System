@@ -3,6 +3,69 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 43 — Phase 4 P4.4: typed API client, proxy, fixtures and Overview (2026-11-11)
+
+**The Overview is functional and reads through a same-origin proxy that allows
+exactly the eight published routes. No Python file changed, no database was
+contacted, and nothing was verified against a live backend.**
+
+* **Baseline preserved**: branch `main`, HEAD `3d575d3` (P4.3, clean tree); the
+  shell, navigation, theme system and design tokens were reused unchanged.
+* **Contract verified from source** (`src/api.py`, `src/api_service.py`,
+  `src/attendance.py`, `src/employee.py`), correcting two assumptions: event
+  types are lowercase `check_in` / `check_out`, and the employee-list `count` is
+  the **page length**, not a total. Also confirmed: `occurred_at`/`created_at` are
+  UTC ISO-8601 via `isoformat()`, `created_at` is **nullable**, attendance has no
+  pagination, checkout takes no body.
+* **Typed transport** (`src/lib/api/`): `types.ts` (interfaces + `parse*`
+  validators), `errors.ts` (`ApiError` with `network`/`http`/`malformed`/
+  `unknown`), `client.ts` (one URL builder, envelope parsing, abort support),
+  `employees.ts` (keyset paging with repeated-cursor and page-limit guards),
+  `attendance.ts` (whole journal).
+* **Proxy** (`src/app/api/backend/[...path]/route.ts` over
+  `src/lib/server/proxy.ts`): the eight-pair allowlist; identifiers must be
+  non-empty, ≤128 chars, trimmed, not `.`/`..`, and free of `/ \\ ? # %` and
+  control characters, then re-encoded once; only `after`/`limit` are accepted and
+  only on the employee list; bodies forwarded only for the two write routes
+  (≤4 KiB) and never for checkout; `redirect: "manual"` so a 3xx yields
+  `502 BACKEND_REDIRECT_REFUSED`; `BACKEND_BASE_URL` validated as a bare http(s)
+  origin with no credentials/query/fragment/path; sanitized
+  `502`/`504`/`500` failures that never expose the origin or a stack trace; no
+  CORS added and `cache-control: no-store`.
+* **Fixtures** (`src/lib/fixtures/overview-fixtures.ts`, `data-source.ts`): six
+  synthetic employees and a synthetic journal that match the contract exactly
+  (including a `null` `created_at`); enabled only when
+  `NODE_ENV === "development"` **and** `DASHBOARD_DATA_MODE=fixtures`, resolved
+  server-side on a `force-dynamic` page; the UI shows a persistent
+  `FIXTURE DATA — DEVELOPMENT ONLY` banner; no code path falls back from a failed
+  live request to fixtures.
+* **Metrics** (`src/lib/dashboard/overview.ts`): total employees counted across
+  every keyset page (never from the page `count`), active from `is_active`,
+  events on the current **UTC** day (labelled `(UTC)`), open sessions folded to
+  the latest event per employee by `(occurred_at, journal position)` with ties to
+  the later position, and `incomplete_trailing_record` surfaced as a warning.
+  Undated and unknown-type events are excluded and disclosed. No rate, trend,
+  score, prediction or chart exists.
+* **States**: loading, real empty zeroes, per-section error panels with the
+  sanitized message, API code and a keyboard Retry, header Refresh, independent
+  employee/attendance failure so one section never hides the other, and a
+  persistent fixture banner.
+* **Tests**: +99 across `proxy.test.ts`, `api-client.test.ts`, `fixtures.test.ts`,
+  `overview-metrics.test.ts`, `overview.test.tsx` and the updated
+  `routes.test.tsx` → **184 passed / 184 in 12 suites** (from 85).
+* **Verified**: `npm ls --depth=0` exit 0 (15 packages, unchanged);
+  `npm run lint` exit 0 (0 problems); `npm run typecheck` exit 0 (strict);
+  `npm run test` exit 0 (184/184, ~32 s); `npm run build` exit 0 with static `/`,
+  `/_not-found`, `/attendance`, `/employees`, `/system-status` and dynamic
+  `/overview` and `/api/backend/[...path]`.
+* **Fixed, not suppressed**: three first-run test failures were corrections of
+  wrong assumptions (two cards legitimately share a number; the page does not own
+  the theme; Next hands the handler decoded segments). No rule disabled, no test
+  weakened, no dependency added.
+* **Not done / not claimed**: no employee CRUD, attendance table, checkout
+  control or health widget; no live backend or browser verification (the G2+G8
+  startup gate needs PostgreSQL); no authentication. P4.5+ not started.
+
 ## Step 42 — Phase 4 P4.3: application shell and navigation (2026-11-11)
 
 **The dashboard now has a shared shell (sidebar, header, mobile drawer, skip

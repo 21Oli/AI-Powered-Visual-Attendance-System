@@ -4,6 +4,30 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 4, P4.4: typed API client, secure proxy, fixtures and Overview
+
+### Added
+
+* `frontend/src/lib/api/` — the typed contract layer: `types.ts` (interfaces plus `parse*` runtime validators for employees, employee pages, attendance, health and the error envelope, including the nullable `created_at`, the page-length `count` and the top-level `fields` array), `errors.ts` (`ApiError` distinguishing `network`, `http`, `malformed` and `unknown`), `client.ts` (one same-origin URL builder, envelope parsing, abort support), `employees.ts` (keyset paging that follows `next_after`, asks for 100 per page and refuses a repeated cursor or an over-long walk) and `attendance.ts` (the whole journal, with no invented pagination).
+* `frontend/src/app/api/backend/[...path]/route.ts` plus `frontend/src/lib/server/proxy.ts` — the same-origin proxy: an allowlist of exactly the eight published method/path pairs, identifier validation and single re-encoding, `after`/`limit` as the only accepted query, bodies only for the two write routes (≤4 KiB) and never for checkout, `redirect: "manual"` so a redirect becomes a sanitized `502`, validated bare-origin `BACKEND_BASE_URL`, and sanitized `502`/`504`/`500` failures that expose neither the origin nor a stack trace. No CORS is added and responses are `no-store`.
+* `frontend/src/lib/fixtures/overview-fixtures.ts` and `frontend/src/lib/api/data-source.ts` — development-only synthetic data (six employees, a journal with open and closed sessions and an incomplete trailer) that matches the contract exactly, enabled only by `NODE_ENV=development` plus `DASHBOARD_DATA_MODE=fixtures`, resolved on the server so production builds and browsers cannot enable it.
+* `frontend/src/lib/dashboard/overview.ts` — pure metric calculations: totals across all pages, active count, UTC-day event count, latest-event session folding with deterministic tie-breaking, and exclusion/counting of undated and unclassified events.
+* `frontend/src/components/dashboard/{OverviewDashboard,MetricCard}` — the functional Overview: four derived figures, a persistent `FIXTURE DATA — DEVELOPMENT ONLY` banner, a journal-integrity warning, loading/empty/error/partial states, keyboard-operable Retry and Refresh, and no fabricated rate, trend, score or chart.
+* Tests: `proxy.test.ts`, `api-client.test.ts`, `fixtures.test.ts`, `overview-metrics.test.ts` and `overview.test.tsx` — 99 new tests covering the allowlist and its refusals, redirect and timeout handling, envelope mapping, fixture gating and production refusal, pagination guards, UTC boundaries, session folding and every Overview state.
+
+### Changed
+
+* `frontend/src/app/(dashboard)/overview/page.tsx`: the placeholder became the functional dashboard. The page is `force-dynamic` and resolves the data-source kind on the server, so fixture mode can never be enabled by the client.
+* `frontend/tests/routes.test.tsx`: the Overview placeholder assertions were replaced by checks that the route renders the functional dashboard, with fixture mode off by default. The Employees, Attendance and System Status placeholder checks are unchanged.
+* `frontend/README.md`, `docs/PHASE4_IMPLEMENTATION_PLAN.md`, `docs/PHASE4_DASHBOARD_PROPOSAL.md`, `DEVELOPMENT_STATUS.md`: document the API layer, proxy policy, fixture gating, metric definitions and the P4.4 results.
+
+### Notes
+
+* Contract facts were read from the backend source, not assumed: event types are lowercase `check_in`/`check_out`, timestamps are UTC ISO-8601, `created_at` is nullable, the employee-list `count` is the page length, and attendance has no pagination.
+* No dependency was added, upgraded or removed (15 packages, `npm ls --depth=0` exit 0). Verified: lint exit 0 (0 problems), typecheck exit 0, **184 tests passed / 184 in 12 suites** (from 85), and `next build` exit 0 with dynamic `/overview` and `/api/backend/[...path]`.
+* Nothing was verified against a live backend: the FastAPI G2+G8 startup gate requires PostgreSQL, so all evidence comes from mocked responses and development fixtures. No browser was driven.
+* No backend, database, secret, camera or biometric access, and no Git operation. P4.5 and later were not started.
+
 ## [Unreleased] — Phase 4, P4.3: application shell and navigation
 
 ### Added

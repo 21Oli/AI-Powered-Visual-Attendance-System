@@ -3,10 +3,11 @@
 Next.js 16 (App Router) + TypeScript + CSS Modules dashboard for the
 AI-Powered Visual Attendance System.
 
-**Status: P4.3 complete — application shell and navigation.**
-The four dashboard areas exist as structural placeholders inside a shared shell.
-No employee data, attendance data, health results or backend calls exist yet;
-those arrive in P4.4–P4.8 and require owner approval at each milestone.
+**Status: P4.4 complete — typed API client, secure proxy, fixtures and the
+functional Overview.**
+Employees, Attendance and System Status remain structural placeholders (P4.5–P4.7).
+No live backend has been verified: the FastAPI startup gate requires PostgreSQL,
+which this phase is not authorized to connect to.
 
 ---
 
@@ -25,8 +26,45 @@ npm ci            # reproducible install from package-lock.json
 npm run dev       # http://localhost:3000 → redirects to /overview
 ```
 
-`npm install` also works, but `npm ci` is preferred because every version is
-pinned exactly (no `^` or `~` ranges).
+### Backend configuration (server-only)
+
+The Overview reads through the same-origin proxy, which needs one **server-side**
+variable:
+
+```bash
+# frontend/.env.local  (git-ignored — never commit it)
+BACKEND_BASE_URL=http://127.0.0.1:8000
+```
+
+Rules the code enforces:
+
+* `BACKEND_BASE_URL` is read only by the Route Handler. There is no
+  `NEXT_PUBLIC_BACKEND_BASE_URL` anywhere, and the browser never receives the
+  value.
+* It must be an absolute `http(s)` **origin**: credentials, query, fragment and
+  path are refused, and an invalid or missing value produces a sanitized
+  `503 BACKEND_NOT_CONFIGURED` / `BACKEND_CONFIGURATION_INVALID` instead of a
+  guessed destination.
+* Without it, the Overview shows a real unavailable state — never fixture data.
+
+### Development fixtures (optional)
+
+Offline UI work uses synthetic data that can only be enabled on the server in a
+development build:
+
+```bash
+# frontend/.env.local
+DASHBOARD_DATA_MODE=fixtures
+```
+
+* Requires **both** `NODE_ENV === "development"` and the exact
+  `DASHBOARD_DATA_MODE=fixtures` value; in a production build fixture mode is
+  impossible whatever the variable says.
+* The Overview shows a persistent `FIXTURE DATA — DEVELOPMENT ONLY` banner, and
+  the data source kind is passed from the server so the UI can label it.
+* There is **no** fallback path from a failed live request to fixtures: a failing
+  backend yields an error state.
+* Remove the variable (or set it to anything else) to return to the live proxy.
 
 ## Scripts
 
@@ -35,9 +73,9 @@ pinned exactly (no `^` or `~` ranges).
 | `dev` | `next dev` | development server |
 | `build` | `next build` | production build |
 | `start` | `next start` | serve the production build |
-| `lint` | `eslint .` | ESLint flat config (`next lint` was removed in Next 16) |
-| `typecheck` | `tsc --noEmit` | strict TypeScript, no emit |
-| `test` | `vitest run` | unit + component tests (jsdom) |
+| `lint` | `eslint .` | ESLint flat config |
+| `typecheck` | `tsc --noEmit` | strict TypeScript |
+| `test` | `vitest run` | unit, proxy and component tests |
 | `test:watch` | `vitest` | watch mode |
 
 ## Routes
@@ -45,58 +83,127 @@ pinned exactly (no `^` or `~` ranges).
 | Route | Area | State |
 |---|---|---|
 | `/` | — | redirects to `/overview` |
-| `/overview` | Overview | structural placeholder |
+| `/overview` | Overview | **functional** (dynamic) |
 | `/employees` | Employees | structural placeholder |
 | `/attendance` | Attendance | structural placeholder |
 | `/system-status` | System Status | structural placeholder |
-| any other path | — | `not-found` page with a link back to Overview |
+| `/api/backend/[...path]` | — | **proxy** (dynamic, server-only) |
+| any other path | — | `not-found` |
 
-Every dashboard route lives in the `src/app/(dashboard)/` route group, so the
-sidebar, header and mobile drawer are rendered once by `(dashboard)/layout.tsx`
-instead of being duplicated per page. Routes are directly addressable and work
-with browser back/forward; `next/link` handles internal navigation.
-
-## Application shell
+## API architecture
 
 ```text
-┌───────────────┬────────────────────────────────────────┐
-│ Sidebar       │ Header: section label · theme toggle    │
-│ (≥900px)      ├────────────────────────────────────────┤
-│ brand         │ main                                   │
-│ Primary nav   │   route content                        │
-└───────────────┴────────────────────────────────────────┘
+Browser
+  │  same-origin fetch, no backend origin, no credentials in the bundle
+  ▼
+OverviewDashboard (client component)
+  ▼
+src/lib/api/client.ts        typed JSON transport, response validation
+  ▼
+/api/backend/[...path]       Route Handler: allowlist + policy
+  ▼
+BACKEND_BASE_URL             server-only env
+  ▼
+FastAPI (loopback)  →  PostgreSQL / JSONL journal
 ```
 
-* **`AppShell`** owns the layout and the only client state: whether the mobile
-  drawer is open. It renders the skip link, sidebar, header, drawer and `<main>`.
-* **`Sidebar`** is the persistent desktop navigation (hidden below 900 px).
-  Active state comes from `isActivePath()`, and the current link carries
-  `aria-current="page"` — colour is never the only signal.
-* **`Header`** holds the mobile menu trigger (`aria-expanded`, `aria-controls`),
-  the current area label and the existing `ThemeToggle`. It is not a heading: the
-  page owns the single `<h1>`.
-* **`MobileNavigation`** is the narrow-screen drawer: a modal `dialog` with a
-  scrim, closing on the close button, the scrim, Escape, or selecting a link.
-* **`PagePlaceholder`** renders a route's title, purpose and planned work — and
-  states plainly that it is structural.
+| Module | Responsibility |
+|---|---|
+| `src/lib/api/types.ts` | response interfaces + `parse*` runtime validators |
+| `src/lib/api/errors.ts` | `ApiError` (`network` / `http` / `malformed` / `unknown`) |
+| `src/lib/api/client.ts` | single URL builder, fetch, JSON + envelope parsing |
+| `src/lib/api/employees.ts` | keyset paging, full-collection walk |
+| `src/lib/api/attendance.ts` | the whole journal (the API has no paging) |
+| `src/lib/api/data-source.ts` | live vs fixture source, resolved server-side |
+| `src/lib/dashboard/overview.ts` | pure metric calculations |
+| `src/lib/server/proxy.ts` | allowlist, id/query validation, upstream URL |
+| `src/app/api/backend/[...path]/route.ts` | thin Route Handler adapter |
 
-Navigation is defined once in `src/lib/navigation.ts` (`NAV_ITEMS`,
-`DEFAULT_ROUTE`, `isActivePath`, `findNavItem`); the sidebar, drawer, header label
-and tests all read from it, so a route cannot drift between them. Icons are
-inline SVGs in `src/components/icons/NavIcon.tsx` — no icon package.
+### Proxy allowlist
 
-### Accessibility
+Exactly the eight published method/path pairs — nothing else is reachable:
 
-* Landmarks: `banner`, `navigation` (named "Primary" and "Mobile"), `main`.
-* Skip link to `#main-content`, revealed on focus.
-* `aria-current="page"` on the active link in both navigation surfaces.
-* Menu trigger exposes `aria-expanded` and `aria-controls`; the drawer has a
-  matching `id`, `role="dialog"`, `aria-modal` and an accessible name.
-* Focus moves to the drawer's close button on open, returns to the trigger on
-  explicit close and on Escape, and is not stolen after link navigation.
-* The drawer unmounts when closed, so its links are never reachable while hidden.
-* Visible `:focus-visible` rings everywhere, reduced-motion honoured globally,
-  and every colour comes from tokens defined in both themes.
+```
+GET   /api/v1/health
+POST  /api/v1/employees
+GET   /api/v1/employees
+GET   /api/v1/employees/{employee_id}
+PATCH /api/v1/employees/{employee_id}
+POST  /api/v1/employees/{employee_id}/deactivate
+GET   /api/v1/attendance
+POST  /api/v1/attendance/{employee_id}/checkout
+```
+
+Security behaviour:
+
+* **No client-chosen destination.** The upstream URL is rebuilt from the matched
+  route plus the validated base origin, so a query or header cannot redirect it.
+* **Identifier safety.** A segment must be non-empty, ≤128 chars, trimmed, not
+  `.`/`..`, and free of `/`, `\`, `?`, `#`, `%` and control characters; it is
+  re-encoded exactly once when forwarded.
+* **Query policy.** Only `after` and `limit` are accepted, and only on the
+  employee list; `limit` must be a positive integer ≤ 4 digits. Every other
+  route rejects any query parameter.
+* **Body policy.** A body is forwarded only for `POST /employees` and
+  `PATCH /employees/{id}`, capped at 4 KiB. Checkout never gets a body, even if
+  one is supplied.
+* **Redirects are never followed** (`redirect: "manual"`); a 3xx becomes
+  `502 BACKEND_REDIRECT_REFUSED`, so traffic cannot leave the trusted origin.
+* **Failures are sanitized**: `502 BACKEND_UNAVAILABLE`, `504 BACKEND_TIMEOUT`,
+  `502 BACKEND_EMPTY_RESPONSE`, `500 PROXY_INTERNAL_ERROR` — no upstream URL,
+  stack trace, driver message or payload is returned or logged.
+* **No CORS headers** are added and no data is cached (`cache-control: no-store`).
+
+## Overview metric definitions
+
+| Metric | Derivation |
+|---|---|
+| **Total employees** | Every keyset page is fetched (`limit=100`, following `next_after` until `null`) and the records counted. The response `count` is only the page length, so it is never treated as a total. |
+| **Active employees** | The same records, counted where `is_active === true`. Nothing else implies activity. |
+| **Events today (UTC)** | Journal events whose `occurred_at` falls on the current **UTC** calendar day. Labelled `(UTC)` because it is not the viewer's local day. |
+| **Open sessions** | The journal is folded to one latest event per employee by `(occurred_at, journal position)`; an employee counts when that event is `check_in`. Ties go to the later journal position, matching the backend's own rule. |
+| **Journal integrity** | `incomplete_trailing_record` from the attendance response, surfaced as a warning. The journal is never repaired or rewritten. |
+
+Deliberately absent: attendance rate, trends, accuracy, productivity scores,
+predictions, rankings, charts. The API exposes journal events and employee
+records; nothing else is invented.
+
+Pagination safeguards: a repeated cursor throws `PAGINATION_CURSOR_REPEATED` and
+an over-long walk throws `PAGINATION_LIMIT_REACHED`, so a partial collection is
+never displayed as a total. An unreadable page fails the whole metric.
+
+## States
+
+* **Loading** — each card shows `Loading…`; a `role="status"` region announces it.
+* **Empty** — real zeroes with an explanation ("No employees are registered yet").
+* **Error** — a labelled panel with the sanitized message, the API code and a
+  keyboard-operable **Retry**; the header also offers **Refresh**.
+* **Partial failure** — employees and attendance load independently, so one
+  failing section shows `Unavailable` while the other still reports real values.
+* **Fixture** — persistent `FIXTURE DATA — DEVELOPMENT ONLY` banner.
+
+## Structure
+
+```text
+frontend/src/
+├── app/
+│   ├── (dashboard)/{layout.tsx, overview/, employees/, attendance/, system-status/}
+│   ├── api/backend/[...path]/route.ts        # proxy
+│   ├── layout.tsx, page.tsx, loading.tsx, error.tsx, not-found.tsx, globals.css
+├── components/
+│   ├── dashboard/{OverviewDashboard,MetricCard} + CSS Modules
+│   ├── layout/{AppShell,Sidebar,Header,MobileNavigation,PagePlaceholder}
+│   ├── icons/NavIcon.tsx
+│   └── ui/{Button,ThemeToggle}
+├── hooks/useTheme.ts
+├── lib/
+│   ├── api/{types,errors,client,employees,attendance,data-source}.ts
+│   ├── dashboard/overview.ts
+│   ├── fixtures/overview-fixtures.ts
+│   ├── server/proxy.ts
+│   └── navigation.ts, theme.ts, themeStore.ts
+└── tests/
+```
 
 ## Dependencies (exact pins)
 
@@ -107,70 +214,8 @@ Development: `typescript 5.9.3`, `@types/node 24.19.2`, `@types/react 19.3.0`,
 `vitest 5.1.0`, `vite 8.3.8`, `jsdom 31.0.0`, `@testing-library/react 16.3.3`,
 `@testing-library/dom 10.4.2`, `@testing-library/user-event 14.6.9`.
 
-P4.3 added **no** dependency: no icon library, drawer package, router package,
-state library, CSS framework or UI kit.
-
-## Structure
-
-```text
-frontend/
-├── public/{icons,images}/
-├── src/
-│   ├── app/
-│   │   ├── layout.tsx               # <html>, theme bootstrap, globals
-│   │   ├── page.tsx                 # redirect → /overview
-│   │   ├── loading.tsx              # route loading state
-│   │   ├── error.tsx                # sanitized error boundary
-│   │   ├── not-found.tsx            # 404 with a way back
-│   │   ├── globals.css              # design tokens + base styles
-│   │   └── (dashboard)/
-│   │       ├── layout.tsx           # renders <AppShell>
-│   │       ├── overview/page.tsx
-│   │       ├── employees/page.tsx
-│   │       ├── attendance/page.tsx
-│   │       └── system-status/page.tsx
-│   ├── components/
-│   │   ├── icons/NavIcon.tsx
-│   │   ├── layout/{AppShell,Sidebar,Header,MobileNavigation,PagePlaceholder}
-│   │   │   + matching .module.css
-│   │   └── ui/{Button,ThemeToggle} + matching .module.css
-│   ├── hooks/useTheme.ts
-│   ├── lib/{navigation.ts,theme.ts,themeStore.ts}
-│   ├── styles/                      # reserved for shared sheets
-│   └── types/                       # reserved for API contract types (P4.8)
-├── tests/
-├── eslint.config.mjs
-├── next.config.ts
-├── tsconfig.json
-├── vitest.config.mts
-└── package.json
-```
-
-## Design tokens
-
-Tokens live in `src/app/globals.css` and are consumed by CSS Modules; no
-component hard-codes a colour.
-
-* Colour: `--color-bg`, `-bg-raised`, `-surface`, `-surface-hover`, `-border`,
-  `-border-strong`, `-text`, `-text-muted`, `-text-subtle`, `-accent` (teal),
-  `-accent-hover`, `-accent-contrast`, `-focus`, `-success`, `-warning`,
-  `-danger`, `-overlay`.
-* Spacing `--space-1…8`; radii `--radius-sm|md|lg|pill`; typography
-  `--font-sans|mono`, `--text-xs…3xl`, leading/weights; depth
-  `--shadow-sm|md|focus`; motion `--transition-fast|base`; `--z-header`.
-
-Every colour token is declared in both `:root, [data-theme="dark"]` and
-`[data-theme="light"]`; a test fails if either block loses one.
-
-## Theme implementation
-
-1. **Pre-paint bootstrap** (`THEME_INIT_SCRIPT`, injected in `layout.tsx`):
-   applies the stored or system theme to `<html>` before first paint — no flash.
-2. **External store** (`src/lib/themeStore.ts`): the document is the source of
-   truth; OS changes are followed only while the preference is `system`.
-3. **Hook** (`src/hooks/useTheme.ts`): `useSyncExternalStore` with a `null`
-   server snapshot, so there is no hydration mismatch and no effect-driven
-   `setState`.
+P4.4 added **no** dependency: no data-fetching, validation, charting, icon or
+state library.
 
 ## Tests
 
@@ -178,17 +223,17 @@ Every colour token is declared in both `:root, [data-theme="dark"]` and
 npm run test
 ```
 
-P4.3: **85 tests in 7 suites** (P4.2: 56).
+**184 tests in 12 suites** (P4.3: 85).
 
 | Suite | Covers |
 |---|---|
-| `theme.test.ts` | theme primitives, precedence, storage failure, bootstrap script |
-| `theme-toggle.test.tsx` | mount application, SSR safety, switching, persistence, keyboard |
-| `design-tokens.test.ts` | every colour token in both themes, focus ring, reduced motion |
-| `navigation.test.ts` | the four areas, hrefs, default route, active-path rules |
-| `app-shell.test.tsx` | skip link, landmarks, all four links, active state, header label, theme inside the shell |
-| `mobile-navigation.test.tsx` | collapsed start, `aria-expanded`/`aria-controls`, focus move, Escape, close button, scrim, link navigation, full keyboard path |
-| `routes.test.tsx` | root redirect, all four placeholder routes, no fabricated data |
+| `proxy.test.ts` | all eight pairs forwarded, unknown path/method refused, traversal and padded ids refused, query policy, body policy, status/envelope preservation, no redirect, 502/504 sanitized, config validation, no origin leak |
+| `api-client.test.ts` | same-origin URLs, methods, envelope mapping (404/409/422/503), malformed JSON, wrong shape, network vs abort |
+| `fixtures.test.ts` | off by default, dev+opt-in only, impossible in production, label, contract-shaped data, determinism, no silent fallback |
+| `overview-metrics.test.ts` | multi-page totals, cursor loops, page failure, UTC boundaries, folding, ties, duplicates, undated/unclassified, integrity flag |
+| `overview.test.tsx` | loading, live success, empty, fixture banner, integrity warning, independent failures, retry, keyboard refresh, no fabricated metrics, light theme |
+| `routes.test.tsx` | root redirect, functional Overview, remaining placeholders |
+| theme / tokens / navigation / shell suites | unchanged from P4.2–P4.3 |
 
 Measured on 2026-11-11 (Node v24.21.0, npm 11.19.0):
 
@@ -197,32 +242,26 @@ Measured on 2026-11-11 (Node v24.21.0, npm 11.19.0):
 | `npm ls --depth=0` | exit 0 — 15 packages, unchanged |
 | `npm run lint` | exit 0, 0 problems |
 | `npm run typecheck` | exit 0 |
-| `npm run test` | exit 0, **85 passed / 85**, 7 suites, 21.9 s |
-| `npm run build` | exit 0 — static `/`, `/_not-found`, `/attendance`, `/employees`, `/overview`, `/system-status` |
-
-## Fixture policy
-
-No fixture data exists — none is needed for the shell. When fixtures arrive
-(P4.4+), they must be development-only, labelled `FIXTURE DATA`, never mixed with
-a real response, and never written to the backend or journal.
+| `npm run test` | exit 0 — **184 passed / 184**, 12 suites, ~32 s |
+| `npm run build` | exit 0 — static `/`, `/_not-found`, `/attendance`, `/employees`, `/system-status`; dynamic `/overview` and `/api/backend/[...path]` |
 
 ## Known limitations
 
-* The four areas are **structural placeholders**: no employee CRUD, attendance
-  table, checkout control, metrics or health checks yet.
-* No API client, no Route Handler proxy, no backend connectivity.
-* No live backend verification — the FastAPI startup gate needs PostgreSQL.
-* Responsive behaviour is implemented in CSS but was verified by component tests
-  and static review only; no browser was driven at 360/768/1280 px.
-* `tests/mobile-navigation.test.tsx` asserts the desktop tab order, because jsdom
-  does not apply the sidebar's media query.
-* `eslint-config-next@16.4.6` bundles plugins whose peers stop at ESLint 9; npm
-  resolved them itself (warnings only) and lint passes on ESLint 10.14.0.
-* No authentication or RBAC (Phase 5); the backend stays loopback-only with CORS
-  disabled.
+* **No live integration has been verified.** The backend's G2+G8 startup gate
+  requires PostgreSQL, so every Proxy and Overview check above uses mocked
+  responses or development fixtures.
+* No browser was driven; responsive layout and the proxy's real network path are
+  covered by tests and static review only.
+* Employees, Attendance and System Status are still placeholders; there is no
+  employee CRUD, checkout control or health widget.
+* Attendance is not paginated and events carry no employee name — a future
+  activity list must join names from the employee endpoint.
+* An employee identifier containing `%` cannot pass the proxy (documented
+  defence against ambiguous encoding); ids are also limited to 128 characters.
+* No authentication or RBAC (Phase 5); the backend stays loopback-only.
 
 ## Safety
 
-This frontend reads no credential, holds no secret and never contacts the
-database. `BACKEND_BASE_URL` arrives as a server-only variable in P4.8; no
-`NEXT_PUBLIC_` value may carry a backend URL or secret.
+No credential, DSN, token or secret is present in this app, and no secret is ever
+sent to the browser. No camera, photograph, embedding or biometric data is
+accessed.
