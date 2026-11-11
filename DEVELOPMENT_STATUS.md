@@ -3,6 +3,89 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 40 — Phase 3 completion (eight endpoints) and S8 offline verification (2026-11-11)
+
+**All eight approved endpoints are implemented and offline-verified, S8 is
+implemented against the corrected contract (revision 3) and offline-verified, and
+Phase 4 is proposed but not started. No database was contacted, no dependency was
+installed, and no Git operation was performed.**
+
+* **Added `src/api_service.py`**: the composition layer. `EmployeeQueryService`
+  wraps the approved repository contract (checked structurally so offline fakes
+  are injectable) and adds only "duplicate → 409", "missing → 404", the keyset
+  page envelope and the non-positive-page-size rejection.
+  `AttendanceQueryService` reads through `AttendanceEventStore.load_events`, so
+  journal validation, torn-tail reporting and corruption errors are unchanged and
+  a corrupt journal is never repaired on read.
+* **Checkout corrected onto the approved additive engine path**:
+  `AttendanceEngine.operator_checkout()` (with `OperatorAuthorization` /
+  `AuthorizationSource`) now owns the decision. The engine applies its existing
+  shared active gate, open-session adjudication and
+  `check_out_cooldown_seconds` window unchanged; the service only resolves the
+  employee, folds the journal once, replays the session/cooldown state through
+  `restore_open_session` / `restore_check_out_anchor`, supplies the explicit
+  operator authorization and appends after acceptance. `update()` still requires
+  a `VERIFIED` `TemporalVerificationResult`, and no such object is ever built,
+  mocked or inferred on the operator path (an authorization carrying the
+  biometric source is refused at construction).
+* **Concurrency finding and fix**: the journal load, the policy decision and the
+  durable append are three calls, and Starlette runs synchronous endpoints in a
+  thread pool, so two overlapping check-out requests could both observe the same
+  open session and both append. The sequence now runs inside a module-level
+  `threading.Lock` (`_CHECKOUT_CRITICAL_SECTION`); the second request re-reads
+  the journal after the first append and is refused with `NO_OPEN_SESSION` or
+  `CHECKOUT_COOLDOWN`, appending nothing. Scope is documented as process-local
+  (single API process by contract); the store keeps its unchanged journal
+  format, validation, fsync durability and cross-process disclaimer, and a
+  deterministic two-thread test proves the serialization. `build_default_services` refuses before
+  importing the repository, so the request path keeps the API's documented
+  offline import hygiene.
+* **`src/api.py` implemented**: `GET /health`, `POST/GET /employees`,
+  `GET/PATCH /employees/{employee_id}`,
+  `POST /employees/{employee_id}/deactivate`, `GET /attendance`,
+  `POST /attendance/{employee_id}/checkout`. `extra: forbid` request models stop
+  a client supplying `created_at`, an update-time `is_active`, or a fabricated
+  checkout event id. Distinct sanitized codes replace the retired
+  `NOT_IMPLEMENTED` envelope. The approved inventory, loopback binding,
+  `--print-bind`, the Windows single-process guard and the no-CORS/no-auth
+  boundary are untouched, and no route contains business logic.
+* **S8 implemented** (`src/s8/verification.py`, `tools/verify_schema_s8.py`,
+  `docs/S8_CONTRACT_V1_2.md`): authorization gate → application-target proof →
+  test-target distinction → local migration load → **one** connection → no-SQL
+  metadata → autocommit → read-only request/read-back → one
+  `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` → transaction properties →
+  identity fallback, server version, catalog, ledger evidence → ROLLBACK → close
+  → evaluation from the captured snapshots with the existing G2/S3 authorities
+  and the pinned digest/version. Catalog presence distinguishes absent / ordinary
+  table / wrong kind; `to_regclass` corroborates only; disagreement blocks
+  instead of failing. No advisory lock, no `verify_schema_locked`, no write, no
+  retry, seven outcomes preserved verbatim, limitation always reported.
+* **Corrected contract revision 3 (C1–C6)**: read-only ordering fixed so no SQL
+  verification read precedes the proven transaction; relation kinds preserved so
+  a view/sequence ledger reaches S3 instead of being filtered into "missing";
+  §2.1/§2.2 unified on "the configured application target is mandatory and
+  sufficient, an explicit target may only restate it"; Option A preserved; v1
+  choices pinned conservatively (seven outcomes, stdout-only, no privilege
+  probes, no corroborating snapshot, no quiescence guarantee); acceptance review
+  recorded with three remaining decisions named rather than invented.
+* **Tests added**: `tests/test_s8_verification.py` (39),
+  `tests/test_api_endpoints.py` (24, including the HTTP `CHECKOUT_COOLDOWN` case)
+  and `tests/test_operator_checkout.py` (29, engine, service and concurrency);
+  `tests/test_api.py`'s deferred-route
+  assertions replaced by "never 501" plus "unavailable database is an honest
+  503", with no other assertion changed.* **Verified offline**: focused `175 passed` (exit 0) for
+  `test_operator_checkout` 29 (incl. the two-thread serialization test),
+  `test_attendance_engine` 98 (unchanged, regression guard),
+  `test_api_endpoints` 24 and `test_api` 24; S8 `39 passed`; full suite
+  `2325 passed, 32 skipped in 201.35s` (exit 0), +92 over Step 39.
+* **Not verified / not done**: no live PostgreSQL connection or migration; S8's
+  SQL has never run against a server (PostgreSQL 12+ unverified live); S7 and S8
+  live execution remain *NOT VERIFIED — REQUIRES SEPARATE AUTHORIZATION*;
+  checkout uses an operator-authorized append rather than the camera-authorized
+  engine path and now applies `check_out_cooldown_seconds` (the deviation is
+  resolved, not waived); Phase 4 is `docs/PHASE4_DASHBOARD_PROPOSAL.md` only — no dependency installed,
+  no frontend file created, Node/npm runtime not inspected.
+
 ## Step 39 — Phase 3 G8 (S1–S5): contract, catalog probe, evaluator, executor integration and startup gate (2026-11-08)
 
 **S1–S5 of G8 implemented and offline-verified, and G8 is now in force: API

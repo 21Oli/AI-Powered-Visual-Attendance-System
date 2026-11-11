@@ -113,11 +113,17 @@ from src.temporal_verification import (
 __all__ = [
     "AttendanceError",
     "AttendanceInputError",
+    "AuthorizationSource",
     "EventType",
+    "OperatorAuthorization",
     "AttendanceEvent",
     "AttendanceDecisionStatus",
     "AttendanceDecision",
     "AttendanceEngine",
+    "REASON_AUTHORIZATION_REQUIRED",
+    "REASON_CHECKOUT_COOLDOWN",
+    "REASON_INACTIVE_EMPLOYEE",
+    "REASON_NO_OPEN_SESSION",
     "default_event_id_factory",
 ]
 
@@ -142,6 +148,83 @@ class AttendanceInputError(AttendanceError, ValueError):
     malformed ``active_lookup`` returns — all fail safely with no
     event and no state change.
     """
+
+
+# ---------------------------------------------------------------------------
+# Operator authorization (never biometric verification)
+# ---------------------------------------------------------------------------
+
+
+class AuthorizationSource(Enum):
+    """Which authority stands behind one attendance decision.
+
+    The two are deliberately **not** interchangeable: ``VERIFIED`` temporal
+    results come from the camera pipeline after ``min_consistent_frames``
+    consistent recognitions, while an operator check-out is an explicit human
+    action recorded over HTTP. Conflating them would let a button press claim
+    biometric verification that never happened.
+    """
+
+    #: The camera pipeline established the identity (``update()`` only).
+    BIOMETRIC_VERIFICATION = "biometric_verification"
+    #: A named operator authorized the event explicitly (``operator_checkout()``).
+    OPERATOR_AUTHORIZATION = "operator_authorization"
+
+
+#: Stable ``reason_code`` values (machine-readable; ``reason`` stays prose).
+REASON_AUTHORIZATION_REQUIRED = "authorization_required"
+REASON_INACTIVE_EMPLOYEE = "employee_inactive"
+REASON_NO_OPEN_SESSION = "no_open_session"
+REASON_CHECKOUT_COOLDOWN = "checkout_cooldown"
+
+
+@dataclass(frozen=True)
+class OperatorAuthorization:
+    """Explicit operator authorization for an operator-recorded check-out.
+
+    This is the **only** thing :meth:`AttendanceEngine.operator_checkout`
+    accepts, and it is not a :class:`~src.temporal_verification.
+    TemporalVerificationResult`: it carries no status, no streak, no window and
+    no identity established by the camera. It says exactly one thing — a named
+    operator authorized this action — and it can never be constructed as a
+    biometric claim:
+
+    * ``source`` must be ``AuthorizationSource.OPERATOR_AUTHORIZATION``; passing
+      the biometric member raises :class:`AttendanceInputError` rather than
+      labelling an operator action as a camera verification;
+    * ``operator`` must be a non-empty ``str`` naming the responsible caller
+      (for example the API service identity). It is **not** an employee ID and
+      is never used as the event's ``employee_id``.
+
+    The journal schema is unchanged: this object authorizes an event, it is not
+    persisted as evidence.
+    """
+
+    operator: str
+    source: AuthorizationSource = AuthorizationSource.OPERATOR_AUTHORIZATION
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, AuthorizationSource):
+            raise AttendanceInputError(
+                "source must be an AuthorizationSource, got "
+                f"{type(self.source).__name__}"
+            )
+        if self.source is not AuthorizationSource.OPERATOR_AUTHORIZATION:
+            raise AttendanceInputError(
+                "an OperatorAuthorization cannot carry the "
+                f"{self.source.value} source; operator actions must stay "
+                "distinct from biometric verification"
+            )
+        if not isinstance(self.operator, str) or not self.operator.strip():
+            raise AttendanceInputError(
+                "operator must be a non-empty str naming the authorizing "
+                f"caller, got {type(self.operator).__name__}"
+            )
+
+    @property
+    def source_name(self) -> str:
+        """The authorization source's stable machine value."""
+        return self.source.value
 
 
 def default_event_id_factory() -> str:
@@ -247,12 +330,17 @@ class AttendanceDecisionStatus(Enum):
         engine invents no active status).
     ``SUPPRESSED``         — an equivalent recent event exists within
         the configured cooldown for this employee; no event.
+    ``AUTHORIZATION_REQUIRED`` — :meth:`AttendanceEngine.operator_checkout`
+        was called without a valid :class:`OperatorAuthorization`; no
+        event and no state change. This status is **never** produced by
+        the biometric :meth:`AttendanceEngine.update` path.
     """
 
     EVENT_CREATED = "event_created"
     NOT_VERIFIED = "not_verified"
     INACTIVE_EMPLOYEE = "inactive_employee"
     SUPPRESSED = "suppressed"
+    AUTHORIZATION_REQUIRED = "authorization_required"
 
 
 @dataclass(frozen=True)
@@ -266,11 +354,21 @@ class AttendanceDecision:
             suppressed or unverified decisions never expose a
             fabricated event.
         reason: Short diagnostic string (never biometric detail).
+        reason_code: Stable machine code for a refusal (one of the
+            ``REASON_*`` constants), or ``None``. Populated only for
+            operator-authorized decisions, so the biometric path's
+            decisions are byte-identical to their pre-existing shape.
+        authorization: :class:`AuthorizationSource` of the deciding
+            authority — set for operator-authorized decisions, ``None``
+            for the biometric path (which carries its own evidence in
+            the ``TemporalVerificationResult``).
     """
 
     status: AttendanceDecisionStatus
     event: AttendanceEvent | None = None
     reason: str | None = None
+    reason_code: str | None = None
+    authorization: AuthorizationSource | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -503,24 +601,9 @@ class AttendanceEngine:
             )
 
         # -- Active gate (injectable authority only; never invented) ---
-        if self._active_lookup is not None:
-            is_active = self._active_lookup(employee_id)
-            if not isinstance(is_active, bool):
-                raise AttendanceInputError(
-                    f"employee {employee_id!r}: active_lookup returned "
-                    f"{type(is_active).__name__}, expected bool"
-                )
-            if not is_active:
-                _logger.debug(
-                    "check-in withheld: verified employee inactive per "
-                    "the authoritative hook"
-                )
-                return AttendanceDecision(
-                    status=AttendanceDecisionStatus.INACTIVE_EMPLOYEE,
-                    event=None,
-                    reason="verified employee is inactive per the "
-                    "authoritative active-status hook",
-                )
+        refusal = self._refuse_inactive(employee_id)
+        if refusal is not None:
+            return refusal
 
         # -- Policy gates (monotonic; boundary exact) -------------------
         now_monotonic = self._monotonic_now()
@@ -582,7 +665,11 @@ class AttendanceEngine:
         )
 
     def _decide_check_out(
-        self, employee_id: str, now_monotonic: float
+        self,
+        employee_id: str,
+        now_monotonic: float,
+        *,
+        authorization: OperatorAuthorization | None = None,
     ) -> AttendanceDecision:
         """Apply the P2-6 check-out policy after the shared gates.
 
@@ -592,7 +679,14 @@ class AttendanceEngine:
         ``SUPPRESSED`` status (documented "policy declined this
         check-out" outcome) with a ``reason`` naming the exact cause —
         no new status vocabulary was added this phase.
+
+        ``authorization`` is the *only* difference between the biometric and
+        operator paths: both apply this identical policy. When it is supplied
+        (operator path) the refusal decisions additionally carry a stable
+        ``reason_code`` and the acceptance reason names operator authorization;
+        the biometric path's decisions keep their exact pre-existing shape.
         """
+        operator = authorization is not None
 
         # -- Open-session adjudication ---------------------------------
         if employee_id in self._open_sessions:
@@ -620,6 +714,7 @@ class AttendanceEngine:
                     "check-out is rejected (in-memory eviction is not "
                     "treated as evidence a durable session is closed)"
                 ),
+                reason_code=REASON_NO_OPEN_SESSION if operator else None,
             )
         else:
             # Missing marker + configured hook: adjudicate upward.
@@ -644,6 +739,7 @@ class AttendanceEngine:
                         "authoritative open_session_lookup hook; a "
                         "check-out requires an open check-in"
                     ),
+                    reason_code=REASON_NO_OPEN_SESSION if operator else None,
                 )
 
         # -- Check-out cooldown (independent of the check-in gate) ------
@@ -667,6 +763,7 @@ class AttendanceEngine:
                         "interval (%.1f < %.1f seconds elapsed)"
                         % (out_elapsed, self._out_cooldown)
                     ),
+                    reason_code=REASON_CHECKOUT_COOLDOWN if operator else None,
                 )
             # elapsed >= out cooldown: deterministically expired.
 
@@ -693,9 +790,119 @@ class AttendanceEngine:
             status=AttendanceDecisionStatus.EVENT_CREATED,
             event=event,
             reason=(
-                "verified identity accepted by the check-out policy; "
-                "open session closed"
+                (
+                    "operator authorization accepted by the check-out "
+                    "policy; open session closed"
+                )
+                if operator
+                else (
+                    "verified identity accepted by the check-out policy; "
+                    "open session closed"
+                )
             ),
+            authorization=(
+                AuthorizationSource.OPERATOR_AUTHORIZATION if operator else None
+            ),
+        )
+
+    def operator_checkout(
+        self,
+        employee_id: str,
+        *,
+        authorization: OperatorAuthorization | None,
+    ) -> AttendanceDecision:
+        """Record one **operator-authorized** ``CHECK_OUT`` (additive).
+
+        This is the approved additive operator/API path. It never calls
+        :meth:`update`, never accepts or builds a
+        :class:`~src.temporal_verification.TemporalVerificationResult`, and
+        therefore never claims biometric verification. The authorization is an
+        explicit :class:`OperatorAuthorization` object that cannot be
+        constructed as a biometric claim.
+
+        The check-out business rules are **the same ones** the biometric path
+        uses, applied by the same code: the shared active gate, then the
+        open-session adjudication (in-memory marker, else the configured
+        ``open_session_lookup`` hook, else an honest rejection), then the
+        independent ``check_out_cooldown_seconds`` gate. Nothing is duplicated
+        here.
+
+        Args:
+            employee_id: Exact employee identifier (never transformed; the
+                caller supplies the authoritative stored value).
+            authorization: The operator authorization. Omitted/``None``/wrong
+                type yields ``AUTHORIZATION_REQUIRED`` with no event and no
+                state change — a missing authorization is never repaired into
+                an implicit one.
+
+        Returns:
+            A frozen :class:`AttendanceDecision`. Refusals carry a
+            ``reason_code`` (``REASON_INACTIVE_EMPLOYEE``,
+            ``REASON_NO_OPEN_SESSION``, ``REASON_CHECKOUT_COOLDOWN``) and
+            ``authorization`` set to
+            :attr:`AuthorizationSource.OPERATOR_AUTHORIZATION`.
+
+        Raises:
+            AttendanceInputError: invalid employee ID, an invalid clock value,
+                or an invalid injected hook return (no state change).
+        """
+        if not isinstance(authorization, OperatorAuthorization):
+            _logger.debug(
+                "operator check-out withheld: no valid operator authorization"
+            )
+            return AttendanceDecision(
+                status=AttendanceDecisionStatus.AUTHORIZATION_REQUIRED,
+                event=None,
+                reason=(
+                    "an operator check-out requires an explicit "
+                    "OperatorAuthorization; no biometric verification exists "
+                    "for this request and none is inferred"
+                ),
+                reason_code=REASON_AUTHORIZATION_REQUIRED,
+            )
+        if not isinstance(employee_id, str) or not employee_id.strip():
+            raise AttendanceInputError(
+                "employee_id must be a non-empty str, got "
+                f"{type(employee_id).__name__}"
+            )
+
+        refusal = self._refuse_inactive(
+            employee_id, reason_code=REASON_INACTIVE_EMPLOYEE
+        )
+        if refusal is not None:
+            return refusal
+
+        now_monotonic = self._monotonic_now()
+        return self._decide_check_out(
+            employee_id, now_monotonic, authorization=authorization
+        )
+
+    def _refuse_inactive(
+        self, employee_id: str, *, reason_code: str | None = None
+    ) -> AttendanceDecision | None:
+        """Shared active gate (``None`` = eligible; never invents a status)."""
+        if self._active_lookup is None:
+            return None
+        is_active = self._active_lookup(employee_id)
+        if not isinstance(is_active, bool):
+            raise AttendanceInputError(
+                f"employee {employee_id!r}: active_lookup returned "
+                f"{type(is_active).__name__}, expected bool"
+            )
+        if is_active:
+            return None
+        _logger.debug(
+            "attendance event withheld: employee inactive per the "
+            "authoritative hook"
+        )
+        return AttendanceDecision(
+            status=AttendanceDecisionStatus.INACTIVE_EMPLOYEE,
+            event=None,
+            reason=(
+                "verified employee is inactive per the "
+                "authoritative active-status hook"
+            ),
+            reason_code=reason_code,
         )
 
     # ------------------------------------------------------------------

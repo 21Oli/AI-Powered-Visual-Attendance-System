@@ -198,6 +198,38 @@ def api_server():
     server.close()
 
 
+class _UnavailableService:
+    """A service double whose every operation reports typed unavailability.
+
+    Used by the endpoint-envelope tests so they exercise the API's honest
+    "database unavailable" mapping without ever reaching the connection layer
+    (and therefore without loading a database driver during an offline test).
+    """
+
+    def __getattr__(self, name: str):
+        def raise_unavailable(*args, **kwargs):
+            from src.db import DatabaseUnavailableError
+
+            raise DatabaseUnavailableError(
+                "offline test double: no database is reachable"
+            )
+
+        return raise_unavailable
+
+
+@pytest.fixture()
+def unavailable_api_server():
+    """The real app with unavailable-service doubles injected."""
+    server = _LoopbackServer(
+        create_app(
+            employee_service=_UnavailableService(),
+            attendance_service=_UnavailableService(),
+        )
+    )
+    yield server
+    server.close()
+
+
 @pytest.fixture(autouse=True)
 def forbid_real_database(monkeypatch: pytest.MonkeyPatch):
     """Any DB connection attempt fails loud; the API loads no driver.
@@ -234,35 +266,45 @@ def test_health_response_lacks_internal_details(api_server) -> None:
         assert forbidden not in raw, "health payload leaked internal detail"
 
 
-_DEFERRED_ROUTES = sorted(
+_IMPLEMENTED_ROUTES = sorted(
     (method, f"{API_PREFIX}{path}") for path, method in APPROVED_ROUTES
     if path != "/health"
 )
 
 
-@pytest.mark.parametrize(("method", "path"), _DEFERRED_ROUTES)
-def test_deferred_endpoints_return_typed_501_envelope(
-    api_server, method: str, path: str
+@pytest.mark.parametrize(("method", "path"), _IMPLEMENTED_ROUTES)
+def test_endpoints_are_implemented_and_never_report_not_implemented(
+    unavailable_api_server, method: str, path: str
 ) -> None:
-    status, raw = api_server.request(method, path)
-    assert status == 501
+    """Step 40 implemented every approved endpoint.
+
+    With the database unavailable every database-backed route answers its
+    sanitized envelope rather than a fake success; what must never happen again
+    is a 501 ``NOT_IMPLEMENTED``.
+    """
+    status, raw = unavailable_api_server.request(method, path)
+    assert status != 501
     payload = json.loads(raw)
-    assert payload["error"]["code"] == "NOT_IMPLEMENTED"
-    assert payload["error"]["message"]
-    assert status != 200 and status != 201
+    assert payload.get("error", {}).get("code") != "NOT_IMPLEMENTED"
+    if status >= 400:
+        assert payload["error"]["code"] in {
+            "DATABASE_UNAVAILABLE",
+            "REQUEST_INVALID",
+            "ATTENDANCE_UNAVAILABLE",
+        }
 
 
-def test_deferred_endpoint_rejects_arbitrary_body(api_server) -> None:
-    """Unexpected input is rejected, not silently accepted or defaulted."""
-    status, raw = api_server.request(
-        "POST",
-        f"{API_PREFIX}/employees",
-        body=json.dumps(
-            {"employee_id": "X", "full_name": "Y", "is_active": True}
-        ).encode(),
-    )
-    assert status == 501
-    assert json.loads(raw)["error"]["code"] == "NOT_IMPLEMENTED"
+def test_unconfigured_database_is_reported_as_unavailable_not_success(
+    unavailable_api_server,
+) -> None:
+    """An unreachable database is an honest sanitized 503, never a fake row."""
+    status, raw = unavailable_api_server.request("GET", f"{API_PREFIX}/employees")
+    assert status == 503
+    payload = json.loads(raw)
+    assert payload["error"]["code"] == "DATABASE_UNAVAILABLE"
+    assert payload["error"]["message"] == "Database is temporarily unavailable."
+    for fragment in (_FAKE_SENSITIVE_DSN, "postgresql", "password"):
+        assert fragment not in raw
 
 
 def test_unknown_route_uses_the_stable_error_envelope(api_server) -> None:

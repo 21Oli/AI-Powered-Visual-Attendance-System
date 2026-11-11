@@ -1,54 +1,52 @@
-"""Phase 3 Step 1.3 — API foundation (loopback-only, no authentication).
+"""Phase 3 Step 40 — the eight-endpoint API (loopback-only, unauthenticated).
 
-Implements only the Step 1.3 deliverables: the FastAPI application
-structure, the settings-driven loopback binding contract, the approved
-eight-endpoint route inventory, and sanitized error handling. Database-
-backed and attendance-mutating behavior is deliberately **not yet
-implemented** — the seven non-health approved endpoints are declared
-with their approved methods and reply with a typed, documented
-``501 NOT_IMPLEMENTED`` envelope until their authorized later step.
+Implements the approved ``/api/v1`` route inventory. Every route is a thin
+adapter: it validates the request shape, calls one method on the injected
+service, and renders either the documented success payload or the single
+sanitized error envelope. No route contains business logic, SQL, journal
+parsing, or a database connection.
 
-Design rules
-------------
-* **Loopback navigation only.** The bind address/port come from the
-  existing validated configuration (:mod:`src.config` —
-  ``AppSettings.api_host``/``api_port``); this module never duplicates
-  or bypasses that validation, and the CLI runner (:mod:`tools.run_api`)
-  feeds the values into uvicorn unchanged.
-* **No database activity.** Importing this module or creating the app
-  connects to no PostgreSQL instance. ``src.db`` is imported solely for
-  its (already side-effect-free) typed exceptions so that error
-  handlers exist ahead of the future database-backed steps; the
-  connection factory itself is never called by any route in this step.
-* **No attendance/camera/biometric runtime.** None of the recognition,
-  camera, enrollment, embedding, journal, or demo modules are imported
-  here (subprocess-proven in tests).
+Layering
+--------
+
+* ``src.api_service`` — the API-shaped service layer over the approved
+  ``EmployeeRepository`` and the attendance journal (see its module docstring
+  for the check-out contract and its one documented policy difference).
+* this module — HTTP only: request models, response payloads, and the mapping
+  from typed service results to approved status codes.
+
+Design rules (unchanged from the foundation step)
+-------------------------------------------------
+
+* **Loopback navigation only.** The bind address/port come from the existing
+  validated configuration (:mod:`src.config` — ``AppSettings.api_host`` /
+  ``api_port``); this module never duplicates or bypasses that validation, and
+  ``tools/run_api.py`` feeds the values into uvicorn unchanged.
+* **No work at import or app-construction time.** Importing this module loads
+  no driver, no attendance runtime, no camera stack and no server runtime;
+  ``create_app()`` builds no service and connects to nothing. The production
+  services are constructed on the **first request** (see ``_resolve_services``)
+  so the import-hygiene contract stays intact.
 * **Sanitized error envelope.** Every client-facing error is the stable
   ``{"error": {"code": <machine_code>, "message": <sanitized_human>}}``
-  mapping. Raw exception messages, tracebacks, DSNs/credentials,
-  internal filesystem paths, and employee/biometric data never appear
-  in responses; server-side logging keeps trusted diagnostics.
-* **Stable decision/persistence codes.** Error ``code`` values are
-  machine-readable and deliberately separate from human ``message``
-  text (Phase 0 sign-off contract); persistence outcomes remain a
-  later-step concern.
-* **No CORS, no authentication.** No middleware (CORS or otherwise) is
-  installed: the development API must not be network-exposed, and
-  loopback-only binding is a development safety measure — explicitly
-  not a production security boundary. The FastAPI documentation URLs
-  (``/openapi.json``, ``/docs``, ``/redoc``) are disabled so the served
-  route inventory is exactly the approved eight endpoints. The
-  request/response models are still declared in code; a later,
-  explicitly authorized step may re-enable a schema endpoint.
-* **No automatic retries.** Nothing here retries any future persisted
-  write; the four-outcome persistence contract belongs to the checkout
-  step.
+  mapping. Raw exception messages, tracebacks, DSNs/credentials, internal
+  filesystem paths, and employee/biometric data never appear in responses;
+  server-side logging keeps trusted diagnostics.
+* **Stable decision codes.** Error ``code`` values are machine-readable and
+  deliberately separate from human ``message`` text. A business check-out
+  refusal additionally carries a nested ``reason`` code so a client can
+  distinguish "inactive" from "no open session" without parsing prose.
+* **No CORS, no authentication.** No middleware is installed. Loopback-only
+  binding is a development safety measure, explicitly not a production security
+  boundary. Documentation URLs stay disabled so the served route inventory is
+  exactly the approved eight endpoints.
+* **No automatic retries.** A failed persisted append is reported as
+  ``PERSISTENCE_UNCONFIRMED`` and never retried here.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -67,12 +65,14 @@ __all__ = [
     "API_PREFIX",
     "APPROVED_ROUTES",
     "ApprovedRoute",
+    "CheckoutRequest",
+    "EmployeeCreateRequest",
+    "EmployeeUpdateRequest",
     "ErrorBody",
     "ErrorResponse",
     "HealthResponse",
-    "NOT_IMPLEMENTED_CODE",
-    "create_app",
     "build_server_config",
+    "create_app",
     "run_server",
 ]
 
@@ -81,16 +81,17 @@ _logger = get_logger(__name__)
 #: The approved API namespace: every endpoint lives under this prefix.
 API_PREFIX: str = "/api/v1"
 
-#: Stable machine code returned by the declared-but-deferred endpoints.
-NOT_IMPLEMENTED_CODE: str = "NOT_IMPLEMENTED"
-
-_NOT_IMPLEMENTED_MESSAGE: str = (
-    "This endpoint is intentionally not implemented in the API-foundation "
-    "step; its behavior arrives with an authorized later step."
-)
-
 _INTERNAL_ERROR_CODE: str = "INTERNAL_ERROR"
 _INTERNAL_ERROR_MESSAGE: str = "Internal server error."
+
+#: Stable machine codes for the implemented endpoints.
+EMPLOYEE_EXISTS_CODE: str = "EMPLOYEE_EXISTS"
+EMPLOYEE_NOT_FOUND_CODE: str = "EMPLOYEE_NOT_FOUND"
+EMPLOYEE_INVALID_CODE: str = "EMPLOYEE_INVALID"
+CHECKOUT_REJECTED_CODE: str = "CHECKOUT_REJECTED"
+ATTENDANCE_UNAVAILABLE_CODE: str = "ATTENDANCE_UNAVAILABLE"
+PERSISTENCE_UNCONFIRMED_CODE: str = "PERSISTENCE_UNCONFIRMED"
+PERSISTENCE_REJECTED_CODE: str = "PERSISTENCE_REJECTED"
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +113,7 @@ APPROVED_ROUTES: tuple[ApprovedRoute, ...] = (
 
 
 # ---------------------------------------------------------------------------
-# Typed response models (explicit contracts; no raw serialization)
+# Typed request/response models
 # ---------------------------------------------------------------------------
 
 
@@ -121,6 +122,38 @@ class HealthResponse(BaseModel):
     connection details, or internal exception information."""
 
     status: Literal["ok"] = "ok"
+
+
+class EmployeeCreateRequest(BaseModel):
+    """The three fields a client may supply; ``created_at`` is never accepted.
+
+    ``created_at`` is application-authoritative (approved D2), so a client
+    value is not merely ignored — the field is absent from this model and a
+    request carrying it is rejected by the model's ``forbid`` policy below.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    employee_id: str
+    full_name: str
+    is_active: bool = True
+
+
+class EmployeeUpdateRequest(BaseModel):
+    """PATCH accepts ``full_name`` only (``employee_id``/``is_active``/
+    ``created_at`` are not patchable in v1 and are refused if supplied)."""
+
+    model_config = {"extra": "forbid"}
+
+    full_name: str
+
+
+class CheckoutRequest(BaseModel):
+    """The check-out body is empty by contract; the employee comes from the
+    path. An explicit empty object is accepted, and unknown fields are
+    refused so a client cannot smuggle a fabricated timestamp or event ID."""
+
+    model_config = {"extra": "forbid"}
 
 
 class ErrorBody(BaseModel):
@@ -137,15 +170,12 @@ class ErrorResponse(BaseModel):
     error: ErrorBody
 
 
-def _error_json(status_code: int, code: str, message: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=status_code,
-        content=ErrorResponse(error=ErrorBody(code=code, message=message)).model_dump(),
-    )
-
-
-def _not_implemented_response() -> JSONResponse:
-    return _error_json(501, NOT_IMPLEMENTED_CODE, _NOT_IMPLEMENTED_MESSAGE)
+def _error_json(
+    status_code: int, code: str, message: str, **extra: object
+) -> JSONResponse:
+    body = ErrorResponse(error=ErrorBody(code=code, message=message)).model_dump()
+    body["error"].update(extra)
+    return JSONResponse(status_code=status_code, content=body)
 
 
 # ---------------------------------------------------------------------------
@@ -230,65 +260,78 @@ def handle_unexpected_error(request: Request, exc: BaseException) -> JSONRespons
 
 
 # ---------------------------------------------------------------------------
+# Service resolution (lazy, once per app instance)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_services(
+    settings: AppSettings,
+    employee_service: object | None,
+    attendance_service: object | None,
+) -> tuple[Callable[[], Any], Callable[[], Any]]:
+    """Return getters that build the production services on first use.
+
+    Both services are optional injection points (offline tests supply fakes).
+    When absent, the production composition is imported and built **inside**
+    the first call, never during ``create_app()`` — that is what keeps
+    ``import src.api`` free of the database driver and the attendance runtime.
+    """
+
+    cache: dict[str, Any] = {}
+
+    def employee() -> Any:
+        if employee_service is not None:
+            return employee_service
+        if "employee" not in cache:
+            from src.api_service import build_default_services
+
+            built_employee, built_attendance = build_default_services(settings)
+            cache.setdefault("attendance", built_attendance)
+            cache["employee"] = built_employee
+        return cache["employee"]
+
+    def attendance() -> Any:
+        if attendance_service is not None:
+            return attendance_service
+        if "attendance" not in cache:
+            from src.api_service import build_default_services
+
+            built_employee, built_attendance = build_default_services(settings)
+            cache.setdefault("employee", built_employee)
+            cache["attendance"] = built_attendance
+        return cache["attendance"]
+
+    return employee, attendance
+
+
+# ---------------------------------------------------------------------------
 # Application factory
 # ---------------------------------------------------------------------------
 
 
-def _register_declared_endpoints(app: FastAPI) -> None:
-    """Register the seven approved-but-deferred endpoints (full paths).
-
-    Routes are registered directly on the application router with their
-    complete approved paths (no sub-router wrapping): the served route
-    inventory is flat and introspectable across FastAPI versions. Each
-    carries its approved path and method so the route inventory already
-    matches the approved surface, and each rejects *every* request with
-    the typed 501 envelope until its authorized implementing step.
-    Handlers take no request parameters: nothing about a request is
-    trusted or interpreted yet, so no validation or business contract is
-    claimed prematurely.
-    """
-    register = app.router
-
-    @register.post(f"{API_PREFIX}/employees")
-    def create_employee_endpoint() -> JSONResponse:
-        return _not_implemented_response()
-
-    @register.get(f"{API_PREFIX}/employees")
-    def list_employees_endpoint() -> JSONResponse:
-        return _not_implemented_response()
-
-    @register.get(f"{API_PREFIX}/employees/{{employee_id}}")
-    def get_employee_endpoint(employee_id: str) -> JSONResponse:
-        return _not_implemented_response()
-
-    @register.patch(f"{API_PREFIX}/employees/{{employee_id}}")
-    def update_employee_endpoint(employee_id: str) -> JSONResponse:
-        return _not_implemented_response()
-
-    @register.post(f"{API_PREFIX}/employees/{{employee_id}}/deactivate")
-    def deactivate_employee_endpoint(employee_id: str) -> JSONResponse:
-        return _not_implemented_response()
-
-    @register.get(f"{API_PREFIX}/attendance")
-    def list_attendance_endpoint() -> JSONResponse:
-        return _not_implemented_response()
-
-    @register.post(f"{API_PREFIX}/attendance/{{employee_id}}/checkout")
-    def checkout_endpoint(employee_id: str) -> JSONResponse:
-        return _not_implemented_response()
-
-
-def create_app(settings: AppSettings | None = None) -> FastAPI:
+def create_app(
+    settings: AppSettings | None = None,
+    *,
+    employee_service: object | None = None,
+    attendance_service: object | None = None,
+) -> FastAPI:
     """Create the Phase 3 API application (no server, no connections).
 
     Parameters
     ----------
     settings:
-        Optional acknowledged settings; the app itself never reads a
-        DSN or binds a socket — binding happens outside this module
-        (:func:`build_server_config` / :mod:`tools.run_api`).
+        Optional acknowledged settings. Used only to derive the attendance
+        journal's data directory for the lazily built default services; the
+        app itself never reads a DSN or binds a socket.
+    employee_service / attendance_service:
+        Offline-test seams. Production passes neither.
     """
-    _ = settings  # unused by the foundation app; part of the runner contract
+    from src.config import SETTINGS as _default_settings
+
+    resolved_settings = settings if settings is not None else _default_settings
+    get_employee, get_attendance = _resolve_services(
+        resolved_settings, employee_service, attendance_service
+    )
 
     app = FastAPI(
         title="Visual Attendance System API (Phase 3, development)",
@@ -300,17 +343,221 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     )
     # No CORS or other middleware is installed, deliberately.
 
+    # -- health ---------------------------------------------------------
+
     @app.get(f"{API_PREFIX}/health", response_model=HealthResponse)
     def health() -> HealthResponse:
         """Service is up. Deliberately no filesystem paths, credentials,
-        employee data, or database connection details — and no readiness
-        claim about PostgreSQL (deferred to the database-backed step)."""
+        employee data, or database connection details. ``ok`` is a
+        liveness claim about this process only — not a database readiness
+        claim (``GET /api/v1/employees`` is the honest database probe)."""
         return HealthResponse()
 
-    _register_declared_endpoints(app)
+    # -- employees ------------------------------------------------------
 
-    # Stable, sanitized error surface (FastAPI picks the most specific
-    # handler via the raised exception's MRO).
+    @app.post(f"{API_PREFIX}/employees", status_code=201)
+    def create_employee(payload: EmployeeCreateRequest) -> JSONResponse:
+        """Create one employee; duplicate ID → 409, invalid input → 422."""
+        from src.employee import Employee, EmployeeValidationError
+        from src.employee_repository import EmployeeAlreadyExists
+        from src.api_service import employee_payload
+
+        try:
+            employee = Employee(
+                employee_id=payload.employee_id,
+                full_name=payload.full_name,
+                is_active=payload.is_active,
+            )
+        except EmployeeValidationError:
+            return _error_json(
+                422,
+                EMPLOYEE_INVALID_CODE,
+                "Employee input does not satisfy the documented validation rules.",
+            )
+        try:
+            created = get_employee().create(employee)
+        except EmployeeAlreadyExists:
+            return _error_json(
+                409,
+                EMPLOYEE_EXISTS_CODE,
+                "An employee already exists for the requested identifier.",
+            )
+        return JSONResponse(status_code=201, content=employee_payload(created))
+
+    @app.get(f"{API_PREFIX}/employees")
+    def list_employees(
+        after: str | None = None, limit: int | None = None
+    ) -> JSONResponse:
+        """One keyset page (default 20, clamped at 100)."""
+        from src.employee import EmployeeValidationError
+        from src.api_service import employee_payload
+
+        # A non-positive page size is a caller error, never a silent empty
+        # page: only sizes above the maximum are clamped (approved contract).
+        if limit is not None and limit < 1:
+            return _error_json(
+                422,
+                EMPLOYEE_INVALID_CODE,
+                "Page size must be a positive integer (maximum 100).",
+            )
+
+        try:
+            page = get_employee().list(after=after, limit=limit)
+        except EmployeeValidationError:
+            return _error_json(
+                422,
+                EMPLOYEE_INVALID_CODE,
+                "The pagination cursor or page size is not valid.",
+            )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "employees": [employee_payload(row) for row in page.employees],
+                "count": len(page.employees),
+                "limit": page.limit,
+                "next_after": page.next_after,
+            },
+        )
+
+    @app.get(f"{API_PREFIX}/employees/{{employee_id}}")
+    def retrieve_employee(employee_id: str) -> JSONResponse:
+        """Retrieve one employee; missing → 404."""
+        from src.employee_repository import EmployeeNotFound
+        from src.api_service import employee_payload
+
+        try:
+            employee = get_employee().get(employee_id)
+        except EmployeeNotFound:
+            return _error_json(
+                404,
+                EMPLOYEE_NOT_FOUND_CODE,
+                "No employee exists for the requested identifier.",
+            )
+        return JSONResponse(status_code=200, content=employee_payload(employee))
+
+    @app.patch(f"{API_PREFIX}/employees/{{employee_id}}")
+    def update_employee(
+        employee_id: str, payload: EmployeeUpdateRequest
+    ) -> JSONResponse:
+        """Update ``full_name`` only; missing → 404, invalid name → 422."""
+        from src.employee import EmployeeValidationError
+        from src.employee_repository import EmployeeNotFound
+        from src.api_service import employee_payload
+
+        try:
+            employee = get_employee().rename(employee_id, payload.full_name)
+        except EmployeeNotFound:
+            return _error_json(
+                404,
+                EMPLOYEE_NOT_FOUND_CODE,
+                "No employee exists for the requested identifier.",
+            )
+        except EmployeeValidationError:
+            return _error_json(
+                422,
+                EMPLOYEE_INVALID_CODE,
+                "full_name does not satisfy the documented validation rules.",
+            )
+        return JSONResponse(status_code=200, content=employee_payload(employee))
+
+    @app.post(f"{API_PREFIX}/employees/{{employee_id}}/deactivate")
+    def deactivate_employee(employee_id: str) -> JSONResponse:
+        """Set ``is_active = FALSE``; missing → 404. Idempotent by nature
+        (deactivating an inactive employee returns the same row)."""
+        from src.employee_repository import EmployeeNotFound
+        from src.api_service import employee_payload
+
+        try:
+            employee = get_employee().deactivate(employee_id)
+        except EmployeeNotFound:
+            return _error_json(
+                404,
+                EMPLOYEE_NOT_FOUND_CODE,
+                "No employee exists for the requested identifier.",
+            )
+        return JSONResponse(status_code=200, content=employee_payload(employee))
+
+    # -- attendance -----------------------------------------------------
+
+    @app.get(f"{API_PREFIX}/attendance")
+    def list_attendance() -> JSONResponse:
+        """The validated journal in append order (no attendance pagination
+        exists by contract). A corrupt journal → 503, never an empty list."""
+        from src.attendance_store import CorruptAttendanceJournalError
+        from src.api_service import event_payload
+
+        try:
+            events, incomplete = get_attendance().list_events()
+        except CorruptAttendanceJournalError:
+            return _error_json(
+                503,
+                ATTENDANCE_UNAVAILABLE_CODE,
+                "The attendance journal could not be read; no attendance data "
+                "is available.",
+            )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "events": [event_payload(event) for event in events],
+                "count": len(events),
+                "incomplete_trailing_record": incomplete,
+            },
+        )
+
+    @app.post(f"{API_PREFIX}/attendance/{{employee_id}}/checkout", status_code=201)
+    def checkout(
+        employee_id: str, body: CheckoutRequest | None = None
+    ) -> JSONResponse:
+        """Operator check-out: 201 only after the durable journal append."""
+        from src.attendance_store import (
+            AttendanceStoreError,
+            AttendanceStoreInputError,
+            CorruptAttendanceJournalError,
+        )
+        from src.employee_repository import EmployeeNotFound
+        from src.api_service import CheckoutRejected, event_payload
+
+        def lookup(key: str):
+            try:
+                return get_employee().get(key)
+            except EmployeeNotFound:
+                return None
+
+        try:
+            event = get_attendance().checkout(employee_id, employee_lookup=lookup)
+        except CheckoutRejected as exc:
+            status = 404 if exc.code == "EMPLOYEE_NOT_FOUND" else 409
+            code = (
+                EMPLOYEE_NOT_FOUND_CODE
+                if exc.code == "EMPLOYEE_NOT_FOUND"
+                else CHECKOUT_REJECTED_CODE
+            )
+            return _error_json(status, code, exc.message, reason=exc.code)
+        except CorruptAttendanceJournalError:
+            return _error_json(
+                503,
+                ATTENDANCE_UNAVAILABLE_CODE,
+                "The attendance journal could not be read; the check-out was "
+                "not attempted.",
+            )
+        except AttendanceStoreInputError:
+            return _error_json(
+                422,
+                PERSISTENCE_REJECTED_CODE,
+                "The attendance event was rejected before any write; the "
+                "journal is unchanged.",
+            )
+        except AttendanceStoreError:
+            return _error_json(
+                503,
+                PERSISTENCE_UNCONFIRMED_CODE,
+                "The check-out could not be confirmed as persisted; it was not "
+                "retried and the journal may or may not contain the record.",
+            )
+        return JSONResponse(status_code=201, content=event_payload(event))
+
+    # -- stable, sanitized error surface -------------------------------
+
     app.add_exception_handler(StarletteHTTPException, handle_http_exception)
     app.add_exception_handler(RequestValidationError, handle_request_validation)
     app.add_exception_handler(ConfigError, handle_config_error)
@@ -318,6 +565,11 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     app.add_exception_handler(MalformedDsnError, handle_database_config_error)
     app.add_exception_handler(Exception, handle_unexpected_error)
     return app
+
+
+# ---------------------------------------------------------------------------
+# Server entry point (unchanged contract)
+# ---------------------------------------------------------------------------
 
 
 def build_server_config(settings: AppSettings):
@@ -332,7 +584,7 @@ def build_server_config(settings: AppSettings):
     import uvicorn  # lazy: src.api stays importable without the server runtime
 
     return uvicorn.Config(
-        app=create_app(),
+        app=create_app(settings),
         host=settings.api_host,
         port=settings.api_port,
     )
@@ -359,14 +611,14 @@ def run_server(
 ) -> None:
     """Run the settings-driven loopback server to completion (guarded).
 
-    Step 1.4: acquiring the Windows single-process startup guard
-    (:func:`src.api_guard.acquire_startup_guard`) happens **before** any
-    request can be served, and the guard stays held for the entire
-    server lifetime — released by the context manager on orderly
-    shutdown, by the OS after abnormal process termination. A guard
-    failure raises :class:`src.api_guard.StartupGuardError` and Uvicorn
-    is never started, so ``--print-bind`` (which does not serve) and any
-    library caller of this entry point get the same protection.
+    The Windows single-process startup guard
+    (:func:`src.api_guard.acquire_startup_guard`) is acquired **before** any
+    request can be served and stays held for the entire server lifetime —
+    released by the context manager on orderly shutdown, by the OS after
+    abnormal process termination. A guard failure raises
+    :class:`src.api_guard.StartupGuardError` and Uvicorn is never started, so
+    ``--print-bind`` (which does not serve) and any library caller of this
+    entry point get the same protection.
 
     G2+G8: **after** the guard is acquired and **before** Uvicorn is imported
     or constructed, the startup schema-compatibility verifier runs — migration
@@ -376,22 +628,6 @@ def run_server(
     releases the guard, so a refused start leaves neither a served request nor
     a held process guard behind. Only a fully ``COMPATIBLE`` verification
     reaches Uvicorn.
-
-    Uses a fresh :func:`load_settings()` by default (current environment,
-    consistent with :mod:`src.db`), then serves on the validated loopback
-    host/port. A separate runner (``tools/run_api.py``) owns nothing
-    beyond settings resolution and translating the typed guard/schema
-    failures into their documented startup exit codes — binding cannot
-    bypass the loopback contract.
-
-    Parameters
-    ----------
-    settings:
-        Validated settings; loaded from the environment when omitted.
-    startup_verifier:
-        Test seam only. Production uses the real G2 verifier by default;
-        there is deliberately no environment-variable bypass or
-        warning-only switch, so a production start can never skip G2.
     """
     if settings is None:
         settings = load_settings()

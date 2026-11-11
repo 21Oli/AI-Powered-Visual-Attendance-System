@@ -76,18 +76,46 @@ python -m pytest tests/ -v                      # Linux/macOS
 ## Phase 3 development API (loopback-only)
 
 A minimal FastAPI backend for the Phase 3 work is under construction.
-Step 1.3 implements the **API foundation** only:
+Step 40 implements **all eight approved endpoints**:
 
 - `src/api.py` serves the approved eight-endpoint inventory under
-  `/api/v1`, of which only `GET /api/v1/health` is implemented (returns
-  `{"status": "ok"}`). The other seven approved endpoints
-  (`POST/GET /employees`, `GET/PATCH /employees/{employee_id}`,
-  `POST /employees/{employee_id}/deactivate`, `GET /attendance`,
-  `POST /attendance/{employee_id}/checkout`) exist at their approved
-  methods but deliberately answer `501` with the typed
-  `NOT_IMPLEMENTED` envelope — they implement nothing, claim no database
-  operation, and reach no attendance data until their authorized later
-  step.
+  `/api/v1`, and every route now has behaviour:
+  `GET /health` (liveness), `POST/GET /employees`,
+  `GET/PATCH /employees/{employee_id}`,
+  `POST /employees/{employee_id}/deactivate`, `GET /attendance` and
+  `POST /attendance/{employee_id}/checkout`.
+- **The routes contain no business logic.** They translate HTTP into one
+  call on `src/api_service.py`, which delegates to the existing
+  `EmployeeRepository`, `AttendanceEngine`/`AttendanceEventStore` and
+  `AttendanceQueryService`. PostgreSQL stores employee metadata only; the
+  JSONL journal stays the sole authoritative attendance record. The journal is
+  read through the store's validation on every request (never repaired or
+  rewritten on read), so a corrupt journal answers
+  `503 ATTENDANCE_UNAVAILABLE` and is left byte-identical.
+- **Employee metadata** — create/list/get, `PATCH` limited to `full_name`,
+  deactivate. Keyset pagination on `employee_id` (`after`, `limit`, default
+  20, clamped at 100). Duplicate id → `409 EMPLOYEE_EXISTS`; missing →
+  `404 EMPLOYEE_NOT_FOUND`; invalid input → `422 EMPLOYEE_INVALID`.
+- **Attendance reads** load and validate the current journal through the
+  store. A torn tail is reported (`incomplete_trailing_record`), never
+  repaired on read; a corrupt or unreadable journal answers
+  `503 ATTENDANCE_UNAVAILABLE` and leaves the file untouched.
+- **Checkout is an operator-authorized engine call**, not a camera decision:
+  `POST /attendance/{id}/checkout` supplies an explicit
+  `OperatorAuthorization` to `AttendanceEngine.operator_checkout`, which applies
+  the same policy code as the camera path — active employee, open session, and
+  the 300 s `check_out_cooldown_seconds` window (an owner-approved decision: an
+  operator check-out inside that window is refused, not exempted). `201` only
+  after the durable JSONL append; `404` for an unknown employee;
+  `409 CHECKOUT_REJECTED` with `EMPLOYEE_INACTIVE`, `NO_OPEN_SESSION` or
+  `CHECKOUT_COOLDOWN`; `503` with `PERSISTENCE_UNCONFIRMED` when the append
+  cannot be confirmed. No `TemporalVerificationResult` is ever constructed and
+  an authorization cannot be built with the biometric source, so the endpoint
+  never claims biometric verification. Check-out requests are serialized inside
+  the API process, so two overlapping requests cannot both append. No check-in
+  endpoint exists: check-in stays camera-authorized.
+- Nothing in these routes reconciles a residual open session, and no
+  database schema was changed for this step (`employee` only).
 - Run it locally (binds to the validated loopback address only):
 
 ```bash
@@ -119,11 +147,12 @@ python tools/run_api.py --print-bind # print the validated bind, then exit
   unexpected runtime failures. `run_migrations.py` uses its own map.
 - Error responses use one stable envelope:
   `{"error": {"code": <machine_code>, "message": <sanitized>}}`, with
-  machine codes (`HTTP_ERROR`, `NOT_IMPLEMENTED`, `REQUEST_INVALID`,
-  `INTERNAL_ERROR`, and distinct `CONFIG_INVALID` /
-  `DATABASE_UNAVAILABLE` / `DATABASE_CONFIG_INVALID` handlers reserved
-  for later database-backed steps) deliberately separate from human
-  messages. Raw exceptions, tracebacks, DSNs/credentials, and internal
+  machine codes (`HTTP_ERROR`, `REQUEST_INVALID`, `INTERNAL_ERROR`,
+  `EMPLOYEE_EXISTS`, `EMPLOYEE_NOT_FOUND`, `EMPLOYEE_INVALID`,
+  `CHECKOUT_REJECTED`, `ATTENDANCE_UNAVAILABLE`,
+  `PERSISTENCE_UNCONFIRMED`, `PERSISTENCE_REJECTED`, plus the distinct
+  `CONFIG_INVALID` / `DATABASE_UNAVAILABLE` / `DATABASE_CONFIG_INVALID`
+  handlers) deliberately separate from human messages. Raw exceptions, tracebacks, DSNs/credentials, and internal
   filesystem paths never appear in responses.
 - **Security limitations (by design, in this step):** loopback-only
   binding is a development safety measure, **not** a production
