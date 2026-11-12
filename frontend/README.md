@@ -3,15 +3,14 @@
 Next.js 16 (App Router) + TypeScript + CSS Modules dashboard for the
 AI-Powered Visual Attendance System.
 
-**Status: P4.6.5 complete — the Attendance screen lists the journal read-only with
-UTC-day, event-type, employee and session-status filters and client-side
-pagination, plus one controlled action: an operator check-out for an active
-employee with an open session, behind a confirmation dialog and never retried or
-optimistic. The typed client, proxy, fixtures, Overview and Employees screen are
-unchanged.**
-System Status remains a structural placeholder (P4.7).
+**Status: Phase 4 final review complete (P4.6.6) — P4.1–P4.6.5 are implemented and
+committed, and every automated frontend check passes (439 tests, lint, typecheck,
+build, unchanged dependencies).** The Overview, Employees, the Attendance journal
+with client-side filters/paging and the confirmed operator check-out are
+functional; System Status is still a structural placeholder (P4.7).
 No live backend has been verified: the FastAPI startup gate requires PostgreSQL,
-which this phase is not authorized to connect to.
+which this phase is not authorized to connect to. No browser was driven and no
+deployment was performed or validated.
 
 ---
 
@@ -100,7 +99,7 @@ DASHBOARD_DATA_MODE=fixtures
 Browser
   │  same-origin fetch, no backend origin, no credentials in the bundle
   ▼
-OverviewDashboard (client component)
+Overview / Employees / Attendance (client components)
   ▼
 src/lib/api/client.ts        typed JSON transport, response validation
   ▼
@@ -123,8 +122,9 @@ FastAPI (loopback)  →  PostgreSQL / JSONL journal
 | `src/lib/attendance/pagination.ts` | client-side paging over the filtered events |
 | `src/lib/attendance/format.ts` | UTC timestamps, `Unknown` / `Unavailable` labels |
 | `src/lib/attendance/summary.ts` | journal counts and the UTC days present |
-| `src/lib/attendance/errors.ts` | checkout failure classification (P4.6.3, not used by the page) |
-| `src/components/attendance/` | journal view, table, filters, pagination |
+| `src/lib/attendance/errors.ts` | checkout failure classification (P4.6.3, used by the check-out panel) |
+| `src/lib/attendance/checkout.ts` | check-out eligibility matrix and operator-facing failure copy |
+| `src/components/attendance/` | journal view, table, filters, pagination, check-out panel |
 | `src/lib/api/data-source.ts` | live vs fixture source, resolved server-side |
 | `src/lib/dashboard/overview.ts` | pure metric calculations |
 | `src/lib/server/proxy.ts` | allowlist, id/query validation, upstream URL |
@@ -203,8 +203,9 @@ never displayed as a total. An unreadable page fails the whole metric.
 
 ## Attendance screen (P4.6.4)
 
-Read-only journal at `/attendance`. No checkout control exists and the page never
-calls `checkoutEmployee`, so no POST/PATCH/PUT/DELETE leaves it.
+Journal at `/attendance`, read-only except for one confirmed action: the
+operator check-out described below. The history table has no mutation control and
+nothing edits, inserts or re-sorts an event.
 
 * **Data flow** — `createOverviewSource(dataSourceKind)` loads the journal and
 the whole employee directory concurrently via `Promise.allSettled`; the directory
@@ -317,8 +318,9 @@ reactivation endpoint), moves focus to Cancel, traps Tab, closes on Escape and
 restores focus to the invoking button. Success appears only after the API
 returns; the directory is then refetched and the row's status updated.
 
-**Fixture limitation.** P4.5 adds no employee fixtures: the development fixture
-gate still covers the Overview only, so a failing live employee request always
+**Fixture limitation.** P4.5 adds no employee fixtures and this screen never
+consults the fixture source: the development fixture gate is only used by the
+Overview and Attendance screens, so a failing live employee request always
 produces a distinguishable error state instead of synthetic records.
 
 ## Dependencies (exact pins)
@@ -339,7 +341,7 @@ state library.
 npm run test
 ```
 
-**249 tests in 19 suites** (P4.4: 184).
+**439 tests in 29 suites** (P4.4: 184; P4.5: 249; P4.6.4: 398).
 
 | Suite | Covers |
 |---|---|
@@ -355,7 +357,13 @@ npm run test
 | `employees-create.test.tsx` | required fields, unsupported id, success body, 409, 422 mapping, unmapped 422, proxy 413, network, cancel |
 | `employees-rename.test.tsx` | detail load, whitespace name, rename body, 422/404/503, deactivate hand-off |
 | `employees-deactivate.test.tsx` | confirmation required, cancel, Escape with focus restore, single POST, refresh, failure |
-| `routes.test.tsx` | root redirect, functional Overview and Employees routes, remaining placeholders |
+| `attendance-journal.test.ts` / `attendance-filters.test.ts` / `attendance-pagination.test.ts` | append-order folding, tie rule, undated/unclassified handling, all four filters, client-side paging |
+| `attendance-display.test.ts` | UTC timestamp formatting, unreadable timestamps, unknown types, session labels, summary counts, UTC days |
+| `attendance-page.test.tsx` | concurrent load and full directory walk, partial failures, stale responses, refresh, resolution, torn journal, filters, paging, fixture mode |
+| `attendance-table.test.tsx` | append order, name/id resolution, unavailable directory, unknown type/timestamp, current session state, tie rule |
+| `attendance-checkout-policy.test.ts` | eligibility matrix and failure copy, uncertainty handling, cooldown wording |
+| `attendance-checkout-ui.test.tsx` | eligibility in the UI, dialog identity/cancel, single bodyless POST, duplicate prevention, success+refresh, every error classification, no fixture action |
+| `routes.test.tsx` | root redirect, functional Overview, Employees and Attendance routes, remaining placeholder |
 | theme / tokens / navigation / shell suites | unchanged from P4.2–P4.3 |
 
 Measured on 2026-11-12 (Node v24.21.0, npm 11.19.0):
@@ -365,7 +373,7 @@ Measured on 2026-11-12 (Node v24.21.0, npm 11.19.0):
 | `npm ls --depth=0` | exit 0 — 15 packages, unchanged |
 | `npm run lint` | exit 0, 0 problems |
 | `npm run typecheck` | exit 0 |
-| `npm run test` | exit 0 — **398 passed / 398**, 27 suites, ~63 s |
+| `npm run test` | exit 0 — **439 passed / 439**, 29 suites, ~71 s |
 | `npm run build` | exit 0 — static `/`, `/_not-found`, `/employees`, `/system-status`; dynamic `/attendance`, `/overview` and `/api/backend/[...path]` |
 
 ## Known limitations
@@ -397,6 +405,9 @@ Measured on 2026-11-12 (Node v24.21.0, npm 11.19.0):
   shows its error state and never falls back to synthetic data.
 * An employee identifier containing `%` cannot pass the proxy (documented
   defence against ambiguous encoding); ids are also limited to 128 characters.
+* No production deployment has been performed or validated, and no production
+  environment variable (`BACKEND_BASE_URL`) has been exercised outside local
+  configuration.
 * No authentication or RBAC (Phase 5); the backend stays loopback-only.
 
 ## Safety

@@ -4,6 +4,22 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 4, P4.6.6: final review and documentation corrections
+
+### Changed
+
+* `frontend/src/lib/fixtures/overview-fixtures.ts`, `frontend/next.config.ts` — corrected two stale doc comments only (the fixture journal is 25 events and FIX-003 is closed; the proxy arrived in P4.4, not P4.8). No code, contract or behaviour change.
+* `frontend/README.md`, `docs/PHASE4_IMPLEMENTATION_PLAN.md`, `docs/PHASE4_DASHBOARD_PROPOSAL.md` — corrected statements that still described the dashboard as checkout-free or fixture mode as Overview-only, refreshed the milestone statuses and test counts, and added the P4.6.6 review section with its measured results.
+
+### Verified
+
+* `npx vitest run` exit 0 — **439 passed / 439**, 29 suites; `npm run lint` exit 0; `npx tsc --noEmit` exit 0; `npm run build` exit 0 (static `/`, `/_not-found`, `/employees`, `/system-status`; dynamic `/attendance`, `/overview`, `/api/backend/[...path]`); `npm ls --depth=0` exit 0 — the same 15 pinned packages.
+
+### Notes
+
+* Review-only milestone: no feature, proxy rule, API contract, backend/database file or dependency changed.
+* Phase 4 decision: `PHASE 4 INCOMPLETE — BLOCKERS REMAIN`. P4.1–P4.6.5 are implemented and pass automated verification, but the System Status screen (P4.7) is still a placeholder and P4.8–P4.9 are not started. Live backend, real-browser and deployment validation remain unperformed.
+
 ## [Unreleased] — Phase 4, P4.6.5: operator check-out workflow
 
 ### Added

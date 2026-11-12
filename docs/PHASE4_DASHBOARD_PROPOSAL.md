@@ -1,8 +1,11 @@
 # Phase 4 — Web dashboard: approved direction
 
-Status: **APPROVED and in progress.** P4.2 created the scaffold, P4.3 the shell
-and navigation, P4.4 the typed API client, the secure proxy, development
-fixtures and the functional Overview.
+Status: **APPROVED; P4.1–P4.6.5 implemented and committed.** P4.2 created the
+scaffold, P4.3 the shell and navigation, P4.4 the typed API client, the secure
+proxy, development fixtures and the functional Overview, P4.5 the Employees
+screen, and P4.6 the Attendance journal with client-side filters/paging and the
+confirmed operator check-out. P4.6.6 re-verified the committed code; System Status
+(P4.7) and P4.8–P4.9 are not started.
 
 Milestone status and verification live in
 `docs/PHASE4_IMPLEMENTATION_PLAN.md`; operational detail in
@@ -126,7 +129,8 @@ changes only after the API returns.
 
 ## 6. Fixture policy
 
-Development-only fixtures are implemented for the Overview only:
+Development-only fixtures are implemented for the Overview and Attendance
+screens only (the Employees screen has no fixture mode):
 
 * enabled by `NODE_ENV=development` **and** `DASHBOARD_DATA_MODE=fixtures`,
   resolved on the server, impossible in a production build;
@@ -148,7 +152,8 @@ Development-only fixtures are implemented for the Overview only:
 | Metrics | multi-page totals, cursor loops, UTC boundaries, folding, ties | covered (P4.4) |
 | Overview UI | loading, empty, error, partial, retry, integrity warning | covered (P4.4) |
 | Employees UI | id rule (proxy-delegated), keyset paging, empty final page, create errors, rename, deactivation dialog and focus | covered (P4.5) |
-| Navigation / responsive / write flows | route rendering, 360–1280 px, checkout | partially covered: routes and employee writes (P4.5); checkout pending P4.6 |
+| Attendance / checkout | journal states, filters, paging, eligibility, single bodyless POST, duplicate prevention, success+refresh, every error classification, uncertainty without retry | covered (P4.6.2–P4.6.5) |
+| Navigation / responsive / write flows | route rendering, 360–1280 px, checkout | routes and all three writes covered by tests; **no real browser was driven**, so responsive and focus behaviour are static/CSS review only |
 
 ---
 
@@ -161,6 +166,7 @@ Development-only fixtures are implemented for the Overview only:
 | Employee CRUD | implemented in P4.5 (list, create, rename, deactivate) |
 | Attendance screen | journal + operator check-out implemented (P4.6.4–P4.6.5) |
 | Status screen | not started (P4.7) |
+| Phase 4 final review (P4.6.6) | automated frontend verification passed (439/439, lint, typecheck, build, 15 unchanged packages); live backend, real browser and deployment not verified |
 | Authentication / RBAC | Phase 5 |
 | Deployment | not requested; nothing may be published |
 

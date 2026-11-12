@@ -3,6 +3,52 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 47 — Phase 4 P4.6.6: final documentation, regression verification and Phase 4 review (2026-11-12)
+
+**Final review only: no feature, proxy rule, API contract, backend file, database
+file or dependency changed. Every automated frontend check passed on the
+committed tree; live backend, real-browser and deployment validation remain
+unperformed.**
+
+* **Baseline**: branch `main`, HEAD `52a6ded` with a clean tree; every Phase 4
+  commit (`e3ead4d`, `3d575d3`, `e68da71`, `376345d`, `0a8fd55`, `c0e5e77`,
+  `3b54163`, `52a6ded`) is an ancestor of HEAD.
+* **Inventory reviewed**: 85 `src` files and 30 files under `tests/` (29 suites
+  plus `setup.ts`) — App Router shell,
+  theme tokens, typed client, proxy policy, fixtures, Overview, Employees,
+  Attendance and the operator check-out.
+* **Architecture compliance**: browser → same-origin `/api/backend/...` → FastAPI;
+  the eight-pair allowlist, identifier/query/body policy, redirect refusal,
+  server-only `BACKEND_BASE_URL` and sanitized failures are unchanged. No new
+  endpoint, query parameter, schema change, authentication, biometric data,
+  UI framework or dependency was introduced.
+* **Regression**: `npx vitest run` exit 0 — **439 passed / 439 in 29 suites**
+  (70.8 s); `npm run lint` exit 0 — 0 problems; `npx tsc --noEmit` exit 0;
+  `npm run build` exit 0 (static `/`, `/_not-found`, `/employees`,
+  `/system-status`; dynamic `/attendance`, `/overview`,
+  `/api/backend/[...path]`); `npm ls --depth=0` exit 0 — 15 pinned packages,
+  unchanged.
+* **Documentation corrections (evidence-based, behaviour unchanged)**: the
+  `fixtureAttendance` comment said 26 events and listed FIX-003 as open (actual:
+  25 events; FIX-001 open, FIX-002/003/006 closed); `next.config.ts` claimed the
+  proxy "arrives in P4.8" (it arrived in P4.4); README, plan and proposal still
+  described the dashboard as checkout-free and fixture mode as Overview-only,
+  and carried stale counts (249/19, 398/27).
+* **Limitations retained and classified**: no auth/RBAC (deferred, Phase 5);
+  loopback-only API, no multi-process JSONL locking, full-journal download,
+  client-side filtering/paging and the full-directory walk (retained
+  architectural limitations); manual `PERSISTENCE_UNCONFIRMED` verification and
+  no residual-session reconciliation (retained); no live PostgreSQL/migration
+  verification, no camera/biometric accuracy validation, no real-browser and no
+  deployment validation (unverified validation items).
+* **Phase 4 decision**: `PHASE 4 INCOMPLETE — BLOCKERS REMAIN`. P4.7 (System
+  Status screen) is still a placeholder and P4.8–P4.9 are not started, so a
+  phase-complete claim would be unsupported even though every implemented
+  milestone passes verification.
+* **Not done / not claimed**: no new features, no deployment, no live backend or
+  PostgreSQL access, no camera or biometric data, no Git mutation. Phase 5 not
+  started.
+
 ## Step 46 — Phase 4 P4.6.5: operator check-out workflow (2026-11-12)
 
 **The Attendance page can now perform exactly one write: a confirmed,

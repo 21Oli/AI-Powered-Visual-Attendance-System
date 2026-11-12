@@ -14,9 +14,9 @@ disabled.
 | P4.1 | Repository inspection, architecture and dependency approval list | **PASSED** (owner-approved) |
 | P4.2 | Frontend scaffold and design system | **PASSED** (owner-approved, `e3ead4d`) |
 | P4.3 | Application shell and navigation | **PASSED** (owner-approved, `3d575d3`) |
-| P4.4 | Typed API client, secure proxy, fixtures and Overview | **READY FOR OWNER REVIEW** |
-| P4.5 | Employees screen (list, create, detail, rename, deactivate) | **READY FOR OWNER REVIEW** |
-| P4.6 | Attendance screen (journal, checkout confirmation) | journal + operator check-out **READY FOR OWNER REVIEW** (P4.6.1–P4.6.5) |
+| P4.4 | Typed API client, secure proxy, fixtures and Overview | **VERIFIED** — committed `e68da71`, re-verified in P4.6.6 |
+| P4.5 | Employees screen (list, create, detail, rename, deactivate) | **VERIFIED** — committed `376345d`, re-verified in P4.6.6 |
+| P4.6 | Attendance screen (journal, checkout confirmation) | journal + operator check-out **VERIFIED** — committed `0a8fd55`/`c0e5e77`/`3b54163`/`52a6ded`, re-verified in P4.6.6 |
 | P4.7 | System status screen (API health, offline states) | not started |
 | P4.8 | Remaining API surfaces (writes) and hardening | not started |
 | P4.9 | Final verification, documentation and acceptance review | not started |
@@ -260,12 +260,42 @@ at the fixture clock instant instead of weakening that assertion.
 * Attendance has no server pagination, so the screen downloads the whole journal
   and pages it in the browser; events carry no employee name, so names come from
   walking every `GET /employees` page and are never inferred.
-* Checkout accepts no body and enforces the approved 300-second cooldown, which
-  must be surfaced verbatim.
+* Checkout accepts no body; the service enforces its configured cooldown
+  (300 seconds by default) and stays authoritative, so the UI explains the
+  cooldown without gating on a browser-side timer.
 * An identifier containing `%`, `#`, `?`, `/` or `\` is refused by the proxy by
   design; ids are capped at 128 characters and may not have surrounding
   whitespace. Such records can be listed but not managed, which is displayed
   rather than hidden.
-* The Employees screen has no fixture mode: the development fixture gate covers
-  the Overview only.
+* The Employees screen has no fixture mode: the development fixture gate is used
+  by the Overview and Attendance screens only.
 * No authentication or RBAC until Phase 5.
+
+---
+
+## 7. P4.6.6 final Phase 4 review (2026-11-12)
+
+Review-only milestone: no source behaviour, proxy rule, API contract, backend
+file, database file or dependency changed. Three stale statements were corrected
+from evidence: the `fixtureAttendance` doc comment (said 26 events and listed
+FIX-003 as open; it builds 25 events and FIX-003 is closed), `next.config.ts`
+(claimed the proxy "arrives in P4.8"; it arrived in P4.4), and documentation that
+still described the page as checkout-free or fixture mode as Overview-only, plus
+stale test counts.
+
+Verified on the committed tree (`52a6ded`, clean working tree):
+
+| Command | Result |
+|---|---|
+| `npx vitest run` | exit 0 — **439 passed / 439**, 29 suites, 70.8 s |
+| `npm run lint` | exit 0 — 0 problems |
+| `npx tsc --noEmit` | exit 0 — strict |
+| `npm run build` | exit 0 — static `/`, `/_not-found`, `/employees`, `/system-status`; dynamic `/attendance`, `/overview`, `/api/backend/[...path]` |
+| `npm ls --depth=0` | exit 0 — the same 15 pinned packages |
+
+**Phase 4 status: P4.1–P4.6.5 are implemented and committed, and automated
+frontend verification passes. P4.7 (System Status) is still a placeholder and
+P4.8–P4.9 are not started, so the phase-level decision is
+`PHASE 4 INCOMPLETE — BLOCKERS REMAIN`.** Live backend (PostgreSQL-gated),
+real-browser and deployment validation remain unperformed, so this is not a
+production-readiness claim.

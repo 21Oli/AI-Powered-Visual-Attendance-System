@@ -78,16 +78,17 @@ function at(dayStartMs: number, hours: number, minutes: number): string {
  * A deterministic synthetic journal spanning three UTC calendar days, plus one
  * unreadable timestamp.
  *
- * States the Attendance page can be exercised with: FIX-001 and FIX-003 are
- * open (latest event is a check-in), FIX-002 and FIX-006 are closed, and the two
- * **inactive** employees FIX-004/FIX-005 hold historical open sessions (their
- * only check-ins sit two days back). FIX-005 has no recent activity at all. The
- * final record is undated, which is legal for the contract (any non-empty
- * string) and must never be turned into a fabricated date.
+ * States the Attendance page can be exercised with: FIX-001 is open (its latest
+ * event is the check-in at the clock instant), FIX-002, FIX-003 and FIX-006 are
+ * closed (their latest dated event is a check-out), and the two **inactive**
+ * employees FIX-004/FIX-005 hold historical open sessions (their only check-ins
+ * sit two days back). FIX-005 has no recent activity at all. The final record is
+ * undated, which is legal for the contract (any non-empty string) and must never
+ * be turned into a fabricated date.
  *
  * The last **dated** record sits at the fixture clock instant, so the journal
  * always contains a record for "now" and two different clocks never produce
- * identical data. The journal is 26 events, so the default 20-row page has a
+ * identical data. The journal is 25 events, so the default 20-row page has a
  * second page. `incomplete_trailing_record` stays true so the warning state is
  * demonstrable.
  */
