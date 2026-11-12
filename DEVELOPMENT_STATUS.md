@@ -3,6 +3,46 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 50 — Phase 4 P4.9: final regression and Phase 4 acceptance (2026-11-12)
+
+**Final verification and acceptance review. No application source, test, proxy
+rule, API contract, backend file, database file, dependency or Git state changed.**
+
+* **Baseline**: branch `main`, HEAD `4629412` with a clean working tree, no staged
+  or untracked files.
+* **Scope established from the documents**: the P4.9 row (final verification,
+  documentation and acceptance review) plus the milestone's acceptance
+  conditions. No contradiction or hidden requirement was found — P4.1–P4.7 are
+  complete, P4.8 is closed by bookkeeping, and P4.9 was the only open item.
+* **Audit**: four functional screens (Overview, Employees, Attendance with
+  filters/paging and operator check-out, System Status); exactly the eight
+  approved route/method pairs are consumed (`ROUTE_RULES` has eight entries); the
+  proxy keeps identifier validation, `after`/`limit`-only queries, a 4 KiB body
+  cap on the two body routes, redirect refusal, sanitized failures, `no-store`,
+  server-only `BACKEND_BASE_URL` and no CORS; the fixture gate still requires
+  development **and** `DASHBOARD_DATA_MODE=fixtures` server-side, is labelled,
+  never falls back and never writes; attendance keeps append order, the shared
+  fold, the torn-tail warning and unknown/undated handling; checkout stays
+  bodyless, single-flight, success-only-after-201, with `PERSISTENCE_UNCONFIRMED`
+  reported as uncertain.
+* **Automated verification (run in this step)**: `npx vitest run` exit 0 —
+  **457 passed / 457 in 31 suites** (49.66 s); `npm run lint` exit 0 — 0 problems;
+  `npx tsc --noEmit` exit 0; `npm run build` exit 0 (static `/`, `/_not-found`,
+  `/employees`; dynamic `/attendance`, `/overview`, `/system-status`,
+  `/api/backend/[...path]`); `npm ls --depth=0` exit 0 — the same 15 pinned
+  packages. `git diff --check` exit 0 after the documentation edits.
+* **Decision**: **`PHASE 4 ACCEPTED`** for the documented dashboard scope. This is
+  not a production-readiness claim and resolves none of the recorded limitations.
+* **Limitations retained**: no authentication/RBAC (Phase 5), loopback-only
+  backend, no multi-process JSONL locking, no residual-session reconciliation,
+  client-side attendance filtering/paging, manual `PERSISTENCE_UNCONFIRMED`
+  verification, and no live PostgreSQL/migration, real-camera/biometric,
+  real-browser or deployment validation.
+* **Validation boundaries**: no live backend, PostgreSQL, browser, camera,
+  biometric or deployment validation was performed, and none is claimed.
+* **Not done**: no code, test, dependency, backend, database, secret, camera,
+  biometric or Git operation; Phase 5 not started.
+
 ## Step 49 — Phase 4 P4.8: documentation-only closure (2026-11-12)
 
 **P4.8 required no implementation. The owner approved closing it because every

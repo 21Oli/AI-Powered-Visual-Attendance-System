@@ -19,7 +19,7 @@ disabled.
 | P4.6 | Attendance screen (journal, checkout confirmation) | journal + operator check-out **VERIFIED** — committed `0a8fd55`/`c0e5e77`/`3b54163`/`52a6ded`, re-verified in P4.6.6 |
 | P4.7 | System status screen (API health, offline states) | **COMPLETED** — committed `276302f` (liveness-only health screen) |
 | P4.8 | Remaining API surfaces (writes) and hardening | completed — requirements satisfied by P4.5–P4.7; no additional implementation required |
-| P4.9 | Final verification, documentation and acceptance review | not started |
+| P4.9 | Final verification, documentation and acceptance review | **COMPLETED** — final regression passed (457 tests); Phase 4 accepted for its documented scope |
 
 Every milestone stops for explicit owner approval.
 
@@ -299,7 +299,8 @@ Verified on the committed tree (`52a6ded`, clean working tree):
 automated verification passing; P4.7 was still a placeholder, so that review
 recorded `PHASE 4 INCOMPLETE — BLOCKERS REMAIN`.** P4.7 has since been
 implemented (§8) and P4.8 is closed by documentation bookkeeping (§9); **P4.9
-remains and Phase 4 is still incomplete.** Live backend (PostgreSQL-gated),
+has since completed the final acceptance review (§10) and Phase 4 is accepted,
+subject to the retained limitations.** Live backend (PostgreSQL-gated),
 real-browser and deployment validation are still unperformed, so nothing here is
 a production-readiness claim.
 
@@ -396,9 +397,51 @@ no CORS headers; development-only fixture isolation. These are the controls
 already covered by `frontend/tests/proxy.test.ts`; P4.8 added no security
 guarantee and relaxed none.
 
-**Phase 4 remains incomplete:** P4.9 (final verification, documentation and
-acceptance review) is not started. Every previously recorded limitation still
-stands — no authentication/RBAC, loopback-only backend, no multi-process JSONL
+**Phase 4 acceptance:** P4.9 completed the final review (§10) and Phase 4 is
+accepted, subject to the retained limitations listed there. Every previously
+recorded limitation still stands — no authentication/RBAC, loopback-only backend, no multi-process JSONL
 journal locking, no residual-session reconciliation, client-side attendance
 filtering and paging, manual `PERSISTENCE_UNCONFIRMED` verification, and no live
 PostgreSQL, real-camera/biometric, real-browser or deployment validation.
+
+---
+
+## 10. P4.9 final regression and Phase 4 acceptance (2026-11-12)
+
+Final verification milestone: no application source, test, proxy rule, API
+contract, backend file, database file, dependency or Git state changed. P4.9's
+scope was its milestone row plus the acceptance conditions in the authorization;
+the documents did not contradict one another or leave a hidden requirement
+(P4.1–P4.7 completed, P4.8 closed by bookkeeping, P4.9 the only open item).
+
+Verified on the committed tree (`4629412`, clean working tree):
+
+| Command | Result |
+|---|---|
+| `npx vitest run` | exit 0 — **457 passed / 457**, 31 suites, 49.66 s |
+| `npm run lint` | exit 0 — 0 problems |
+| `npx tsc --noEmit` | exit 0 — strict |
+| `npm run build` | exit 0 — static `/`, `/_not-found`, `/employees`; dynamic `/attendance`, `/overview`, `/system-status`, `/api/backend/[...path]` |
+| `npm ls --depth=0` | exit 0 — the same 15 pinned packages |
+
+**Audit evidence.** Four screens are functional (Overview, Employees, Attendance
+with client-side filters/paging and operator check-out, System Status). The client
+covers exactly the eight approved route/method pairs. The proxy keeps its
+eight-rule allowlist, identifier validation, `after`/`limit`-only query surface, a
+4 KiB body cap on the two body routes, redirect refusal, sanitized failures,
+`no-store`, server-only `BACKEND_BASE_URL` and no CORS. The fixture gate still
+requires `NODE_ENV === "development"` **and** `DASHBOARD_DATA_MODE=fixtures`,
+resolved server-side, visibly labelled, never a fallback from a failed live
+request and never able to send a write. Attendance keeps journal append order, the
+shared least-latest fold, the torn-tail warning, unknown/undated handling and
+independent partial failures; checkout stays bodyless, single-flight,
+success-only-after-validated-201, with `PERSISTENCE_UNCONFIRMED` reported as
+uncertain and manually verifiable.
+
+**Phase 4 decision: `PHASE 4 ACCEPTED` for the documented dashboard scope.** This
+is not a production-readiness claim: no authentication/RBAC, loopback-only
+backend, no multi-process JSONL locking, no residual-session reconciliation,
+client-side attendance filtering/paging, manual `PERSISTENCE_UNCONFIRMED`
+verification, and no live PostgreSQL/migration, real-camera/biometric,
+real-browser or deployment validation. Those remain deferred (Phase 5+) or
+outstanding external validation, not Phase 4 acceptance blockers.

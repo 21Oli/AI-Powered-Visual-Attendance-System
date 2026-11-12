@@ -4,6 +4,23 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 4, P4.9: final regression and acceptance
+
+### Verified
+
+* `npx vitest run` exit 0 — **457 passed / 457**, 31 suites (49.66 s); `npm run lint` exit 0 — 0 problems; `npx tsc --noEmit` exit 0; `npm run build` exit 0 (static `/`, `/_not-found`, `/employees`; dynamic `/attendance`, `/overview`, `/system-status`, `/api/backend/[...path]`); `npm ls --depth=0` exit 0 — the same 15 pinned packages. All run in this milestone on `4629412` with a clean working tree.
+
+### Changed
+
+* `docs/PHASE4_IMPLEMENTATION_PLAN.md` — P4.9 milestone row marked completed, a new §10 records the final regression evidence and acceptance decision, and the earlier phase-status wording now points at it.
+* `docs/PHASE4_DASHBOARD_PROPOSAL.md`, `frontend/README.md`, `DEVELOPMENT_STATUS.md` — record the acceptance decision, the verified results and the remaining deferred work.
+
+### Notes
+
+* **Phase 4 decision: `PHASE 4 ACCEPTED` for the documented dashboard scope** — four functional screens, exactly the eight approved API pairs, unchanged proxy controls, development-only fixtures, append-order attendance with the shared session fold, and a bodyless, single-flight, success-only-after-201 operator check-out.
+* This is not a production-readiness claim. No authentication/RBAC, a loopback-only backend, no multi-process JSONL locking, no residual-session reconciliation, client-side attendance filtering/paging and manual `PERSISTENCE_UNCONFIRMED` verification remain, and live PostgreSQL/migrations, real-camera/biometric accuracy, real-browser and deployment validation were not performed.
+* The review changed documentation only; no application code, test, dependency, backend, database or Git state was touched.
+
 ## [Unreleased] — Phase 4, P4.8: documentation-only closure
 
 ### Changed

@@ -8,7 +8,9 @@ plus the System Status screen (P4.7) are implemented, and every automated
 frontend check passes (457 tests, lint, typecheck, build, unchanged
 dependencies). System Status reports backend API **liveness only**, and the screen
 says so. P4.8 is closed as already satisfied by P4.5–P4.7 (documentation only, no
-additional implementation); P4.9 remains.
+additional implementation), and P4.9 completed the final regression and
+acceptance review: **Phase 4 is accepted for its documented scope**, with the
+limitations below still unresolved.
 No live backend has been verified: the FastAPI startup gate requires PostgreSQL,
 which this phase is not authorized to connect to. No browser was driven and no
 deployment was performed or validated.
