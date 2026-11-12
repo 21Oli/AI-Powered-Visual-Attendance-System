@@ -28,6 +28,7 @@ import { journalUtcDays, summariseJournal } from "../../lib/attendance/summary";
 import { FIXTURE_LABEL } from "../../lib/fixtures/overview-fixtures";
 import { MetricCard } from "../dashboard/MetricCard";
 import { Button } from "../ui/Button";
+import { AttendanceCheckout } from "./AttendanceCheckout";
 import { AttendanceFilters as FiltersPanel } from "./AttendanceFilters";
 import { AttendancePagination } from "./AttendancePagination";
 import { AttendanceTable } from "./AttendanceTable";
@@ -43,12 +44,13 @@ type Resource<T> =
 const NO_EVENTS: readonly AttendanceEvent[] = [];
 
 /**
- * Read-only Attendance page.
+ * Attendance page: a read-only journal plus the operator check-out action.
  *
  * Both resources load concurrently and independently: a failed journal still
  * leaves a loaded directory (and vice versa), and neither failure is papered
- * over with fixture data. The page never issues an attendance mutation — there
- * is no checkout control here and no client call to the checkout endpoint.
+ * over with fixture data. The only mutation the page can trigger is the
+ * explicit, confirmed operator check-out in `AttendanceCheckout`; there is no
+ * check-in, no bulk action and no retry, and the journal itself is never edited.
  *
  * All filtering and paging happen over the loaded journal snapshot, because the
  * backend attendance endpoint accepts no query parameters.
@@ -136,6 +138,9 @@ export function AttendanceView({
       : new Map(employeeList.map((employee) => [employee.employee_id, employee]));
 
   const sessionStates = deriveSessionStates(foldLatestEvents(events));
+  const journalEmployeeIds = [
+    ...new Set(events.map((event) => event.employee_id)),
+  ];
   const summary = summariseJournal(events);
   const utcDays = journalUtcDays(events);
   const pageResult = paginateAttendanceEvents(
@@ -172,8 +177,8 @@ export function AttendanceView({
           <p className={styles.lead}>
             The attendance journal in append order, with employee names resolved
             from the register. Filtering and paging happen in this page; the
-            service exposes no attendance query parameters. This view is
-            read-only.
+            service exposes no attendance query parameters. History is
+            read-only; the only action is an operator check-out.
           </p>
         </div>
         <Button variant="secondary" onClick={reload}>
@@ -272,6 +277,18 @@ export function AttendanceView({
             Retry
           </Button>
         </div>
+      ) : null}
+
+      {attendance.status !== "error" ? (
+        <AttendanceCheckout
+          dataSourceKind={dataSourceKind}
+          employeeIds={journalEmployeeIds}
+          employees={employeesById}
+          directoryState={directoryState}
+          sessionStates={sessionStates}
+          journalLoading={attendance.status === "loading"}
+          onRefresh={reload}
+        />
       ) : null}
 
       {attendance.status === "loading" ? (

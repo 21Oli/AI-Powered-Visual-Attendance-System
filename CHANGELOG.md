@@ -4,6 +4,26 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 4, P4.6.5: operator check-out workflow
+
+### Added
+
+* `frontend/src/lib/attendance/checkout.ts` — the eligibility matrix (fixture mode, directory loading/unavailable, unresolved id, proxy-unsupported id, inactive employee, indeterminate or closed session, request already pending) with one explanation per refusal, plus operator-facing copy for every classified check-out failure and the informational cooldown default.
+* `frontend/src/components/attendance/AttendanceCheckout.tsx` + CSS Module — one panel listing employees with journal events, their derived session state, a `Check out` action only when every rule holds, explicit reasons otherwise, a `role="status"` pending line, success/error messages and an explicit `Refresh journal` step for uncertain outcomes.
+
+### Changed
+
+* `frontend/src/components/attendance/AttendanceView.tsx`: renders the check-out panel for the loaded journal and passes the derived session states and a reload callback; the journal itself is still never edited and no optimistic event is inserted.
+* `frontend/tests/attendance-page.test.tsx`: the unknown-employee assertions are now scoped to the journal table, because the check-out panel also renders names and ids.
+* `frontend/README.md`, `docs/PHASE4_IMPLEMENTATION_PLAN.md`, `docs/PHASE4_DASHBOARD_PROPOSAL.md`, `DEVELOPMENT_STATUS.md`: document the operator check-out and its safety behaviour.
+
+### Notes
+
+* A check-out is confirmed in the shared dialog and sent exactly once through the existing `checkoutEmployee` client: no body, no `Content-Type`, no retry, no abort signal (cancelling a write mid-flight would invent exactly the uncertainty the UI must not create).
+* Success is shown only after the service returns a validated check-out event and the journal reloads; the session closes only because the refreshed journal says so.
+* `503 PERSISTENCE_UNCONFIRMED` is presented as uncertain: the event may or may not be recorded, it is never retried or described as success or definite failure, and the operator is asked to refresh the journal and verify the latest event first.
+* Fixture mode offers no check-out action at all and never mutates a fixture record; no backend, proxy, database or dependency change was made.
+
 ## [Unreleased] — Phase 4, P4.6.4: read-only Attendance journal
 
 ### Added

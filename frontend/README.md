@@ -3,10 +3,12 @@
 Next.js 16 (App Router) + TypeScript + CSS Modules dashboard for the
 AI-Powered Visual Attendance System.
 
-**Status: P4.6.4 complete — the Attendance screen now lists the journal read-only
-with UTC-day, event-type, employee and session-status filters and client-side
-pagination. There is no checkout control, so the page never mutates attendance.
-The typed client, proxy, fixtures, Overview and Employees screen are unchanged.**
+**Status: P4.6.5 complete — the Attendance screen lists the journal read-only with
+UTC-day, event-type, employee and session-status filters and client-side
+pagination, plus one controlled action: an operator check-out for an active
+employee with an open session, behind a confirmation dialog and never retried or
+optimistic. The typed client, proxy, fixtures, Overview and Employees screen are
+unchanged.**
 System Status remains a structural placeholder (P4.7).
 No live backend has been verified: the FastAPI startup gate requires PostgreSQL,
 which this phase is not authorized to connect to.
@@ -87,7 +89,7 @@ DASHBOARD_DATA_MODE=fixtures
 | `/` | — | redirects to `/overview` |
 | `/overview` | Overview | **functional** (dynamic) |
 | `/employees` | Employees | **functional** (client component) |
-| `/attendance` | Attendance | **functional, read-only** (dynamic) |
+| `/attendance` | Attendance | **functional** — read-only journal + operator check-out (dynamic) |
 | `/system-status` | System Status | structural placeholder |
 | `/api/backend/[...path]` | — | **proxy** (dynamic, server-only) |
 | any other path | — | `not-found` |
@@ -227,6 +229,27 @@ explained when the directory is unavailable instead of looking complete.
 reset to page 1 on a filter or size change and clamped when the result shrinks.
 The journal is fetched once; paging issues no further attendance request and
 never implies server-side paging.
+* **Operator checkout (P4.6.5)** — a panel offers one `Check out` action per
+  employee, and only when every rule holds: the journal and the whole register
+  loaded, the id resolved and proxy-addressable, the employee active, the shared
+  fold giving `open`, live data (never fixtures) and no request already in
+  flight. Every other case shows the reason instead of a dead control. The
+  confirmation dialog names the employee and id, states that this is an
+  operator-authorized check-out that records an event, gives the service's
+  configured cooldown (300 seconds by default, authoritative on the backend) and
+  says the dashboard cannot undo it. Confirm sends exactly one bodyless POST
+  through the existing proxy via `checkoutEmployee`; Cancel, Escape and the
+  pending state behave as the shared dialog already does. Success is shown only
+  after the service confirms, then the journal and register reload, so the
+  session reads Closed only because the refreshed journal says so.
+* **Checkout failures** — `classifyCheckoutError` drives distinct copy for
+  `EMPLOYEE_NOT_FOUND`, the three `CHECKOUT_REJECTED` reasons,
+  `PERSISTENCE_REJECTED`, `PERSISTENCE_UNCONFIRMED`, `ATTENDANCE_UNAVAILABLE`,
+  `DATABASE_UNAVAILABLE`, transport/proxy failures and malformed successes. A
+  `503 PERSISTENCE_UNCONFIRMED` is reported as **uncertain** — the event may or
+  may not be recorded — is never retried, never shown as success or as a
+  definite failure, and offers an explicit journal refresh for verification.
+  Fixture mode has no action at all and never mutates a fixture record.
 * **Fixtures** — `fixtureAttendance` builds 25 synthetic events over three UTC days
 for `FIX-001`…`FIX-006`, including an inactive employee with a historical open
 session and one undated record. The gate is unchanged
@@ -242,7 +265,7 @@ frontend/src/
 │   ├── api/backend/[...path]/route.ts        # proxy
 │   ├── layout.tsx, page.tsx, loading.tsx, error.tsx, not-found.tsx, globals.css
 ├── components/
-│   ├── attendance/{AttendanceView,AttendanceTable,AttendanceFilters,AttendancePagination} + CSS Modules
+│   ├── attendance/{AttendanceView,AttendanceTable,AttendanceFilters,AttendancePagination,AttendanceCheckout} + CSS Modules
 │   ├── dashboard/{OverviewDashboard,MetricCard} + CSS Modules
 │   ├── layout/{AppShell,Sidebar,Header,MobileNavigation,PagePlaceholder}
 │   ├── icons/NavIcon.tsx
@@ -352,8 +375,13 @@ Measured on 2026-11-12 (Node v24.21.0, npm 11.19.0):
   responses or development fixtures.
 * No browser was driven; responsive layout and the proxy's real network path are
   covered by tests and static review only.
-* The Attendance screen is read-only — there is no checkout control — and System
-  Status is still a placeholder, so there is no health widget.
+* The only write the dashboard performs is an operator check-out, and only for
+  an active, resolved employee with an open session in live mode; there is no
+  check-in, bulk, automatic or retried check-out. System Status is still a
+  placeholder, so there is no health widget.
+* Check-out `PERSISTENCE_UNCONFIRMED` cannot be resolved by the dashboard: the
+  operator must inspect the refreshed journal before acting again, and nothing
+  in the UI reconciles a residual open session.
 * No employee fixtures exist, so the Employees screen has no offline mode: with
   no backend it shows its error state.
 * The Attendance screen downloads the whole journal on every load and paginates

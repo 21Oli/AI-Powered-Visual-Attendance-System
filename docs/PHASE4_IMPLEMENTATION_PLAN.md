@@ -16,7 +16,7 @@ disabled.
 | P4.3 | Application shell and navigation | **PASSED** (owner-approved, `3d575d3`) |
 | P4.4 | Typed API client, secure proxy, fixtures and Overview | **READY FOR OWNER REVIEW** |
 | P4.5 | Employees screen (list, create, detail, rename, deactivate) | **READY FOR OWNER REVIEW** |
-| P4.6 | Attendance screen (journal, checkout confirmation) | journal **READY FOR OWNER REVIEW** (P4.6.1–P4.6.4); checkout UI not started |
+| P4.6 | Attendance screen (journal, checkout confirmation) | journal + operator check-out **READY FOR OWNER REVIEW** (P4.6.1–P4.6.5) |
 | P4.7 | System status screen (API health, offline states) | not started |
 | P4.8 | Remaining API surfaces (writes) and hardening | not started |
 | P4.9 | Final verification, documentation and acceptance review | not started |
@@ -189,9 +189,10 @@ Browser → AttendanceView (client) → createOverviewSource(dataSourceKind)
 | Screen | `src/components/attendance/{AttendanceView,AttendanceTable,AttendanceFilters,AttendancePagination}` |
 | Route | `src/app/(dashboard)/attendance/page.tsx` (dynamic) |
 
-**Read-only by construction.** The page has no checkout control and never
-imports `checkoutEmployee`, so no attendance mutation can be triggered from it;
-the checkout client and its error classifier from P4.6.3 stay unused by the UI.
+**History is read-only by construction.** The journal table has no mutation
+control and nothing edits, inserts or re-sorts an event. P4.6.5 adds exactly one
+write — the confirmed operator check-out described below — and no other control
+on the page sends anything.
 
 **Loading.** The journal and the complete employee directory load concurrently
 through the existing `createOverviewSource` and `Promise.allSettled`, so an
@@ -225,8 +226,19 @@ serve it.
 | `npm ls --depth=0` | exit 0 — 15 packages, unchanged |
 | `npm run lint` | exit 0 — 0 problems |
 | `npm run typecheck` | exit 0 — strict |
-| `npm run test` | exit 0 — **398 passed / 398**, 27 suites |
+| `npm run test` | exit 0 — **439 passed / 439**, 29 suites (P4.6.5) |
 | `npm run build` | exit 0 — dynamic `/attendance`; static `/employees`, `/system-status` |
+
+**P4.6.5 addendum.** `AttendanceCheckout` reuses `checkoutEmployee`,
+`classifyCheckoutError`, the shared `ConfirmDialog`/`StatusMessage` primitives and
+`isManageableEmployeeId`; `src/lib/attendance/checkout.ts` holds the eligibility
+matrix and the failure copy. One request is in flight at most (guarded by a ref as
+well as state), the POST carries no body and therefore no `Content-Type`, nothing
+is optimistic, and a confirmed success reloads the journal so the session closes
+only because the service recorded it. A `503 PERSISTENCE_UNCONFIRMED` is labelled
+uncertain, never retried and never described as success or definite failure; it
+offers an explicit journal refresh for verification. Fixture mode offers no action
+at all.
 
 Test growth 352 → 398 (+46) across three new attendance suites and the updated
 route suite. The only first-run failure that needed a source change (rather than
@@ -239,8 +251,9 @@ at the fixture clock instant instead of weakening that assertion.
 ## 6. Remaining work and constraints
 
 * System Status remains a placeholder (P4.7). The Attendance journal is
-  implemented read-only (P4.6.4) and there is still no checkout control, so
-  `checkoutEmployee` stays unused by the UI.
+  implemented read-only and P4.6.5 added the single approved write: a confirmed
+  operator check-out for an active employee with an open session in live mode.
+  There is still no check-in, bulk or automatic check-out.
 * **No live verification.** The backend's G2+G8 startup gate requires
   PostgreSQL; all proxy/Overview evidence is from mocked responses and
   development fixtures. No browser was driven either.

@@ -284,8 +284,11 @@ describe("attendance page: data loading", () => {
 
     render(<AttendanceView dataSourceKind="live" />);
 
-    expect(await screen.findByText("Unknown employee")).toBeDefined();
-    expect(screen.getByText("Z")).toBeDefined();
+    const table = await screen.findByRole("table", {
+      name: "Attendance journal, in append order",
+    });
+    expect(within(table).getByText("Unknown employee")).toBeDefined();
+    expect(within(table).getByText("Z")).toBeDefined();
   });
 
   it("shows an unknown event type and an unreadable timestamp", async () => {

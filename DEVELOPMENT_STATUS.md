@@ -3,6 +3,66 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 46 — Phase 4 P4.6.5: operator check-out workflow (2026-11-12)
+
+**The Attendance page can now perform exactly one write: a confirmed,
+operator-authorized check-out for an active employee with an open session. No
+Python file changed, the proxy and its allowlist are untouched, no database was
+contacted, and nothing was verified against a live backend.**
+
+* **Baseline preserved**: branch `main`, HEAD `3b54163` with a clean tree.
+  `checkoutEmployee`, `classifyCheckoutError`, `ConfirmDialog`, `StatusMessage`,
+  `isManageableEmployeeId` and the shared journal fold were reused unchanged; no
+  second checkout client, retry helper or dialog was written.
+* **Eligibility** (`src/lib/attendance/checkout.ts`): shipped test-only logic that
+  blocks on any failed condition — fixture mode, directory still loading or
+  unavailable, unresolved id, an id the proxy cannot address, an inactive
+  employee, an indeterminate session, a closed session, or a check-out already in
+  flight — and returns the reason the UI shows. A historical check-in row is never
+  enough; the state comes from `deriveSessionStates(foldLatestEvents(...))`.
+* **UI** (`AttendanceCheckout`): one panel listing every employee with journal
+  events, their derived state, and either a `Check out` button or the explicit
+  reason there is none. Rows keep journal order and no disabled-looking control
+  is rendered as available.
+* **Confirmation**: the shared `ConfirmDialog` names the employee and id, states
+  that it is an operator-authorized check-out that records an attendance event,
+  gives the service's configured cooldown (300 seconds shown as a default, the
+  service's configuration is authoritative), says the dashboard cannot undo it,
+  and keeps its focus trap, Escape handling and focus restoration. Cancel sends
+  nothing; a confirm re-checks eligibility against current props before sending.
+* **Request**: one `checkoutEmployee(employeeId)` call with no abort signal (so the
+  dashboard never manufactures uncertainty by cancelling a write), no body and
+  therefore no `Content-Type`; the existing proxy and typed client are the only
+  transport. No retry, no duplicate request, no optimistic journal insert.
+* **Pending**: the pending employee's control is disabled and reads `Checking
+  out…`, the dialog disables Cancel and Confirm, a `role="status"` line announces
+  the in-flight check-out, a ref guard refuses extra confirms before re-render,
+  and unrelated employees stay usable.
+* **Success**: shown only after the service returns a validated check-out event;
+  the journal and register then reload, so the session reads Closed and the action
+  disappears because the refreshed journal says so, not because the UI assumed it.
+* **Failures**: `classifyCheckoutError` drives distinct copy for
+  `EMPLOYEE_NOT_FOUND`, `EMPLOYEE_INACTIVE`, `NO_OPEN_SESSION`,
+  `CHECKOUT_COOLDOWN`, `PERSISTENCE_REJECTED`, `PERSISTENCE_UNCONFIRMED`,
+  `ATTENDANCE_UNAVAILABLE`, `DATABASE_UNAVAILABLE`, network/proxy errors and
+  malformed successes. Drift failures refresh the data; cooldown and rejection do
+  not. `PERSISTENCE_UNCONFIRMED` is called *uncertain* — never success, never a
+  definite failure, never retried, no retry offered — and offers an explicit
+  `Refresh journal` verification step.
+* **Fixtures**: fixture mode renders no action and no dialog and cannot call
+  `checkoutEmployee`; the existing banner and server-side gate are unchanged.
+* **Tests**: +41 → **439 passed / 439 in 29 suites** (from 398/27):
+  `attendance-checkout-ui.test.tsx` and `attendance-checkout-policy.test.ts`, plus
+  a scoped query fix in the P4.6.4 page suite (the employee panel now also prints
+  names and ids).
+* **Verified**: `npm ls --depth=0` exit 0 (15 packages, unchanged); `npm run lint`
+  exit 0; `npm run typecheck` exit 0; `npm run test` exit 0 (439/439);
+  `npm run build` exit 0 with dynamic `/attendance`.
+* **Not done / not claimed**: no check-in, bulk or automatic check-out, no retry,
+  no optimistic update, no journal reconciliation, no backend/proxy/database
+  change, no new dependency, and no live backend or browser verification (the
+  G2+G8 startup gate needs PostgreSQL). P4.6.6 not started.
+
 ## Step 45 — Phase 4 P4.6.4: read-only Attendance journal, filters, paging and fixtures (2026-11-12)
 
 **The Attendance screen lists the journal read-only. There is no checkout

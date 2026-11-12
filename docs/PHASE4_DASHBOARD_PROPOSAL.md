@@ -88,7 +88,7 @@ browser ──same-origin──▶ Next Route Handler ──server-side fetch─
 |---|---|---|
 | **Overview** | `GET /api/v1/employees` (all keyset pages), `GET /api/v1/attendance` | **implemented** — loading, empty, error, partial, fixture |
 | **Employees** | `GET/POST /api/v1/employees`, `GET/PATCH /api/v1/employees/{id}`, `POST …/deactivate` | **implemented** — loading, empty, error/retry, keyset paging, create, rename, confirmed deactivation |
-| **Attendance** | `GET /api/v1/attendance`, `GET /api/v1/employees` (all keyset pages, for names and the employee filter) | **implemented, read-only** — loading, empty, journal failure, directory failure, both failing, torn journal, four client-side filters, client-side paging, fixture mode. `POST …/checkout` is not wired. |
+| **Attendance** | `GET /api/v1/attendance`, `GET /api/v1/employees` (all keyset pages, for names and the employee filter), `POST /api/v1/attendance/{id}/checkout` | **implemented** — journal states as before, plus a confirmed operator check-out for an active employee with an open session in live mode (one request, no retry, no optimistic close, uncertain `503` reported as uncertain, fixture mode disabled) |
 | **System Status** | `GET /api/v1/health` | placeholder (P4.7) |
 
 Verified contract facts that shape the UI:
@@ -159,7 +159,7 @@ Development-only fixtures are implemented for the Overview only:
 | Live backend integration | **NOT VERIFIED** — the FastAPI startup gate (G2+G8) needs PostgreSQL, which this phase may not open |
 | Browser verification | not performed |
 | Employee CRUD | implemented in P4.5 (list, create, rename, deactivate) |
-| Attendance screen | journal implemented read-only (P4.6.4); checkout UI not started |
+| Attendance screen | journal + operator check-out implemented (P4.6.4–P4.6.5) |
 | Status screen | not started (P4.7) |
 | Authentication / RBAC | Phase 5 |
 | Deployment | not requested; nothing may be published |
