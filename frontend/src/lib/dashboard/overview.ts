@@ -1,8 +1,14 @@
-import {
-  EVENT_TYPE_CHECK_IN,
-  EVENT_TYPE_CHECK_OUT,
-} from "../api/types";
+import { EVENT_TYPE_CHECK_IN } from "../api/types";
 import type { AttendanceEvent, Employee } from "../api/types";
+import {
+  foldLatestEvents,
+  parseInstant,
+  utcDayKey,
+} from "../attendance/journal";
+
+// The instant/day helpers live with the shared journal logic now; they stay
+// exported from here so existing consumers and tests keep working unchanged.
+export { parseInstant, utcDayKey };
 
 /**
  * Pure Overview calculations.
@@ -32,16 +38,6 @@ export function summariseEmployees(
     active,
     inactive: employees.length - active,
   };
-}
-
-/** `Date.parse` millisecond value, or `NaN` when the timestamp is unreadable. */
-export function parseInstant(value: string): number {
-  return Date.parse(value);
-}
-
-/** UTC calendar day key (`YYYY-MM-DD`) for an instant in milliseconds. */
-export function utcDayKey(instantMs: number): string {
-  return new Date(instantMs).toISOString().slice(0, 10);
 }
 
 /**
@@ -87,60 +83,27 @@ export interface SessionSummary {
  * uses when it restores its open-session marker, so the two agree.
  * An employee is counted at most once, and an unreadable timestamp or an
  * unknown event type never creates a session.
+ *
+ * The fold itself is shared with the Attendance page (`foldLatestEvents`); this
+ * wrapper keeps the Overview's public shape and meanings unchanged.
  */
 export function summariseSessions(
   events: readonly AttendanceEvent[],
 ): SessionSummary {
-  interface Latest {
-    instant: number;
-    position: number;
-    type: string;
-  }
-
-  const latestByEmployee = new Map<string, Latest>();
-  let undatedEvents = 0;
-  let unclassifiedEvents = 0;
-
-  events.forEach((event, position) => {
-    const instant = parseInstant(event.occurred_at);
-    if (Number.isNaN(instant)) {
-      undatedEvents += 1;
-      return;
-    }
-    if (
-      event.event_type !== EVENT_TYPE_CHECK_IN &&
-      event.event_type !== EVENT_TYPE_CHECK_OUT
-    ) {
-      unclassifiedEvents += 1;
-      return;
-    }
-
-    const current = latestByEmployee.get(event.employee_id);
-    if (
-      current === undefined ||
-      instant > current.instant ||
-      (instant === current.instant && position > current.position)
-    ) {
-      latestByEmployee.set(event.employee_id, {
-        instant,
-        position,
-        type: event.event_type,
-      });
-    }
-  });
+  const fold = foldLatestEvents(events);
 
   let openSessions = 0;
-  for (const entry of latestByEmployee.values()) {
-    if (entry.type === EVENT_TYPE_CHECK_IN) {
+  for (const boundary of fold.latest.values()) {
+    if (boundary.event.event_type === EVENT_TYPE_CHECK_IN) {
       openSessions += 1;
     }
   }
 
   return {
     openSessions,
-    employeesWithEvents: latestByEmployee.size,
-    undatedEvents,
-    unclassifiedEvents,
+    employeesWithEvents: fold.latest.size,
+    undatedEvents: fold.undatedEvents,
+    unclassifiedEvents: fold.unclassifiedEvents,
   };
 }
 
