@@ -4,6 +4,30 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 4, P4.6.4: read-only Attendance journal
+
+### Added
+
+* `frontend/src/lib/attendance/format.ts` — `YYYY-MM-DD HH:MM:SS UTC` timestamps, `Unavailable` for an unreadable one (never `Invalid Date`), explicit `Unknown type (…)` labels, session-state labels and UTC-day option labels.
+* `frontend/src/lib/attendance/summary.ts` — journal counts (checks in/out, undated, unclassified, employees with events, open/closed sessions) and the distinct UTC days present, both computed from the shared fold.
+* `frontend/src/components/attendance/` — `AttendanceView` (concurrent journal + full-directory load, abortable and request-tagged, fixture banner, torn-journal warning, two independent error panels with Retry, empty/no-match states), `AttendanceTable` (append order, resolved names with ids, UTC timestamps, current session state, stacked cards below 720 px), `AttendanceFilters` (four labelled selects, live count, reset) and `AttendancePagination` (client-side, 10/20/50/100), each with a CSS Module.
+* `frontend/src/app/(dashboard)/attendance/page.tsx`: the placeholder became the read-only journal (`metadata.title = "Attendance"`, `dynamic = "force-dynamic"`).
+* Tests: `attendance-page.test.tsx` (25), `attendance-table.test.tsx` (9) and `attendance-display.test.ts` (12) — 46 new tests.
+* Earlier P4.6 commits (`0a8fd55`, `c0e5e77`) had already added `attendance/journal.ts`, `attendance/filters.ts`, `attendance/pagination.ts`, `classifyCheckoutError` and `checkoutEmployee`; this entry records the UI built on the first three.
+
+### Changed
+
+* `frontend/src/lib/fixtures/overview-fixtures.ts`: the attendance fixture grew to 25 deterministic events over three UTC days for `FIX-001`…`FIX-006`, covering both event types, open and closed sessions, an inactive employee with a historical open session, one undated record, and a record at the fixture clock instant so two clocks never produce identical data. `fixtureEmployees`, `FIXTURE_LABEL` and `isFixtureModeEnabled` are unchanged.
+* `frontend/tests/routes.test.tsx`: Attendance is no longer asserted as a placeholder; the route test now expects the functional journal.
+* `frontend/README.md`, `docs/PHASE4_IMPLEMENTATION_PLAN.md`, `docs/PHASE4_DASHBOARD_PROPOSAL.md`, `DEVELOPMENT_STATUS.md`: document the read-only journal, its client-side filters and paging, the fixture behaviour and the remaining limitations.
+
+### Notes
+
+* The page is read-only: it renders no checkout control, imports no mutation and issues no POST/PATCH/PUT/DELETE. `checkoutEmployee` and its error classifier remain unused by the UI.
+* The whole journal is downloaded once and filtered/paged in the browser because the API has no attendance query parameters; a large journal will eventually need a backend-side limit.
+* The session filter has no `unknown` option (the shared filter contract has none), so stateless events appear only under `All statuses` while the table labels them `Unknown`.
+* No live backend or browser verification: the FastAPI startup gate needs PostgreSQL, so all evidence is from mocked responses and development fixtures.
+
 ## [Unreleased] — Phase 4, P4.5: Employees management
 
 ### Added

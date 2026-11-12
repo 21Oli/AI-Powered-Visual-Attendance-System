@@ -3,6 +3,72 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 45 — Phase 4 P4.6.4: read-only Attendance journal, filters, paging and fixtures (2026-11-12)
+
+**The Attendance screen lists the journal read-only. There is no checkout
+control, the page imports no attendance mutation, no Python file changed, no
+database was contacted, and nothing was verified against a live backend.**
+
+* **Baseline preserved**: branch `main`, HEAD `c0e5e77` (P4.6.3) with a clean
+  tree. P4.6.2's journal/filter/pagination modules and P4.6.3's checkout client
+  were reused unchanged; `data-source.ts`, the proxy and every existing contract
+  were left alone.
+* **Data loading** (`AttendanceView`): the journal and every employee keyset page
+  load concurrently through `createOverviewSource` + `Promise.allSettled`, so an
+  attendance failure never erases employee success or the reverse. Requests are
+  abortable and request-tagged, so a stale response cannot overwrite a newer
+  refresh, and a live failure never falls back to fixtures. Both panels offer
+  Retry; the header offers Refresh.
+* **Name resolution**: `full_name` plus `employee_id`. An id missing from a
+  complete directory reads `Unknown employee`; a failed directory reads
+  `Employee details unavailable` beside the id. The employee filter is disabled
+  and explained rather than presenting an incomplete list as complete. No name
+  is fabricated.
+* **Table** (`AttendanceTable`): Employee, Employee ID, Event, Timestamp (UTC) and
+  Session, in journal append order and never sorted by timestamp. Timestamps are
+  `YYYY-MM-DD HH:MM:SS UTC`; unreadable ones read `Unavailable`; unknown event
+  types stay visible as `Unknown type (…)`. Session is the employee's *current*
+  derived state from the shared fold (latest valid timestamp, ties to the later
+  journal position), labelled as not per-row. At ≤720 px the semantic table is
+  restyled into stacked cards.
+* **Filters** (`AttendanceFilters`): four labelled selects (UTC day, event type,
+  employee, session status) composed by the pure `filterAttendanceEvents`, a live
+  "Showing X of Y journal events" count, and `Reset filters` disabled at
+  defaults. Undated records stay visible under `All dates`. The shared filter
+  contract has no `unknown` session option, so stateless events appear only under
+  `All statuses`; the table still labels them `Unknown`.
+* **Pagination** (`AttendancePagination`): client-side, 20 rows by default of
+  10/20/50/100, reset to page 1 on a filter or size change, clamped when a
+  refresh returns fewer events, with `Page N of M · Events A–B of T`. The journal
+  is fetched once; paging issues no further attendance request.
+* **States**: loading, empty journal, journal error + Retry, directory error +
+  Retry, both failing as two independent panels, no filter matches, torn journal
+  (`incomplete_trailing_record` warning only — never repaired, rewritten or
+  truncated), and explicit undated/unclassified caveats.
+* **Fixtures** (`fixtureAttendance`): 25 synthetic events over three UTC days for
+  `FIX-001`…`FIX-006`, both event types, open and closed sessions, FIX-004/FIX-005
+  inactive with historical open sessions, one undated record, and the last dated
+  record at the fixture clock instant. The gate is unchanged and server-side
+  (`NODE_ENV === "development"` and `DASHBOARD_DATA_MODE=fixtures`), the banner is
+  the existing `FIXTURE DATA — DEVELOPMENT ONLY` note, and production can never
+  serve fixture data.
+* **Tests**: +46 → **398 passed / 398 in 27 suites** (from 352/24):
+  `attendance-page.test.tsx` (25), `attendance-table.test.tsx` (9),
+  `attendance-display.test.ts` (12), plus the updated `routes.test.tsx`, where
+  Attendance stopped being a placeholder.
+* **Verified**: `npm ls --depth=0` exit 0 (15 packages, unchanged); `npm run lint`
+  exit 0; `npm run typecheck` exit 0; `npm run test` exit 0 (398/398);
+  `npm run build` exit 0 with dynamic `/attendance`.
+* **Fixed, not suppressed**: the pre-existing `fixtures.test.ts` determinism case
+  ("two different clocks differ") failed because the new fixture is UTC-day
+  anchored. The assertion was left intact and the fixture gained a record at the
+  clock instant instead.
+* **Not done / not claimed**: no checkout control or `checkoutEmployee` wiring, no
+  attendance mutation, no `unknown` session-filter option, no server-side
+  attendance pagination, no backend, database, secret or biometric change, and no
+  live backend or browser verification (the G2+G8 startup gate needs PostgreSQL).
+  P4.6.5+ not started.
+
 ## Step 44 — Phase 4 P4.5: Employees management (2026-11-12)
 
 **The Employees screen lists, creates, renames and deactivates employees through

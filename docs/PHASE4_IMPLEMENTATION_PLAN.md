@@ -16,7 +16,7 @@ disabled.
 | P4.3 | Application shell and navigation | **PASSED** (owner-approved, `3d575d3`) |
 | P4.4 | Typed API client, secure proxy, fixtures and Overview | **READY FOR OWNER REVIEW** |
 | P4.5 | Employees screen (list, create, detail, rename, deactivate) | **READY FOR OWNER REVIEW** |
-| P4.6 | Attendance screen (journal, checkout confirmation) | not started |
+| P4.6 | Attendance screen (journal, checkout confirmation) | journal **READY FOR OWNER REVIEW** (P4.6.1–P4.6.4); checkout UI not started |
 | P4.7 | System status screen (API health, offline states) | not started |
 | P4.8 | Remaining API surfaces (writes) and hardening | not started |
 | P4.9 | Final verification, documentation and acceptance review | not started |
@@ -171,15 +171,82 @@ assertions weakened.
 
 ---
 
+## 5a. P4.6.4 scope and verification (read-only Attendance)
+
+```text
+Browser → AttendanceView (client) → createOverviewSource(dataSourceKind)
+        → src/lib/api/{attendance,employees}.ts
+        → /api/backend/[...path] (unchanged proxy) → FastAPI (unchanged)
+```
+
+| Layer | Files |
+|---|---|
+| Journal fold / session state | `src/lib/attendance/journal.ts` (P4.6.2, reused) |
+| Filters | `src/lib/attendance/filters.ts` (P4.6.2, reused) |
+| Client-side paging | `src/lib/attendance/pagination.ts` (P4.6.2, reused) |
+| Display formatting | `src/lib/attendance/format.ts` |
+| Summary and UTC days | `src/lib/attendance/summary.ts` |
+| Screen | `src/components/attendance/{AttendanceView,AttendanceTable,AttendanceFilters,AttendancePagination}` |
+| Route | `src/app/(dashboard)/attendance/page.tsx` (dynamic) |
+
+**Read-only by construction.** The page has no checkout control and never
+imports `checkoutEmployee`, so no attendance mutation can be triggered from it;
+the checkout client and its error classifier from P4.6.3 stay unused by the UI.
+
+**Loading.** The journal and the complete employee directory load concurrently
+through the existing `createOverviewSource` and `Promise.allSettled`, so an
+attendance failure never erases employee success or vice versa. The walk follows
+`next_after` until `null`; a directory failure is reported as unavailable rather
+than as a short but complete list. Requests are abortable and counter-tagged, so
+a stale response cannot overwrite a newer refresh, and a live failure never falls
+back to fixtures.
+
+**Display.** Rows keep journal append order and are never sorted. Timestamps are
+`YYYY-MM-DD HH:MM:SS UTC`, unreadable ones read `Unavailable`, unknown event types
+remain visible as `Unknown type (…)`, and the session column shows the employee's
+current derived state (latest valid timestamp, ties to the later journal
+position) rather than a session per row. An unresolved id shows the id with an
+explicit label; no name is fabricated.
+
+**Filters and paging.** Day, type, employee and session status compose through
+`filterAttendanceEvents`; `Reset filters` restores the defaults. Paging defaults
+to 20 of 10/20/50/100, resets on a filter or size change, and clamps when a
+refresh returns fewer events. Both are client-side: the API has no attendance
+query parameters.
+
+**Fixtures.** `fixtureAttendance` now yields 25 synthetic events across three UTC
+days (`FIX-001`…`FIX-006`), an inactive employee with a historical open session
+and one undated record. The gate is unchanged: `NODE_ENV === "development"` and
+`DASHBOARD_DATA_MODE=fixtures`, resolved server-side, so production can never
+serve it.
+
+| Command | Result |
+|---|---|
+| `npm ls --depth=0` | exit 0 — 15 packages, unchanged |
+| `npm run lint` | exit 0 — 0 problems |
+| `npm run typecheck` | exit 0 — strict |
+| `npm run test` | exit 0 — **398 passed / 398**, 27 suites |
+| `npm run build` | exit 0 — dynamic `/attendance`; static `/employees`, `/system-status` |
+
+Test growth 352 → 398 (+46) across three new attendance suites and the updated
+route suite. The only first-run failure that needed a source change (rather than
+a test query) was the pre-existing fixture determinism test, which correctly
+requires two different clocks to produce different data; a record is now placed
+at the fixture clock instant instead of weakening that assertion.
+
+---
+
 ## 6. Remaining work and constraints
 
-* Attendance and System Status remain placeholders (P4.6–P4.7); employee writes
-  now have a UI, checkout does not.
+* System Status remains a placeholder (P4.7). The Attendance journal is
+  implemented read-only (P4.6.4) and there is still no checkout control, so
+  `checkoutEmployee` stays unused by the UI.
 * **No live verification.** The backend's G2+G8 startup gate requires
   PostgreSQL; all proxy/Overview evidence is from mocked responses and
   development fixtures. No browser was driven either.
-* Attendance has no server pagination and events carry no employee name; a future
-  attendance list must join names from `GET /employees`.
+* Attendance has no server pagination, so the screen downloads the whole journal
+  and pages it in the browser; events carry no employee name, so names come from
+  walking every `GET /employees` page and are never inferred.
 * Checkout accepts no body and enforces the approved 300-second cooldown, which
   must be surfaced verbatim.
 * An identifier containing `%`, `#`, `?`, `/` or `\` is refused by the proxy by

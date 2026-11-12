@@ -1,19 +1,22 @@
 import type { Metadata } from "next";
 
-import { PagePlaceholder } from "../../../components/layout/PagePlaceholder";
+import { AttendanceView } from "../../../components/attendance/AttendanceView";
+import { resolveDataSourceKind } from "../../../lib/api/data-source";
 
 export const metadata: Metadata = { title: "Attendance" };
 
+/**
+ * The journal must reflect the live service, and the data-source decision is
+ * made on the server (fixtures can never be enabled from the browser). Both
+ * require a per-request render, so the page is never statically cached.
+ */
+export const dynamic = "force-dynamic";
+
 export default function AttendancePage() {
-  return (
-    <PagePlaceholder
-      title="Attendance"
-      purpose="The attendance journal: recorded check-in and check-out events, incomplete trailing records, and operator-authorized check-out with its cooldown."
-      planned={[
-        "Journal records with employee names resolved from the register",
-        "Notice when the journal ends in an incomplete record",
-        "Operator-authorized check-out behind a confirmation step",
-      ]}
-    />
-  );
+  const dataSourceKind = resolveDataSourceKind({
+    NODE_ENV: process.env.NODE_ENV,
+    DASHBOARD_DATA_MODE: process.env.DASHBOARD_DATA_MODE,
+  });
+
+  return <AttendanceView dataSourceKind={dataSourceKind} />;
 }

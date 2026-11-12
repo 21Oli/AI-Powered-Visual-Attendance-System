@@ -55,8 +55,8 @@ frontend/
   tests/
 ```
 
-`Employees`, `Attendance` and `System Status` page components are still
-structural placeholders.
+`Employees` (P4.5) and the read-only `Attendance` journal (P4.6.4) are
+implemented; `System Status` is still a structural placeholder.
 
 ---
 
@@ -88,7 +88,7 @@ browser ──same-origin──▶ Next Route Handler ──server-side fetch─
 |---|---|---|
 | **Overview** | `GET /api/v1/employees` (all keyset pages), `GET /api/v1/attendance` | **implemented** — loading, empty, error, partial, fixture |
 | **Employees** | `GET/POST /api/v1/employees`, `GET/PATCH /api/v1/employees/{id}`, `POST …/deactivate` | **implemented** — loading, empty, error/retry, keyset paging, create, rename, confirmed deactivation |
-| **Attendance** | `GET /api/v1/attendance`, `POST /api/v1/attendance/{id}/checkout` | placeholder (P4.6) |
+| **Attendance** | `GET /api/v1/attendance`, `GET /api/v1/employees` (all keyset pages, for names and the employee filter) | **implemented, read-only** — loading, empty, journal failure, directory failure, both failing, torn journal, four client-side filters, client-side paging, fixture mode. `POST …/checkout` is not wired. |
 | **System Status** | `GET /api/v1/health` | placeholder (P4.7) |
 
 Verified contract facts that shape the UI:
@@ -96,7 +96,8 @@ Verified contract facts that shape the UI:
 * `GET /employees` is keyset-paginated (`after`, `limit` default 20, max 100,
   `next_after`); its `count` is the **page length**, not a total.
 * **Attendance has no server pagination**; one response carries the whole
-  validated journal.
+  validated journal, so the screen fetches it once and filters and pages in the
+  browser. No attendance query parameters exist to implement server-side.
 * **Events carry no employee name** — only `employee_id`; names must come from
   the employees endpoint and are never invented.
 * Event types are lowercase `check_in` / `check_out`; timestamps are UTC ISO-8601;
@@ -158,7 +159,8 @@ Development-only fixtures are implemented for the Overview only:
 | Live backend integration | **NOT VERIFIED** — the FastAPI startup gate (G2+G8) needs PostgreSQL, which this phase may not open |
 | Browser verification | not performed |
 | Employee CRUD | implemented in P4.5 (list, create, rename, deactivate) |
-| Attendance screen, status screen | not started (P4.6–P4.7) |
+| Attendance screen | journal implemented read-only (P4.6.4); checkout UI not started |
+| Status screen | not started (P4.7) |
 | Authentication / RBAC | Phase 5 |
 | Deployment | not requested; nothing may be published |
 

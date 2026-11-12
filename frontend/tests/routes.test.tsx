@@ -75,8 +75,21 @@ describe("employees route", () => {
   });
 });
 
+describe("attendance route", () => {
+  it("renders the read-only journal instead of a placeholder", async () => {
+    render(<AttendancePage />);
+
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Attendance" }),
+    ).toBeDefined();
+    expect(
+      await screen.findByText(/journal contains no events/i),
+    ).toBeDefined();
+    expect(screen.queryByText(/under development/i)).toBeNull();
+  });
+});
+
 const placeholders = [
-  { title: "Attendance", Page: AttendancePage, purpose: /attendance journal/i },
   {
     title: "System Status",
     Page: SystemStatusPage,

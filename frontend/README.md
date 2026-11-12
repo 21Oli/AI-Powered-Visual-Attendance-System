@@ -3,9 +3,11 @@
 Next.js 16 (App Router) + TypeScript + CSS Modules dashboard for the
 AI-Powered Visual Attendance System.
 
-**Status: P4.5 complete — the Employees screen manages the register; the typed
-API client, secure proxy, fixtures and the functional Overview are unchanged.**
-Attendance and System Status remain structural placeholders (P4.6–P4.7).
+**Status: P4.6.4 complete — the Attendance screen now lists the journal read-only
+with UTC-day, event-type, employee and session-status filters and client-side
+pagination. There is no checkout control, so the page never mutates attendance.
+The typed client, proxy, fixtures, Overview and Employees screen are unchanged.**
+System Status remains a structural placeholder (P4.7).
 No live backend has been verified: the FastAPI startup gate requires PostgreSQL,
 which this phase is not authorized to connect to.
 
@@ -85,7 +87,7 @@ DASHBOARD_DATA_MODE=fixtures
 | `/` | — | redirects to `/overview` |
 | `/overview` | Overview | **functional** (dynamic) |
 | `/employees` | Employees | **functional** (client component) |
-| `/attendance` | Attendance | structural placeholder |
+| `/attendance` | Attendance | **functional, read-only** (dynamic) |
 | `/system-status` | System Status | structural placeholder |
 | `/api/backend/[...path]` | — | **proxy** (dynamic, server-only) |
 | any other path | — | `not-found` |
@@ -114,6 +116,13 @@ FastAPI (loopback)  →  PostgreSQL / JSONL journal
 | `src/lib/api/client.ts` | single URL builder, fetch, JSON + envelope parsing |
 | `src/lib/api/employees.ts` | keyset paging, full-collection walk |
 | `src/lib/api/attendance.ts` | the whole journal (the API has no paging) |
+| `src/lib/attendance/journal.ts` | append-ordered fold and the shared session-state derivation |
+| `src/lib/attendance/filters.ts` | the four attendance filters as one pure function |
+| `src/lib/attendance/pagination.ts` | client-side paging over the filtered events |
+| `src/lib/attendance/format.ts` | UTC timestamps, `Unknown` / `Unavailable` labels |
+| `src/lib/attendance/summary.ts` | journal counts and the UTC days present |
+| `src/lib/attendance/errors.ts` | checkout failure classification (P4.6.3, not used by the page) |
+| `src/components/attendance/` | journal view, table, filters, pagination |
 | `src/lib/api/data-source.ts` | live vs fixture source, resolved server-side |
 | `src/lib/dashboard/overview.ts` | pure metric calculations |
 | `src/lib/server/proxy.ts` | allowlist, id/query validation, upstream URL |
@@ -186,6 +195,43 @@ never displayed as a total. An unreadable page fails the whole metric.
 * **Partial failure** — employees and attendance load independently, so one
   failing section shows `Unavailable` while the other still reports real values.
 * **Fixture** — persistent `FIXTURE DATA — DEVELOPMENT ONLY` banner.
+* **Torn journal** — `incomplete_trailing_record: true` shows a visible warning
+  that the journal may end with an incomplete record; nothing is repaired,
+  rewritten or truncated.
+
+## Attendance screen (P4.6.4)
+
+Read-only journal at `/attendance`. No checkout control exists and the page never
+calls `checkoutEmployee`, so no POST/PATCH/PUT/DELETE leaves it.
+
+* **Data flow** — `createOverviewSource(dataSourceKind)` loads the journal and
+the whole employee directory concurrently via `Promise.allSettled`; the directory
+walk follows `next_after` until `null`. An `AbortController` and a request
+counter drop stale responses, so a slow refresh cannot overwrite a newer one.
+Both resources report independently: one failing never hides the other.
+* **Name resolution** — each event shows `full_name` plus the `employee_id`. An id
+missing from a complete directory reads `Unknown employee`; when the directory
+failed, the cell reads `Employee details unavailable` beside the id. Names are
+never inferred.
+* **Table** — Employee, Employee ID, Event, Timestamp (UTC), Session, in journal
+append order (never sorted by timestamp). Timestamps render as
+`YYYY-MM-DD HH:MM:SS UTC`; an unreadable one reads `Unavailable`; an unknown type
+stays visible as `Unknown type (…)`. Session is the employee's *current* derived
+state from the shared fold (latest valid timestamp, ties to the later journal
+position), not a separate session per row.
+* **Filters** — UTC day, event type, employee and session status, composed by the
+pure `filterAttendanceEvents`; `Reset filters` restores the defaults. Undated
+records stay visible under `All dates`, and the employee filter is disabled and
+explained when the directory is unavailable instead of looking complete.
+* **Pagination** — client-side, 20 rows by default with 10/20/50/100 selectable,
+reset to page 1 on a filter or size change and clamped when the result shrinks.
+The journal is fetched once; paging issues no further attendance request and
+never implies server-side paging.
+* **Fixtures** — `fixtureAttendance` builds 25 synthetic events over three UTC days
+for `FIX-001`…`FIX-006`, including an inactive employee with a historical open
+session and one undated record. The gate is unchanged
+(`NODE_ENV === "development"` **and** `DASHBOARD_DATA_MODE=fixtures`, resolved
+server-side). A live failure never falls back to fixtures.
 
 ## Structure
 
@@ -196,6 +242,7 @@ frontend/src/
 │   ├── api/backend/[...path]/route.ts        # proxy
 │   ├── layout.tsx, page.tsx, loading.tsx, error.tsx, not-found.tsx, globals.css
 ├── components/
+│   ├── attendance/{AttendanceView,AttendanceTable,AttendanceFilters,AttendancePagination} + CSS Modules
 │   ├── dashboard/{OverviewDashboard,MetricCard} + CSS Modules
 │   ├── layout/{AppShell,Sidebar,Header,MobileNavigation,PagePlaceholder}
 │   ├── icons/NavIcon.tsx
@@ -203,6 +250,7 @@ frontend/src/
 ├── hooks/useTheme.ts
 ├── lib/
 │   ├── api/{types,errors,client,employees,attendance,data-source}.ts
+│   ├── attendance/{journal,filters,pagination,format,summary,errors}.ts
 │   ├── dashboard/overview.ts
 │   ├── fixtures/overview-fixtures.ts
 │   ├── server/proxy.ts
@@ -294,8 +342,8 @@ Measured on 2026-11-12 (Node v24.21.0, npm 11.19.0):
 | `npm ls --depth=0` | exit 0 — 15 packages, unchanged |
 | `npm run lint` | exit 0, 0 problems |
 | `npm run typecheck` | exit 0 |
-| `npm run test` | exit 0 — **249 passed / 249**, 19 suites, ~49 s |
-| `npm run build` | exit 0 — static `/`, `/_not-found`, `/attendance`, `/employees`, `/system-status`; dynamic `/overview` and `/api/backend/[...path]` |
+| `npm run test` | exit 0 — **398 passed / 398**, 27 suites, ~63 s |
+| `npm run build` | exit 0 — static `/`, `/_not-found`, `/employees`, `/system-status`; dynamic `/attendance`, `/overview` and `/api/backend/[...path]` |
 
 ## Known limitations
 
@@ -304,12 +352,21 @@ Measured on 2026-11-12 (Node v24.21.0, npm 11.19.0):
   responses or development fixtures.
 * No browser was driven; responsive layout and the proxy's real network path are
   covered by tests and static review only.
-* Attendance and System Status are still placeholders; there is no checkout
-  control or health widget.
+* The Attendance screen is read-only — there is no checkout control — and System
+  Status is still a placeholder, so there is no health widget.
 * No employee fixtures exist, so the Employees screen has no offline mode: with
   no backend it shows its error state.
-* Attendance is not paginated and events carry no employee name — a future
-  activity list must join names from the employee endpoint.
+* The Attendance screen downloads the whole journal on every load and paginates
+  it in the browser, because the API has no attendance pagination; filters are
+  client-side for the same reason. A large journal will eventually need a
+  backend-side limit.
+* Employee names come from walking every employee page; a directory too large to
+  walk would need a server-side lookup.
+* The session filter offers `All statuses`, `Open` and `Closed`. The shared
+  filter contract has no `unknown` value, so events without a derivable state
+  appear only under `All statuses` while the table still labels them `Unknown`.
+* Attendance fixtures exist only in development; with no backend the live page
+  shows its error state and never falls back to synthetic data.
 * An employee identifier containing `%` cannot pass the proxy (documented
   defence against ambiguous encoding); ids are also limited to 128 characters.
 * No authentication or RBAC (Phase 5); the backend stays loopback-only.
