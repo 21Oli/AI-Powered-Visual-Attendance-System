@@ -17,8 +17,8 @@ disabled.
 | P4.4 | Typed API client, secure proxy, fixtures and Overview | **VERIFIED** — committed `e68da71`, re-verified in P4.6.6 |
 | P4.5 | Employees screen (list, create, detail, rename, deactivate) | **VERIFIED** — committed `376345d`, re-verified in P4.6.6 |
 | P4.6 | Attendance screen (journal, checkout confirmation) | journal + operator check-out **VERIFIED** — committed `0a8fd55`/`c0e5e77`/`3b54163`/`52a6ded`, re-verified in P4.6.6 |
-| P4.7 | System status screen (API health, offline states) | **READY FOR OWNER REVIEW** (liveness-only health screen) |
-| P4.8 | Remaining API surfaces (writes) and hardening | not started |
+| P4.7 | System status screen (API health, offline states) | **COMPLETED** — committed `276302f` (liveness-only health screen) |
+| P4.8 | Remaining API surfaces (writes) and hardening | completed — requirements satisfied by P4.5–P4.7; no additional implementation required |
 | P4.9 | Final verification, documentation and acceptance review | not started |
 
 Every milestone stops for explicit owner approval.
@@ -254,7 +254,8 @@ at the fixture clock instant instead of weakening that assertion.
   screen. The Attendance journal is implemented read-only and P4.6.5 added the
   single approved write: a confirmed operator check-out for an active employee
   with an open session in live mode. There is still no check-in, bulk or
-  automatic check-out. P4.8–P4.9 are not started.
+  automatic check-out. P4.8 is closed as satisfied by P4.5–P4.7 (§9); P4.9 is
+  not started.
 * **No live verification.** The backend's G2+G8 startup gate requires
   PostgreSQL; all proxy/Overview evidence is from mocked responses and
   development fixtures. No browser was driven either.
@@ -297,7 +298,8 @@ Verified on the committed tree (`52a6ded`, clean working tree):
 **Phase 4 status at P4.6.6: P4.1–P4.6.5 were implemented and committed, with
 automated verification passing; P4.7 was still a placeholder, so that review
 recorded `PHASE 4 INCOMPLETE — BLOCKERS REMAIN`.** P4.7 has since been
-implemented (see §8); P4.8–P4.9 remain, and live backend (PostgreSQL-gated),
+implemented (§8) and P4.8 is closed by documentation bookkeeping (§9); **P4.9
+remains and Phase 4 is still incomplete.** Live backend (PostgreSQL-gated),
 real-browser and deployment validation are still unperformed, so nothing here is
 a production-readiness claim.
 
@@ -351,3 +353,52 @@ Test growth 439 → 457 (+18) across `health-api.test.ts` and
 (synchronous `setState` inside the mount effect) was fixed by moving the
 loading/attempt reset into the Refresh handler and initialising the first attempt
 with a lazy state initialiser — no rule was disabled.
+
+---
+
+## 9. P4.8 closure — documentation only (owner-approved)
+
+P4.8 is titled "Remaining API surfaces (writes) and hardening". Repository review
+found no unimplemented requirement behind that title: the backend publishes
+exactly eight route/method pairs, every one already had a typed frontend client
+and a screen, all four write operations already had complete workflows, and the
+proxy already enforced the approved security rules with tests. The owner therefore
+closed P4.8 by **documentation bookkeeping**, not by new code:
+
+> **P4.8 status: COMPLETED — REQUIREMENTS SATISFIED BY P4.5–P4.7.**
+
+No source, test, proxy, contract or dependency changed in this closure.
+
+### Existing API coverage (previously implemented, not new P4.8 features)
+
+| Backend route | Existing frontend implementation |
+|---|---|
+| `GET /api/v1/health` | `src/lib/api/health.ts` and the System Status screen (P4.7) |
+| `POST /api/v1/employees` | employee creation form (P4.5) |
+| `GET /api/v1/employees` | employee directory with keyset pagination (P4.5), and the full walk used for names and filters |
+| `GET /api/v1/employees/{employee_id}` | employee detail panel (P4.5) |
+| `PATCH /api/v1/employees/{employee_id}` | employee rename, full name only (P4.5) |
+| `POST /api/v1/employees/{employee_id}/deactivate` | confirmed employee deactivation (P4.5) |
+| `GET /api/v1/attendance` | Overview metrics (P4.4) and the Attendance journal (P4.6) |
+| `POST /api/v1/attendance/{employee_id}/checkout` | confirmed operator-authorized check-out (P4.6.5) |
+
+The four write operations — employee creation, employee rename, employee
+deactivation and operator-authorized attendance check-out — were all implemented
+before P4.8 and are unchanged.
+
+### Existing proxy security evidence (unchanged)
+
+Exact route/method allowlist; identifier validation with a single re-encoding;
+`after`/`limit` allowlisting on the employee list only; request bodies accepted
+only for `POST /employees` and `PATCH /employees/{id}` with a 4 KiB cap; redirect
+refusal; sanitized upstream failures; `no-store`; server-only `BACKEND_BASE_URL`;
+no CORS headers; development-only fixture isolation. These are the controls
+already covered by `frontend/tests/proxy.test.ts`; P4.8 added no security
+guarantee and relaxed none.
+
+**Phase 4 remains incomplete:** P4.9 (final verification, documentation and
+acceptance review) is not started. Every previously recorded limitation still
+stands — no authentication/RBAC, loopback-only backend, no multi-process JSONL
+journal locking, no residual-session reconciliation, client-side attendance
+filtering and paging, manual `PERSISTENCE_UNCONFIRMED` verification, and no live
+PostgreSQL, real-camera/biometric, real-browser or deployment validation.

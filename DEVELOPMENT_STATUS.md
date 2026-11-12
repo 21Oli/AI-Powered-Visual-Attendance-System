@@ -3,6 +3,43 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 49 — Phase 4 P4.8: documentation-only closure (2026-11-12)
+
+**P4.8 required no implementation. The owner approved closing it because every
+requirement behind its title was already delivered by P4.5–P4.7. This step changed
+documentation only — no application source, test, proxy rule, API contract,
+backend file, package file or dependency was touched.**
+
+* **Baseline preserved**: branch `main`, HEAD `276302f` with a clean tree.
+* **Evidence**: the backend publishes exactly eight route/method pairs and all
+  eight already had a typed frontend client and a screen; the four write
+  operations (employee create, rename, deactivate, operator check-out) already had
+  complete workflows with duplicate protection, success-only-after-response and
+  classified failures; the proxy already enforced the allowlist,
+  identifier/query/body rules, redirect refusal, sanitization, `no-store` and
+  server-only configuration, all covered by `proxy.test.ts`; and no distinct P4.8
+  requirement was documented in the plan, proposal, status file or changelog.
+* **Closure recorded**: `P4.8 — COMPLETED — REQUIREMENTS SATISFIED BY P4.5–P4.7`,
+  explicitly *not* new P4.8 code. The implementation plan gained a §9 closure
+  section holding the route table, the four write workflows, the proxy evidence
+  and the preserved limitations; its milestone row and the proposal, README and
+  changelog carry the same status.
+* **Preserved limitations**: no authentication/RBAC (Phase 5), loopback-only
+  backend, no multi-process JSONL journal locking, no residual-session
+  reconciliation, client-side attendance filtering/paging, manual
+  `PERSISTENCE_UNCONFIRMED` verification, and no live PostgreSQL, real-camera /
+  biometric, real-browser or deployment validation. None was resolved or implied
+  resolved.
+* **Phase status**: P4.1–P4.8 complete; **P4.9 not started — Phase 4 remains
+  INCOMPLETE — P4.9 pending.**
+* **Verified for a documentation-only step**: every documentation diff inspected,
+  P4.8 status consistent across the five files, P4.9 still not started, Phase 4
+  not marked complete, all limitations intact, `git diff --check` clean and
+  `git status --short` showing documentation paths only. The application test
+  suite was **not** rerun, because no application file changed.
+* **Not done / not claimed**: no code, test, dependency, backend, database, secret,
+  camera, biometric or Git operation. P4.9 not started.
+
 ## Step 48 — Phase 4 P4.7: System Status screen, backend API liveness (2026-11-12)
 
 **The `/system-status` placeholder is now a functional health screen. It reports

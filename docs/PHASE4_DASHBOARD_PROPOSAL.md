@@ -5,7 +5,9 @@ scaffold, P4.3 the shell and navigation, P4.4 the typed API client, the secure
 proxy, development fixtures and the functional Overview, P4.5 the Employees
 screen, P4.6 the Attendance journal with client-side filters/paging and the
 confirmed operator check-out, and P4.7 the backend-API liveness screen. P4.6.6
-re-verified the committed code; P4.8–P4.9 are not started.
+re-verified the committed code. P4.8 (remaining API surfaces and hardening) was
+closed by documentation bookkeeping because its requirements were already
+satisfied by P4.5–P4.7; P4.9 is not started.
 
 Milestone status and verification live in
 `docs/PHASE4_IMPLEMENTATION_PLAN.md`; operational detail in
@@ -171,6 +173,7 @@ screens only (the Employees screen has no fixture mode):
 | Employee CRUD | implemented in P4.5 (list, create, rename, deactivate) |
 | Attendance screen | journal + operator check-out implemented (P4.6.4–P4.6.5) |
 | Status screen | backend API liveness screen implemented (P4.7); no database, camera, recognition or deployment probe exists |
+| P4.8 — remaining API surfaces / hardening | closed without new code: all eight approved routes and all four write operations were already implemented in P4.5–P4.7, and the proxy controls were already in place and tested |
 | Phase 4 final review (P4.6.6) | automated frontend verification passed (439/439, lint, typecheck, build, 15 unchanged packages); live backend, real browser and deployment not verified |
 | Authentication / RBAC | Phase 5 |
 | Deployment | not requested; nothing may be published |

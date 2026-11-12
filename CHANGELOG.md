@@ -4,6 +4,18 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 4, P4.8: documentation-only closure
+
+### Changed
+
+* `docs/PHASE4_IMPLEMENTATION_PLAN.md` — the P4.8 milestone row now records completion by prior implementation, and a new §9 documents the closure: the eight approved routes, the four write workflows and the proxy security controls were already delivered in P4.4–P4.7.
+* `docs/PHASE4_DASHBOARD_PROPOSAL.md`, `frontend/README.md`, `DEVELOPMENT_STATUS.md` — status and roadmap wording now record P4.8 as closed without new code.
+
+### Notes
+
+* **P4.8 status: COMPLETED — REQUIREMENTS SATISFIED BY P4.5–P4.7.** No new P4.8 implementation, test, dependency, proxy or API-contract change was required or made; the milestone changed documentation only.
+* Phase 4 remains incomplete: P4.9 (final verification, documentation and acceptance review) is not started. All previously recorded limitations stand, including no authentication/RBAC, a loopback-only backend, manual `PERSISTENCE_UNCONFIRMED` verification, and no live PostgreSQL, real-camera/biometric, real-browser or deployment validation.
+
 ## [Unreleased] — Phase 4, P4.7: System Status screen
 
 ### Added
