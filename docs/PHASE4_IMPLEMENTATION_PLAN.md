@@ -15,7 +15,7 @@ disabled.
 | P4.2 | Frontend scaffold and design system | **PASSED** (owner-approved, `e3ead4d`) |
 | P4.3 | Application shell and navigation | **PASSED** (owner-approved, `3d575d3`) |
 | P4.4 | Typed API client, secure proxy, fixtures and Overview | **READY FOR OWNER REVIEW** |
-| P4.5 | Employees screen (list, create, detail, rename, deactivate) | not started |
+| P4.5 | Employees screen (list, create, detail, rename, deactivate) | **READY FOR OWNER REVIEW** |
 | P4.6 | Attendance screen (journal, checkout confirmation) | not started |
 | P4.7 | System status screen (API health, offline states) | not started |
 | P4.8 | Remaining API surfaces (writes) and hardening | not started |
@@ -118,10 +118,63 @@ form). No lint rule was disabled and no dependency added.
 
 ---
 
-## 5. Remaining work and constraints
+## 5. P4.5 scope and verification
 
-* Employees, Attendance and System Status remain placeholders (P4.5–P4.7); the
-  proxy already supports the write routes, but no write UI exists.
+```text
+Browser → EmployeesView (client) → src/lib/api/employees.ts
+        → /api/backend/[...path] (unchanged proxy) → FastAPI (unchanged)
+```
+
+| Layer | Files |
+|---|---|
+| Form rules | `src/lib/employees/validation.ts` |
+| Display formatting | `src/lib/employees/format.ts` |
+| Failure → field mapping | `src/lib/employees/errors.ts` |
+| Endpoints (added) | `createEmployee`, `fetchEmployeeById`, `renameEmployee`, `deactivateEmployee` in `src/lib/api/employees.ts` |
+| Primitives | `src/components/ui/{TextField,ConfirmDialog,StatusMessage}` |
+| Screen | `src/components/employees/{EmployeesView,EmployeeTable,PaginationControls,CreateEmployeeForm,EmployeeDetail}` |
+
+**Employee-ID compatibility (owner-approved Option A).** `validation.ts`
+imports `isSafeEmployeeId` from `src/lib/server/proxy.ts` rather than
+re-implementing it, so the form's rule is the proxy's rule by construction. A
+value is submitted unchanged (no trimming or case folding); leading zeros,
+hyphens and mixed case remain valid. Existing records with ids the proxy cannot
+address stay visible with their actions disabled and the reason stated.
+
+**Pagination.** `Next` uses `next_after`; `Previous` replays a client-side cursor
+history. Page sizes 10/20/50/100 (backend max 100) reset to page 1 on change. A
+full final page followed by an empty page is rendered as such, not as an error.
+`count` is the page length and is never shown as a total; the API has no search
+or sorting, so neither is offered. Requests carry an id and an `AbortController`,
+so a stale response cannot replace a newer page.
+
+**Deactivation** requires an explicit confirmation naming the employee and
+stating that no reactivation endpoint exists; success is shown only after the
+response, then the directory is refetched. The dialog moves focus to Cancel,
+traps Tab, closes on Escape and restores focus to the trigger.
+
+| Command | Result |
+|---|---|
+| `npm ls --depth=0` | exit 0 — 15 packages, unchanged |
+| `npm run lint` | exit 0 — 0 problems |
+| `npm run typecheck` | exit 0 — strict |
+| `npm run test` | exit 0 — **249 passed / 249**, 19 suites |
+| `npm run build` | exit 0 — static `/employees`; dynamic `/overview`, `/api/backend/[...path]` |
+
+Test growth 184 → 249 (+65) across seven new suites (employee-ID and formatting
+rules, error mapping, API client, directory and pagination, create, detail/rename,
+deactivation) plus the restructured route suite. Four first-run failures in two
+suites were test-side mistakes (the required asterisk inside every label broke
+exact label matching, a leading space cannot be produced by `user.type`, and a
+field hint also matched an error assertion); the queries were fixed, not the
+assertions weakened.
+
+---
+
+## 6. Remaining work and constraints
+
+* Attendance and System Status remain placeholders (P4.6–P4.7); employee writes
+  now have a UI, checkout does not.
 * **No live verification.** The backend's G2+G8 startup gate requires
   PostgreSQL; all proxy/Overview evidence is from mocked responses and
   development fixtures. No browser was driven either.
@@ -129,6 +182,10 @@ form). No lint rule was disabled and no dependency added.
   attendance list must join names from `GET /employees`.
 * Checkout accepts no body and enforces the approved 300-second cooldown, which
   must be surfaced verbatim.
-* An identifier containing `%` is refused by the proxy by design; ids are capped
-  at 128 characters.
+* An identifier containing `%`, `#`, `?`, `/` or `\` is refused by the proxy by
+  design; ids are capped at 128 characters and may not have surrounding
+  whitespace. Such records can be listed but not managed, which is displayed
+  rather than hidden.
+* The Employees screen has no fixture mode: the development fixture gate covers
+  the Overview only.
 * No authentication or RBAC until Phase 5.

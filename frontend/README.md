@@ -3,9 +3,9 @@
 Next.js 16 (App Router) + TypeScript + CSS Modules dashboard for the
 AI-Powered Visual Attendance System.
 
-**Status: P4.4 complete — typed API client, secure proxy, fixtures and the
-functional Overview.**
-Employees, Attendance and System Status remain structural placeholders (P4.5–P4.7).
+**Status: P4.5 complete — the Employees screen manages the register; the typed
+API client, secure proxy, fixtures and the functional Overview are unchanged.**
+Attendance and System Status remain structural placeholders (P4.6–P4.7).
 No live backend has been verified: the FastAPI startup gate requires PostgreSQL,
 which this phase is not authorized to connect to.
 
@@ -84,7 +84,7 @@ DASHBOARD_DATA_MODE=fixtures
 |---|---|---|
 | `/` | — | redirects to `/overview` |
 | `/overview` | Overview | **functional** (dynamic) |
-| `/employees` | Employees | structural placeholder |
+| `/employees` | Employees | **functional** (client component) |
 | `/attendance` | Attendance | structural placeholder |
 | `/system-status` | System Status | structural placeholder |
 | `/api/backend/[...path]` | — | **proxy** (dynamic, server-only) |
@@ -117,6 +117,11 @@ FastAPI (loopback)  →  PostgreSQL / JSONL journal
 | `src/lib/api/data-source.ts` | live vs fixture source, resolved server-side |
 | `src/lib/dashboard/overview.ts` | pure metric calculations |
 | `src/lib/server/proxy.ts` | allowlist, id/query validation, upstream URL |
+| `src/lib/employees/validation.ts` | employee-ID rule (delegates to the proxy's `isSafeEmployeeId`) and name rule |
+| `src/lib/employees/format.ts` | UTC calendar date and status labels |
+| `src/lib/employees/errors.ts` | API failure → employee form field mapping |
+| `src/components/employees/` | directory, pagination, create form, detail/rename |
+| `src/components/ui/` | `TextField`, `ConfirmDialog`, `StatusMessage` |
 | `src/app/api/backend/[...path]/route.ts` | thin Route Handler adapter |
 
 ### Proxy allowlist
@@ -205,6 +210,46 @@ frontend/src/
 └── tests/
 ```
 
+## Employees screen (P4.5)
+
+`/employees` is a client component that talks only to the same-origin proxy.
+
+| Action | Request | Notes |
+|---|---|---|
+| List | `GET /api/v1/employees?limit=&after=` | keyset only; `limit` 1–100 |
+| Create | `POST /api/v1/employees` | `employee_id`, `full_name`, `is_active: true`; never `created_at` |
+| Detail | `GET /api/v1/employees/{employee_id}` | |
+| Rename | `PATCH /api/v1/employees/{employee_id}` | `full_name` only |
+| Deactivate | `POST /api/v1/employees/{employee_id}/deactivate` | no body; no reactivation endpoint exists |
+
+**Employee-ID compatibility (owner-approved Option A).** The create form
+validates `employee_id` with the proxy's own `isSafeEmployeeId`, imported rather
+than copied, so the dashboard can never create an employee it cannot then
+address. The value is submitted exactly as typed — no trimming, case folding or
+other normalisation — and valid leading zeros, hyphens and mixed case are kept.
+Records that already exist in the backend but violate the proxy policy stay
+listed, with detail/rename/deactivate disabled and the reason shown; such an
+operation is never attempted and never reported as successful.
+
+**Keyset pagination.** `Next` follows `next_after`; `Previous` replays a
+client-side cursor history, so nothing is re-scanned. Page sizes are 10/20/50/100
+(the backend maximum is 100) and changing the size returns to the first page. A
+full final page can be followed by a legitimate empty page, which is shown as
+such with a button back. `count` is the page length and is never presented as a
+total; there is no total, no search and no sorting, and no snapshot consistency
+is claimed. Requests are abortable and tagged, so a stale response cannot replace
+a newer page.
+
+**Deactivation** sits behind a confirmation dialog that names the employee,
+states that it cannot be undone through the dashboard (the API has no
+reactivation endpoint), moves focus to Cancel, traps Tab, closes on Escape and
+restores focus to the invoking button. Success appears only after the API
+returns; the directory is then refetched and the row's status updated.
+
+**Fixture limitation.** P4.5 adds no employee fixtures: the development fixture
+gate still covers the Overview only, so a failing live employee request always
+produces a distinguishable error state instead of synthetic records.
+
 ## Dependencies (exact pins)
 
 Production: `next 16.4.6`, `react 19.3.1`, `react-dom 19.3.1`.
@@ -223,7 +268,7 @@ state library.
 npm run test
 ```
 
-**184 tests in 12 suites** (P4.3: 85).
+**249 tests in 19 suites** (P4.4: 184).
 
 | Suite | Covers |
 |---|---|
@@ -232,17 +277,24 @@ npm run test
 | `fixtures.test.ts` | off by default, dev+opt-in only, impossible in production, label, contract-shaped data, determinism, no silent fallback |
 | `overview-metrics.test.ts` | multi-page totals, cursor loops, page failure, UTC boundaries, folding, ties, duplicates, undated/unclassified, integrity flag |
 | `overview.test.tsx` | loading, live success, empty, fixture banner, integrity warning, independent failures, retry, keyboard refresh, no fabricated metrics, light theme |
-| `routes.test.tsx` | root redirect, functional Overview, remaining placeholders |
+| `employee-id.test.ts` | id rule: ordinary ids, leading zeros/hyphens/mixed case, empty, padded, >128 chars, `/ \\ % # ?`, `.`/`..`, control characters; date and status formatting |
+| `employees-errors.test.ts` | `EMPLOYEE_EXISTS`, `body.`-prefixed field mapping, unmapped fields preserved, proxy 413, 503, network, rename 404 |
+| `employees-api.test.ts` | create/detail/rename/deactivate methods, paths, bodies, parsing, error propagation |
+| `employees-directory.test.tsx` | loading, empty, populated, unsupported ids, error/retry, next/previous, page size, empty final page, no total, stale responses |
+| `employees-create.test.tsx` | required fields, unsupported id, success body, 409, 422 mapping, unmapped 422, proxy 413, network, cancel |
+| `employees-rename.test.tsx` | detail load, whitespace name, rename body, 422/404/503, deactivate hand-off |
+| `employees-deactivate.test.tsx` | confirmation required, cancel, Escape with focus restore, single POST, refresh, failure |
+| `routes.test.tsx` | root redirect, functional Overview and Employees routes, remaining placeholders |
 | theme / tokens / navigation / shell suites | unchanged from P4.2–P4.3 |
 
-Measured on 2026-11-11 (Node v24.21.0, npm 11.19.0):
+Measured on 2026-11-12 (Node v24.21.0, npm 11.19.0):
 
 | Check | Result |
 |---|---|
 | `npm ls --depth=0` | exit 0 — 15 packages, unchanged |
 | `npm run lint` | exit 0, 0 problems |
 | `npm run typecheck` | exit 0 |
-| `npm run test` | exit 0 — **184 passed / 184**, 12 suites, ~32 s |
+| `npm run test` | exit 0 — **249 passed / 249**, 19 suites, ~49 s |
 | `npm run build` | exit 0 — static `/`, `/_not-found`, `/attendance`, `/employees`, `/system-status`; dynamic `/overview` and `/api/backend/[...path]` |
 
 ## Known limitations
@@ -252,8 +304,10 @@ Measured on 2026-11-11 (Node v24.21.0, npm 11.19.0):
   responses or development fixtures.
 * No browser was driven; responsive layout and the proxy's real network path are
   covered by tests and static review only.
-* Employees, Attendance and System Status are still placeholders; there is no
-  employee CRUD, checkout control or health widget.
+* Attendance and System Status are still placeholders; there is no checkout
+  control or health widget.
+* No employee fixtures exist, so the Employees screen has no offline mode: with
+  no backend it shows its error state.
 * Attendance is not paginated and events carry no employee name — a future
   activity list must join names from the employee endpoint.
 * An employee identifier containing `%` cannot pass the proxy (documented

@@ -87,7 +87,7 @@ browser ──same-origin──▶ Next Route Handler ──server-side fetch─
 | Screen | Source | State |
 |---|---|---|
 | **Overview** | `GET /api/v1/employees` (all keyset pages), `GET /api/v1/attendance` | **implemented** — loading, empty, error, partial, fixture |
-| **Employees** | `GET/POST /api/v1/employees`, `GET/PATCH /api/v1/employees/{id}`, `POST …/deactivate` | placeholder (P4.5) |
+| **Employees** | `GET/POST /api/v1/employees`, `GET/PATCH /api/v1/employees/{id}`, `POST …/deactivate` | **implemented** — loading, empty, error/retry, keyset paging, create, rename, confirmed deactivation |
 | **Attendance** | `GET /api/v1/attendance`, `POST /api/v1/attendance/{id}/checkout` | placeholder (P4.6) |
 | **System Status** | `GET /api/v1/health` | placeholder (P4.7) |
 
@@ -107,6 +107,19 @@ Verified contract facts that shape the UI:
 Deliberate constraints: no invented metrics (no rate, trend, score, prediction or
 chart), no manual check-in, checkout presented as operator-authorized, and no
 camera streaming, face images, embeddings or biometrics.
+
+**Employee-ID compatibility (P4.5, owner-approved Option A).** The create form
+validates with the proxy's own rule (`isSafeEmployeeId`, imported rather than
+copied), so no employee can be created that the dashboard could not then read,
+rename or deactivate. Ids are sent exactly as typed. Records that already violate
+the proxy policy are listed, unmanageable, with the reason shown — never hidden
+and never silently "fixed".
+
+**Pagination and deactivation.** Keyset only: `Next` follows `next_after`,
+`Previous` replays a client-side cursor history, page sizes are 10/20/50/100, and
+`count` is never presented as a total. Deactivation is confirmed in a modal that
+names the employee and states there is no reactivation endpoint; the status
+changes only after the API returns.
 
 ---
 
@@ -133,7 +146,8 @@ Development-only fixtures are implemented for the Overview only:
 | Fixtures | gating, production refusal, labelling, contract shape, no fallback | covered (P4.4) |
 | Metrics | multi-page totals, cursor loops, UTC boundaries, folding, ties | covered (P4.4) |
 | Overview UI | loading, empty, error, partial, retry, integrity warning | covered (P4.4) |
-| Navigation / responsive / write flows | route rendering, 360–1280 px, employee CRUD, checkout | pending P4.5+ |
+| Employees UI | id rule (proxy-delegated), keyset paging, empty final page, create errors, rename, deactivation dialog and focus | covered (P4.5) |
+| Navigation / responsive / write flows | route rendering, 360–1280 px, checkout | partially covered: routes and employee writes (P4.5); checkout pending P4.6 |
 
 ---
 
@@ -143,7 +157,8 @@ Development-only fixtures are implemented for the Overview only:
 |---|---|
 | Live backend integration | **NOT VERIFIED** — the FastAPI startup gate (G2+G8) needs PostgreSQL, which this phase may not open |
 | Browser verification | not performed |
-| Employee CRUD, attendance screen, status screen | not started (P4.5–P4.7) |
+| Employee CRUD | implemented in P4.5 (list, create, rename, deactivate) |
+| Attendance screen, status screen | not started (P4.6–P4.7) |
 | Authentication / RBAC | Phase 5 |
 | Deployment | not requested; nothing may be published |
 

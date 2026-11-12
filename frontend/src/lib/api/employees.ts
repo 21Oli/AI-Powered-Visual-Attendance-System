@@ -1,6 +1,6 @@
 import { requestJson, API_PATHS } from "./client";
 import { ApiError } from "./errors";
-import { parseEmployeeList } from "./types";
+import { parseEmployee, parseEmployeeList } from "./types";
 import type { Employee, EmployeeListResponse } from "./types";
 
 /** The backend clamps larger values to 100; asking for 100 keeps pages fewest. */
@@ -73,5 +73,75 @@ export async function fetchAllEmployees(
     kind: "malformed",
     code: "PAGINATION_LIMIT_REACHED",
     message: "The employee list exceeded the safe number of pages.",
+  });
+}
+
+export interface CreateEmployeeInput {
+  readonly employee_id: string;
+  readonly full_name: string;
+  /** Defaults to `true`; the backend assigns `created_at` itself. */
+  readonly is_active?: boolean;
+}
+
+/**
+ * Create one employee.
+ *
+ * Only the three fields the backend accepts are sent: `created_at` is
+ * application-authoritative and never client-supplied.
+ */
+export async function createEmployee(
+  input: CreateEmployeeInput,
+  signal?: AbortSignal,
+): Promise<Employee> {
+  return requestJson({
+    path: API_PATHS.employees,
+    method: "POST",
+    body: {
+      employee_id: input.employee_id,
+      full_name: input.full_name,
+      is_active: input.is_active ?? true,
+    },
+    signal,
+    parse: parseEmployee,
+  });
+}
+
+/** One employee by identifier (`404` surfaces as `EMPLOYEE_NOT_FOUND`). */
+export async function fetchEmployeeById(
+  employeeId: string,
+  signal?: AbortSignal,
+): Promise<Employee> {
+  return requestJson({
+    path: API_PATHS.employee(employeeId),
+    signal,
+    parse: parseEmployee,
+  });
+}
+
+/** Rename one employee. The body carries `full_name` only. */
+export async function renameEmployee(
+  employeeId: string,
+  fullName: string,
+  signal?: AbortSignal,
+): Promise<Employee> {
+  return requestJson({
+    path: API_PATHS.employee(employeeId),
+    method: "PATCH",
+    body: { full_name: fullName },
+    signal,
+    parse: parseEmployee,
+  });
+}
+
+/** Deactivate one employee. The contract has no body and no reactivation. */
+export async function deactivateEmployee(
+  employeeId: string,
+  signal?: AbortSignal,
+): Promise<Employee> {
+  return requestJson({
+    path: API_PATHS.employeeDeactivate(employeeId),
+    method: "POST",
+    signal,
+    parse: parseEmployee,
   });
 }

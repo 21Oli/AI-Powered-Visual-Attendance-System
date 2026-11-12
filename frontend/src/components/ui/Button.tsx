@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes } from "react";
+import type { ButtonHTMLAttributes, Ref } from "react";
 
 import styles from "./Button.module.css";
 
@@ -8,6 +8,8 @@ export type ButtonSize = "sm" | "md";
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
   size?: ButtonSize;
+  /** React 19 passes `ref` as a normal prop; declared so focus can be managed. */
+  ref?: Ref<HTMLButtonElement>;
 }
 
 /**
@@ -22,6 +24,7 @@ export function Button({
   size = "md",
   className,
   type = "button",
+  ref,
   ...rest
 }: ButtonProps) {
   const classes = [
@@ -33,5 +36,5 @@ export function Button({
     .filter(Boolean)
     .join(" ");
 
-  return <button type={type} className={classes} {...rest} />;
+  return <button ref={ref} type={type} className={classes} {...rest} />;
 }

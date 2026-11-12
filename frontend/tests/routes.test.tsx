@@ -61,8 +61,21 @@ describe("overview route", () => {
   });
 });
 
+describe("employees route", () => {
+  it("renders the employee directory instead of a placeholder", async () => {
+    render(<EmployeesPage />);
+
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Employees" }),
+    ).toBeDefined();
+    expect(
+      await screen.findByText(/no employees are registered yet/i),
+    ).toBeDefined();
+    expect(screen.queryByText(/under development/i)).toBeNull();
+  });
+});
+
 const placeholders = [
-  { title: "Employees", Page: EmployeesPage, purpose: /employee register/i },
   { title: "Attendance", Page: AttendancePage, purpose: /attendance journal/i },
   {
     title: "System Status",

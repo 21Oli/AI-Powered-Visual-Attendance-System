@@ -3,6 +3,57 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 44 — Phase 4 P4.5: Employees management (2026-11-12)
+
+**The Employees screen lists, creates, renames and deactivates employees through
+the existing proxy. No Python file changed, no database was contacted, and
+nothing was verified against a live backend.**
+
+* **Baseline preserved**: branch `main`, HEAD `e68da71` (P4.4, clean tree); the
+  typed client, proxy, design tokens, shell and `Button` were reused.
+* **Employee-ID compatibility (owner-approved Option A)**: the create form
+  validates with the proxy's own `isSafeEmployeeId`, **imported, not copied**, so
+  the dashboard cannot create a record it could not then address. Submission
+  sends the id exactly as typed — no trimming, case folding or normalisation —
+  while `0007`, `emp-0001` and `EMP_1.2` stay valid. The proxy source itself was
+  not modified.
+* **Incompatible existing records**: employees already stored with an id the
+  proxy cannot address remain visible in the table with an explanation, and their
+  detail/rename/deactivate controls are disabled. No bypass was attempted and no
+  success is claimed for them.
+* **API client** (`src/lib/api/employees.ts`): `createEmployee` (POST, exactly
+  `employee_id`, `full_name`, `is_active: true`; `created_at` is never sent),
+  `fetchEmployeeById`, `renameEmployee` (PATCH with `full_name` only) and
+  `deactivateEmployee` (POST, no body), all over the existing `requestJson`,
+  `API_PATHS` and `ApiError`.
+* **UI** (`src/components/employees/`): keyset directory with `Next` via
+  `next_after` and `Previous` via a client-side cursor history, page sizes
+  10/20/50/100 resetting to page 1, loading/empty/error/retry states, a
+  `role="dialog"` deactivation confirmation (focus to Cancel, Tab trap, Escape,
+  focus restore, success only after the response), a create form and a
+  detail/rename panel. Requests are abortable and tagged, so a stale response
+  cannot overwrite a newer page.
+* **Deliberate omissions**: `count` is never used as a total; there is no server
+  search or sort (the API has neither); no employee fixtures were added, so the
+  fixture gate still covers the Overview only and live failures stay distinct
+  from an empty directory.
+* **Tests**: +65 across `employee-id.test.ts`, `employees-errors.test.ts`,
+  `employees-api.test.ts`, `employees-directory.test.tsx`,
+  `employees-create.test.tsx`, `employees-rename.test.tsx`,
+  `employees-deactivate.test.tsx` and the updated `routes.test.tsx` → **249
+  passed / 249 in 19 suites** (from 184).
+* **Verified**: `npm ls --depth=0` exit 0 (15 packages, unchanged); `npm run
+  lint` exit 0; `npm run typecheck` exit 0; `npm run test` exit 0 (249/249);
+  `npm run build` exit 0 with static `/employees` and dynamic
+  `/api/backend/[...path]`.
+* **Fixed, not suppressed**: four first-run test failures came from the required
+  asterisk inside every label (exact label matching), a leading-space id that
+  `user.type` cannot produce, and a hint that also matched an error assertion.
+  The queries were corrected; no rule was disabled and no test weakened.
+* **Not done / not claimed**: no attendance table, checkout control, health
+  widget, authentication or employee fixtures; no live backend or browser
+  verification (the G2+G8 startup gate needs PostgreSQL). P4.6+ not started.
+
 ## Step 43 — Phase 4 P4.4: typed API client, proxy, fixtures and Overview (2026-11-11)
 
 **The Overview is functional and reads through a same-origin proxy that allows

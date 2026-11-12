@@ -4,6 +4,33 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 4, P4.5: Employees management
+
+### Added
+
+* `frontend/src/lib/employees/validation.ts` — employee form rules. The identifier rule **delegates to the proxy's own `isSafeEmployeeId`** instead of copying it, so the form accepts exactly what the proxy can address and the two cannot drift. Ids are never trimmed, case-folded or otherwise normalised, and values such as `0007`, `emp-0001` and `EMP_1.2` remain valid.
+* `frontend/src/lib/employees/format.ts` — UTC `YYYY-MM-DD` creation dates, the explicit `Not recorded` placeholder for a nullable `created_at`, `Unavailable` for an unreadable timestamp (never `Invalid Date`), and status labels.
+* `frontend/src/lib/employees/errors.ts` — API failure → form-field mapping: `EMPLOYEE_EXISTS` to the id field, `body.`-prefixed pydantic locations stripped before matching, unmappable field errors preserved as a general message, and proxy refusals (`PROXY_REQUEST_INVALID`, 413) never presented as backend field validation.
+* `frontend/src/lib/api/employees.ts` — `createEmployee` (POST, three contracted fields, `is_active: true`, no `created_at`), `fetchEmployeeById`, `renameEmployee` (PATCH with `full_name` only) and `deactivateEmployee` (POST, no body), all through `requestJson`, `API_PATHS` and the existing `ApiError`.
+* `frontend/src/components/ui/{TextField,ConfirmDialog,StatusMessage}` — the primitives P4.5 actually needed: a labelled input with hint/`aria-describedby`/`aria-invalid` error, a `role="dialog"` confirmation with focus to Cancel, Tab trap, Escape and focus restoration, and a status/alert region that only reports success after the API resolves.
+* `frontend/src/components/employees/` — `EmployeesView` (keyset paging with a cursor history, abortable and request-tagged fetches), `EmployeeTable` (a semantic table restyled into stacked cards below 720 px), `PaginationControls`, `CreateEmployeeForm` and `EmployeeDetail` (detail read plus rename and a deactivate hand-off), each with a CSS Module.
+* Tests: `employee-id.test.ts`, `employees-errors.test.ts`, `employees-api.test.ts`, `employees-directory.test.tsx`, `employees-create.test.tsx`, `employees-rename.test.tsx` and `employees-deactivate.test.tsx` — 65 new tests.
+
+### Changed
+
+* `frontend/src/app/(dashboard)/employees/page.tsx`: the placeholder became the functional directory (`metadata.title = "Employees"`).
+* `frontend/src/components/ui/Button.tsx`: accepts a `ref` (React 19 ref-as-prop) so the dialog can move focus to Cancel. No visual or behavioural change otherwise.
+* `frontend/tests/routes.test.tsx`: the Employees placeholder assertions were replaced with a check that the route renders the directory; Attendance and System Status remain placeholders.
+* `frontend/README.md`, `docs/PHASE4_IMPLEMENTATION_PLAN.md`, `docs/PHASE4_DASHBOARD_PROPOSAL.md`, `DEVELOPMENT_STATUS.md`: document P4.5, the employee-ID compatibility policy, keyset pagination limits and the irreversible deactivation.
+
+### Notes
+
+* Deactivation is guarded by a confirmation dialog that names the employee and states that the API has no reactivation endpoint. Success is displayed only after the response returns; the backend operation stays idempotent.
+* Existing employee records whose identifiers violate the proxy policy are listed with detail/rename/deactivate disabled and an explanation. They are not hidden, no proxy rule was relaxed and no operation is claimed to have succeeded.
+* Pagination never derives a total from `count` (the page length), offers no search or sorting (the API supports neither), and treats a full final page followed by an empty page as normal.
+* No employee fixtures were added: the development fixture gate still covers the Overview only, so live employee failures stay distinguishable from an empty directory.
+* No dependency was added, upgraded or removed (15 packages, `npm ls --depth=0` exit 0). No Python, proxy-policy, database, secret, camera or biometric change, and no Git operation. P4.6 and later were not started.
+
 ## [Unreleased] — Phase 4, P4.4: typed API client, secure proxy, fixtures and Overview
 
 ### Added
