@@ -1,19 +1,19 @@
 import type { Metadata } from "next";
 
-import { PagePlaceholder } from "../../../components/layout/PagePlaceholder";
+import { resolveDataSourceKind } from "../../../lib/api/data-source";
+import { SystemStatusView } from "../../../components/system-status/SystemStatusView";
 
 export const metadata: Metadata = { title: "System Status" };
 
+/**
+ * Fixture mode is resolved on the server so the browser cannot enable it, and a
+ * production build ignores `DASHBOARD_DATA_MODE` entirely. The page is dynamic
+ * because the health check must never be served from a cached render.
+ */
+export const dynamic = "force-dynamic";
+
 export default function SystemStatusPage() {
   return (
-    <PagePlaceholder
-      title="System Status"
-      purpose="Service availability, so an operator can distinguish a quiet day from an unreachable backend before trusting an empty screen."
-      planned={[
-        "Backend health result with the time it was checked",
-        "Clear offline and unavailable states",
-        "Guidance on what to check when the service is down",
-      ]}
-    />
+    <SystemStatusView dataSourceKind={resolveDataSourceKind(process.env)} />
   );
 }

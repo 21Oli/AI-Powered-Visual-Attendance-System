@@ -3,6 +3,63 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 48 — Phase 4 P4.7: System Status screen, backend API liveness (2026-11-12)
+
+**The `/system-status` placeholder is now a functional health screen. It reports
+backend API liveness only, sends one request at a time, and claims nothing about
+the database, cameras, recognition or deployment. No Python file changed, the
+proxy and its allowlist are untouched, no database was contacted, and nothing was
+verified against a live backend.**
+
+* **Baseline preserved**: branch `main`, HEAD `08df53a` with a clean tree. The
+  proxy already permitted `GET /api/v1/health`, `API_PATHS.health` and
+  `parseHealth` already existed, and the request reuses `requestJson` — the proxy,
+  client transport and error type were not modified.
+* **Contract confirmed from the backend source**: `GET /api/v1/health` returns
+  `HealthResponse()` (`{ "status": "ok" }`) and deliberately touches no database;
+  its docstring calls it a liveness claim and names `GET /employees` as the
+  database probe. The UI states exactly that instead of implying system health.
+* **Health client** (`src/lib/api/health.ts`): `fetchHealth(signal?, { timeoutMs })`
+  requests `/api/backend/api/v1/health`, accepts only the documented payload, and
+  aborts after a documented **8 seconds** using `AbortSignal.timeout` combined
+  with the caller's signal via `AbortSignal.any`. A timeout becomes
+  `ApiError({ kind: "network", code: "HEALTH_TIMEOUT" })`; caller cancellation
+  (unmount) is rethrown untouched, so it is never misclassified as a timeout.
+* **Screen** (`SystemStatusView`): checking (`role="status"`, Refresh disabled),
+  healthy only after a validated response with the check time, unreachable
+  backend, timeout, unexpected response (malformed JSON, wrong shape, unexpected
+  HTTP status) and server error (5xx / sanitized proxy failures). Each failure is
+  a `role="alert"` panel with fixed copy and only the sanitized code/status; a
+  failed check replaces a previous healthy result rather than inheriting it.
+  Last attempted and last successful check times are shown in UTC.
+* **Refresh**: one manual action; a request in flight disables the control and the
+  request-id guard plus `AbortController` discard stale results. No polling, no
+  automatic retry, no reconciliation.
+* **Fixture mode**: server-resolved and disclosed with the standard
+  `FIXTURE DATA — DEVELOPMENT ONLY` banner; no request is made, no status is
+  shown, and no healthy backend is fabricated. Production can still never enable
+  fixtures.
+* **Scope panel**: states that PostgreSQL/schema/migrations, cameras, recognition
+  accuracy, biometric storage, authentication and deployment readiness are not
+  verified, and that no endpoint for them is called.
+* **Route** (`system-status/page.tsx`): placeholder replaced with the dynamic,
+  server-rendered screen (`dynamic = "force-dynamic"`), so a health result is
+  never served from a cached render.
+* **Tests**: +18 → **457 passed / 457 in 31 suites** (from 439/29):
+  `health-api.test.ts` (7) and `system-status.test.tsx` (11), plus the route suite
+  where System Status stopped being a placeholder.
+* **Verified**: `npm ls --depth=0` exit 0 (15 packages, unchanged); `npx vitest
+  run` exit 0 (457/457); `npm run lint` exit 0; `npx tsc --noEmit` exit 0;
+  `npm run build` exit 0 with `/system-status` now dynamic.
+* **Fixed, not suppressed**: the first lint run rejected synchronous `setState`
+  inside the mount effect; the loading/attempt reset moved into the Refresh
+  handler and the first attempt time now comes from a lazy state initialiser. No
+  rule was disabled.
+* **Not done / not claimed**: no backend, proxy, database, authentication,
+  camera or biometric change; no new dependency; no polling, retry, offline
+  queue or deployment work; no live backend, browser or deployment verification
+  (the G2+G8 startup gate needs PostgreSQL). P4.8–P4.9 not started.
+
 ## Step 47 — Phase 4 P4.6.6: final documentation, regression verification and Phase 4 review (2026-11-12)
 
 **Final review only: no feature, proxy rule, API contract, backend file, database

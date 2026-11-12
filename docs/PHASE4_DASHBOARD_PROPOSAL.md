@@ -3,9 +3,9 @@
 Status: **APPROVED; P4.1–P4.6.5 implemented and committed.** P4.2 created the
 scaffold, P4.3 the shell and navigation, P4.4 the typed API client, the secure
 proxy, development fixtures and the functional Overview, P4.5 the Employees
-screen, and P4.6 the Attendance journal with client-side filters/paging and the
-confirmed operator check-out. P4.6.6 re-verified the committed code; System Status
-(P4.7) and P4.8–P4.9 are not started.
+screen, P4.6 the Attendance journal with client-side filters/paging and the
+confirmed operator check-out, and P4.7 the backend-API liveness screen. P4.6.6
+re-verified the committed code; P4.8–P4.9 are not started.
 
 Milestone status and verification live in
 `docs/PHASE4_IMPLEMENTATION_PLAN.md`; operational detail in
@@ -92,7 +92,7 @@ browser ──same-origin──▶ Next Route Handler ──server-side fetch─
 | **Overview** | `GET /api/v1/employees` (all keyset pages), `GET /api/v1/attendance` | **implemented** — loading, empty, error, partial, fixture |
 | **Employees** | `GET/POST /api/v1/employees`, `GET/PATCH /api/v1/employees/{id}`, `POST …/deactivate` | **implemented** — loading, empty, error/retry, keyset paging, create, rename, confirmed deactivation |
 | **Attendance** | `GET /api/v1/attendance`, `GET /api/v1/employees` (all keyset pages, for names and the employee filter), `POST /api/v1/attendance/{id}/checkout` | **implemented** — journal states as before, plus a confirmed operator check-out for an active employee with an open session in live mode (one request, no retry, no optimistic close, uncertain `503` reported as uncertain, fixture mode disabled) |
-| **System Status** | `GET /api/v1/health` | placeholder (P4.7) |
+| **System Status** | `GET /api/v1/health` | **implemented** (P4.7) — liveness only: loading, healthy, unreachable, timeout, unexpected response, server error, manual refresh, fixture disclosure; no database/camera/recognition/deployment probe |
 
 Verified contract facts that shape the UI:
 
@@ -107,6 +107,10 @@ Verified contract facts that shape the UI:
   `created_at` is nullable.
 * `POST …/checkout` accepts **no body**, and `CHECKOUT_COOLDOWN` reflects the
   approved 300-second cooldown.
+* `GET /health` returns exactly `{ "status": "ok" }` and does **not** touch
+  PostgreSQL: it is a liveness claim about the API process, and the backend's own
+  docstring names `GET /employees` as the honest database probe. The status
+  screen repeats that limit rather than implying system-wide health.
 
 Deliberate constraints: no invented metrics (no rate, trend, score, prediction or
 chart), no manual check-in, checkout presented as operator-authorized, and no
@@ -153,6 +157,7 @@ screens only (the Employees screen has no fixture mode):
 | Overview UI | loading, empty, error, partial, retry, integrity warning | covered (P4.4) |
 | Employees UI | id rule (proxy-delegated), keyset paging, empty final page, create errors, rename, deactivation dialog and focus | covered (P4.5) |
 | Attendance / checkout | journal states, filters, paging, eligibility, single bodyless POST, duplicate prevention, success+refresh, every error classification, uncertainty without retry | covered (P4.6.2–P4.6.5) |
+| System Status | health client (path, payload, malformed/HTTP/network/timeout/abort) and all screen states, refresh, duplicate prevention, fixture disclosure | covered (P4.7) |
 | Navigation / responsive / write flows | route rendering, 360–1280 px, checkout | routes and all three writes covered by tests; **no real browser was driven**, so responsive and focus behaviour are static/CSS review only |
 
 ---
@@ -165,7 +170,7 @@ screens only (the Employees screen has no fixture mode):
 | Browser verification | not performed |
 | Employee CRUD | implemented in P4.5 (list, create, rename, deactivate) |
 | Attendance screen | journal + operator check-out implemented (P4.6.4–P4.6.5) |
-| Status screen | not started (P4.7) |
+| Status screen | backend API liveness screen implemented (P4.7); no database, camera, recognition or deployment probe exists |
 | Phase 4 final review (P4.6.6) | automated frontend verification passed (439/439, lint, typecheck, build, 15 unchanged packages); live backend, real browser and deployment not verified |
 | Authentication / RBAC | Phase 5 |
 | Deployment | not requested; nothing may be published |

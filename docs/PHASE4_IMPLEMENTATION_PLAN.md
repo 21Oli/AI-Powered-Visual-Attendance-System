@@ -17,7 +17,7 @@ disabled.
 | P4.4 | Typed API client, secure proxy, fixtures and Overview | **VERIFIED** — committed `e68da71`, re-verified in P4.6.6 |
 | P4.5 | Employees screen (list, create, detail, rename, deactivate) | **VERIFIED** — committed `376345d`, re-verified in P4.6.6 |
 | P4.6 | Attendance screen (journal, checkout confirmation) | journal + operator check-out **VERIFIED** — committed `0a8fd55`/`c0e5e77`/`3b54163`/`52a6ded`, re-verified in P4.6.6 |
-| P4.7 | System status screen (API health, offline states) | not started |
+| P4.7 | System status screen (API health, offline states) | **READY FOR OWNER REVIEW** (liveness-only health screen) |
 | P4.8 | Remaining API surfaces (writes) and hardening | not started |
 | P4.9 | Final verification, documentation and acceptance review | not started |
 
@@ -250,10 +250,11 @@ at the fixture clock instant instead of weakening that assertion.
 
 ## 6. Remaining work and constraints
 
-* System Status remains a placeholder (P4.7). The Attendance journal is
-  implemented read-only and P4.6.5 added the single approved write: a confirmed
-  operator check-out for an active employee with an open session in live mode.
-  There is still no check-in, bulk or automatic check-out.
+* P4.7 replaced the System Status placeholder with a backend-API liveness
+  screen. The Attendance journal is implemented read-only and P4.6.5 added the
+  single approved write: a confirmed operator check-out for an active employee
+  with an open session in live mode. There is still no check-in, bulk or
+  automatic check-out. P4.8–P4.9 are not started.
 * **No live verification.** The backend's G2+G8 startup gate requires
   PostgreSQL; all proxy/Overview evidence is from mocked responses and
   development fixtures. No browser was driven either.
@@ -293,9 +294,60 @@ Verified on the committed tree (`52a6ded`, clean working tree):
 | `npm run build` | exit 0 — static `/`, `/_not-found`, `/employees`, `/system-status`; dynamic `/attendance`, `/overview`, `/api/backend/[...path]` |
 | `npm ls --depth=0` | exit 0 — the same 15 pinned packages |
 
-**Phase 4 status: P4.1–P4.6.5 are implemented and committed, and automated
-frontend verification passes. P4.7 (System Status) is still a placeholder and
-P4.8–P4.9 are not started, so the phase-level decision is
-`PHASE 4 INCOMPLETE — BLOCKERS REMAIN`.** Live backend (PostgreSQL-gated),
-real-browser and deployment validation remain unperformed, so this is not a
-production-readiness claim.
+**Phase 4 status at P4.6.6: P4.1–P4.6.5 were implemented and committed, with
+automated verification passing; P4.7 was still a placeholder, so that review
+recorded `PHASE 4 INCOMPLETE — BLOCKERS REMAIN`.** P4.7 has since been
+implemented (see §8); P4.8–P4.9 remain, and live backend (PostgreSQL-gated),
+real-browser and deployment validation are still unperformed, so nothing here is
+a production-readiness claim.
+
+---
+
+## 8. P4.7 scope and verification (System Status)
+
+```text
+Browser → SystemStatusView (client) → src/lib/api/health.ts
+        → /api/backend/[...path] (unchanged proxy, GET /api/v1/health)
+        → FastAPI health handler (liveness only)
+```
+
+| Layer | Files |
+|---|---|
+| Health client | `src/lib/api/health.ts` (reuses `requestJson`, `API_PATHS.health`, `parseHealth`) |
+| Screen | `src/components/system-status/SystemStatusView.tsx` + CSS Module |
+| Route | `src/app/(dashboard)/system-status/page.tsx` (dynamic, server-resolved fixture mode) |
+
+**What the endpoint actually is.** The FastAPI handler returns
+`HealthResponse()` — `{ "status": "ok" }` — with no database access; its own
+docstring calls it a liveness claim, not a readiness claim, and names
+`GET /api/v1/employees` as the honest database probe. The screen repeats that
+scope and lists PostgreSQL/schema/migrations, cameras, recognition accuracy,
+biometric storage, authentication and deployment readiness as **not** verified.
+No endpoint was added, and the proxy allowlist is unchanged (the health pair was
+already permitted).
+
+**States.** One manual check at a time: loading (`role="status"`, Refresh
+disabled), healthy only after a validated `{ "status": "ok" }`, unreachable
+backend, timeout (`HEALTH_TIMEOUT`, 8-second `AbortSignal.timeout` combined with
+the caller's signal so unmount is not a timeout), unexpected response (malformed
+JSON, wrong shape, unexpected HTTP status) and server error (5xx / sanitized
+proxy failures). A failure replaces the previous result rather than inheriting
+its healthy state, and nothing retries or polls automatically.
+
+**Fixture mode.** Server-resolved, disclosed with the standard banner; no
+request is made, no status is displayed and no healthy backend is fabricated. A
+failed live check still never falls back to fixtures.
+
+| Command | Result |
+|---|---|
+| `npm ls --depth=0` | exit 0 — 15 packages, unchanged |
+| `npx vitest run` | exit 0 — **457 passed / 457**, 31 suites |
+| `npm run lint` | exit 0 — 0 problems |
+| `npx tsc --noEmit` | exit 0 — strict |
+| `npm run build` | exit 0 — dynamic `/system-status`; static `/`, `/_not-found`, `/employees` |
+
+Test growth 439 → 457 (+18) across `health-api.test.ts` and
+`system-status.test.tsx`, plus the updated route suite. One first-run lint error
+(synchronous `setState` inside the mount effect) was fixed by moving the
+loading/attempt reset into the Refresh handler and initialising the first attempt
+with a lazy state initialiser — no rule was disabled.

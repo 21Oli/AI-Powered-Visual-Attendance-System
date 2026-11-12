@@ -4,6 +4,29 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 4, P4.7: System Status screen
+
+### Added
+
+* `frontend/src/lib/api/health.ts` — typed `fetchHealth` over the existing `requestJson`/`API_PATHS.health`/`parseHealth`, accepting only `{ "status": "ok" }`, with a documented 8-second `AbortSignal.timeout` combined with the caller's signal and a distinct `HEALTH_TIMEOUT` failure that never mislabels an unmount as a timeout.
+* `frontend/src/components/system-status/SystemStatusView.tsx` + CSS Module — loading, healthy (only after a validated response), unreachable, timeout, unexpected-response and server-error states, UTC last-attempt/last-success times, one guarded manual refresh, fixture-mode disclosure without a fabricated status, and an explicit scope panel naming what is not verified.
+
+### Changed
+
+* `frontend/src/app/(dashboard)/system-status/page.tsx`: the placeholder became the functional dynamic health screen, with fixture mode resolved on the server.
+* `frontend/tests/routes.test.tsx`: System Status is no longer a placeholder; the route test now expects the health screen and the fetch mock answers `/health`.
+* `frontend/README.md`, `docs/PHASE4_IMPLEMENTATION_PLAN.md`, `docs/PHASE4_DASHBOARD_PROPOSAL.md`, `DEVELOPMENT_STATUS.md`: document the health contract, the screen's states and the limits of a liveness check.
+
+### Verified
+
+* `npx vitest run` exit 0 — **457 passed / 457**, 31 suites; `npm run lint` exit 0; `npx tsc --noEmit` exit 0; `npm run build` exit 0 (dynamic `/system-status`); `npm ls --depth=0` exit 0 — the same 15 pinned packages.
+
+### Notes
+
+* The health endpoint is a liveness probe: it does not check PostgreSQL, schema or migrations, cameras, recognition, enrolment, authentication or deployment, and the page states that rather than inventing indicators. `GET /api/v1/employees` remains the honest database probe.
+* No polling, automatic retry, reconciliation, backend change, proxy change or dependency was added; fixture mode never fabricates a healthy backend result.
+* Live backend, real-browser and deployment validation remain unperformed.
+
 ## [Unreleased] — Phase 4, P4.6.6: final review and documentation corrections
 
 ### Changed

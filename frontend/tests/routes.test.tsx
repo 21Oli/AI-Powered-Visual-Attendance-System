@@ -19,11 +19,15 @@ function json(body: unknown): Response {
 
 beforeEach(() => {
   fetchMock.mockReset();
-  fetchMock.mockImplementation((input) =>
-    String(input).includes("/attendance")
+  fetchMock.mockImplementation((input) => {
+    const url = String(input);
+    if (url.includes("/health")) {
+      return Promise.resolve(json({ status: "ok" }));
+    }
+    return url.includes("/attendance")
       ? Promise.resolve(json({ events: [], count: 0, incomplete_trailing_record: false }))
-      : Promise.resolve(json({ employees: [], count: 0, limit: 100, next_after: null })),
-  );
+      : Promise.resolve(json({ employees: [], count: 0, limit: 100, next_after: null }));
+  });
   vi.stubGlobal("fetch", fetchMock);
 });
 
@@ -89,33 +93,17 @@ describe("attendance route", () => {
   });
 });
 
-const placeholders = [
-  {
-    title: "System Status",
-    Page: SystemStatusPage,
-    purpose: /service availability/i,
-  },
-] as const;
+describe("system status route", () => {
+  it("renders the backend API health screen instead of a placeholder", async () => {
+    render(<SystemStatusPage />);
 
-describe("remaining dashboard placeholder routes", () => {
-  it.each(placeholders)(
-    "renders the $title placeholder",
-    ({ title, Page, purpose }) => {
-      render(<Page />);
-
-      expect(screen.getByRole("heading", { level: 1, name: title })).toBeDefined();
-      expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
-      expect(screen.getByText(purpose)).toBeDefined();
-      expect(screen.getByText(/under development/i)).toBeDefined();
-      expect(screen.getByText(/structural placeholder only/i)).toBeDefined();
-    },
-  );
-
-  it.each(placeholders)("shows no fabricated data on $title", ({ Page }) => {
-    render(<Page />);
-
-    expect(screen.queryByRole("table")).toBeNull();
-    expect(screen.queryByText(/fixture/i)).toBeNull();
-    expect(screen.queryByText(/^\d+%$/)).toBeNull();
+    expect(
+      screen.getByRole("heading", { level: 1, name: "System Status" }),
+    ).toBeDefined();
+    expect(
+      await screen.findByText(/Backend API reachable/),
+    ).toBeDefined();
+    expect(screen.queryByText(/under development/i)).toBeNull();
+    expect(screen.queryByText(/structural placeholder only/i)).toBeNull();
   });
 });

@@ -3,11 +3,11 @@
 Next.js 16 (App Router) + TypeScript + CSS Modules dashboard for the
 AI-Powered Visual Attendance System.
 
-**Status: Phase 4 final review complete (P4.6.6) — P4.1–P4.6.5 are implemented and
-committed, and every automated frontend check passes (439 tests, lint, typecheck,
-build, unchanged dependencies).** The Overview, Employees, the Attendance journal
-with client-side filters/paging and the confirmed operator check-out are
-functional; System Status is still a structural placeholder (P4.7).
+**Status: P4.7 complete — all four dashboard screens are functional.** P4.1–P4.6.5
+plus the System Status screen (P4.7) are implemented, and every automated
+frontend check passes (457 tests, lint, typecheck, build, unchanged
+dependencies). System Status reports backend API **liveness only**, and the screen
+says so. P4.8–P4.9 remain.
 No live backend has been verified: the FastAPI startup gate requires PostgreSQL,
 which this phase is not authorized to connect to. No browser was driven and no
 deployment was performed or validated.
@@ -89,7 +89,7 @@ DASHBOARD_DATA_MODE=fixtures
 | `/overview` | Overview | **functional** (dynamic) |
 | `/employees` | Employees | **functional** (client component) |
 | `/attendance` | Attendance | **functional** — read-only journal + operator check-out (dynamic) |
-| `/system-status` | System Status | structural placeholder |
+| `/system-status` | System Status | **functional** — backend API health (dynamic) |
 | `/api/backend/[...path]` | — | **proxy** (dynamic, server-only) |
 | any other path | — | `not-found` |
 
@@ -117,6 +117,7 @@ FastAPI (loopback)  →  PostgreSQL / JSONL journal
 | `src/lib/api/client.ts` | single URL builder, fetch, JSON + envelope parsing |
 | `src/lib/api/employees.ts` | keyset paging, full-collection walk |
 | `src/lib/api/attendance.ts` | the whole journal (the API has no paging) |
+| `src/lib/api/health.ts` | `GET /api/v1/health` with a documented 8-second timeout |
 | `src/lib/attendance/journal.ts` | append-ordered fold and the shared session-state derivation |
 | `src/lib/attendance/filters.ts` | the four attendance filters as one pure function |
 | `src/lib/attendance/pagination.ts` | client-side paging over the filtered events |
@@ -125,6 +126,7 @@ FastAPI (loopback)  →  PostgreSQL / JSONL journal
 | `src/lib/attendance/errors.ts` | checkout failure classification (P4.6.3, used by the check-out panel) |
 | `src/lib/attendance/checkout.ts` | check-out eligibility matrix and operator-facing failure copy |
 | `src/components/attendance/` | journal view, table, filters, pagination, check-out panel |
+| `src/components/system-status/` | backend API health screen |
 | `src/lib/api/data-source.ts` | live vs fixture source, resolved server-side |
 | `src/lib/dashboard/overview.ts` | pure metric calculations |
 | `src/lib/server/proxy.ts` | allowlist, id/query validation, upstream URL |
@@ -257,6 +259,33 @@ session and one undated record. The gate is unchanged
 (`NODE_ENV === "development"` **and** `DASHBOARD_DATA_MODE=fixtures`, resolved
 server-side). A live failure never falls back to fixtures.
 
+## System Status screen (P4.7)
+
+`/system-status` asks one question: is the backend API process answering? It is
+the only health check the dashboard performs.
+
+* **Request** — `fetchHealth` (`src/lib/api/health.ts`) calls
+  `GET /api/v1/health` through the same-origin proxy via `requestJson`, accepts
+  exactly `{ "status": "ok" }`, and treats any other payload as malformed. It
+  aborts after **8 seconds** with `AbortSignal.timeout`, combined with the
+  caller's signal through `AbortSignal.any`, so a component unmount is not
+  reported as a timeout.
+* **States** — checking (announced with `role="status"`, Refresh disabled),
+  healthy only after a validated response, unreachable backend, timeout,
+  unexpected response (malformed JSON, wrong shape or unexpected HTTP status),
+  and server error (5xx / sanitized proxy failures). Each failure shows its
+  sanitized code and status, never a stack trace, origin or upstream payload, and
+  a previous healthy result is never presented as the outcome of a failed check.
+* **Refresh** — one manual action; a request in flight disables it, so duplicate
+  checks cannot start. Nothing polls, retries or reconciles automatically.
+* **Fixture mode** — disclosed with the usual banner, states that live backend
+  health has not been checked, shows no status at all and sends no request.
+* **Scope** — the endpoint is a liveness claim about the API process. The screen
+  states that PostgreSQL/schema/migrations, cameras, recognition accuracy,
+  biometric storage, authentication and deployment readiness are **not**
+  verified, and no endpoint for them is called. `GET /api/v1/employees` remains
+  the honest database probe.
+
 ## Structure
 
 ```text
@@ -267,13 +296,14 @@ frontend/src/
 │   ├── layout.tsx, page.tsx, loading.tsx, error.tsx, not-found.tsx, globals.css
 ├── components/
 │   ├── attendance/{AttendanceView,AttendanceTable,AttendanceFilters,AttendancePagination,AttendanceCheckout} + CSS Modules
+│   ├── system-status/SystemStatusView + CSS Module
 │   ├── dashboard/{OverviewDashboard,MetricCard} + CSS Modules
 │   ├── layout/{AppShell,Sidebar,Header,MobileNavigation,PagePlaceholder}
 │   ├── icons/NavIcon.tsx
 │   └── ui/{Button,ThemeToggle}
 ├── hooks/useTheme.ts
 ├── lib/
-│   ├── api/{types,errors,client,employees,attendance,data-source}.ts
+│   ├── api/{types,errors,client,employees,attendance,health,data-source}.ts
 │   ├── attendance/{journal,filters,pagination,format,summary,errors}.ts
 │   ├── dashboard/overview.ts
 │   ├── fixtures/overview-fixtures.ts
@@ -363,7 +393,9 @@ npm run test
 | `attendance-table.test.tsx` | append order, name/id resolution, unavailable directory, unknown type/timestamp, current session state, tie rule |
 | `attendance-checkout-policy.test.ts` | eligibility matrix and failure copy, uncertainty handling, cooldown wording |
 | `attendance-checkout-ui.test.tsx` | eligibility in the UI, dialog identity/cancel, single bodyless POST, duplicate prevention, success+refresh, every error classification, no fixture action |
-| `routes.test.tsx` | root redirect, functional Overview, Employees and Attendance routes, remaining placeholder |
+| `health-api.test.ts` | same-origin health path, documented payload only, malformed JSON, HTTP error, network failure, timeout, caller abort not misclassified |
+| `system-status.test.tsx` | loading, healthy only after a valid response, unreachable, timeout, unexpected payload/status, server error, refresh, duplicate prevention, unmount abort, fixture disclosure, scope list, landmarks |
+| `routes.test.tsx` | root redirect and the functional Overview, Employees, Attendance and System Status routes |
 | theme / tokens / navigation / shell suites | unchanged from P4.2–P4.3 |
 
 Measured on 2026-11-12 (Node v24.21.0, npm 11.19.0):
@@ -373,8 +405,8 @@ Measured on 2026-11-12 (Node v24.21.0, npm 11.19.0):
 | `npm ls --depth=0` | exit 0 — 15 packages, unchanged |
 | `npm run lint` | exit 0, 0 problems |
 | `npm run typecheck` | exit 0 |
-| `npm run test` | exit 0 — **439 passed / 439**, 29 suites, ~71 s |
-| `npm run build` | exit 0 — static `/`, `/_not-found`, `/employees`, `/system-status`; dynamic `/attendance`, `/overview` and `/api/backend/[...path]` |
+| `npm run test` | exit 0 — **457 passed / 457**, 31 suites, ~71 s |
+| `npm run build` | exit 0 — static `/`, `/_not-found`, `/employees`; dynamic `/attendance`, `/overview`, `/system-status` and `/api/backend/[...path]` |
 
 ## Known limitations
 
@@ -385,8 +417,13 @@ Measured on 2026-11-12 (Node v24.21.0, npm 11.19.0):
   covered by tests and static review only.
 * The only write the dashboard performs is an operator check-out, and only for
   an active, resolved employee with an open session in live mode; there is no
-  check-in, bulk, automatic or retried check-out. System Status is still a
-  placeholder, so there is no health widget.
+  check-in, bulk, automatic or retried check-out.
+* The System Status screen reports API **liveness** only. The health endpoint
+  does not check PostgreSQL, schema or migrations, cameras, recognition,
+  enrolment or deployment, and the page states that instead of inventing
+  indicators. The browser timeout and the proxy timeout are both 8 seconds, so a
+  hung backend may surface as either `HEALTH_TIMEOUT` or the proxy's
+  `504 BACKEND_TIMEOUT`; both are reported as failures, neither as healthy.
 * Check-out `PERSISTENCE_UNCONFIRMED` cannot be resolved by the dashboard: the
   operator must inspect the refreshed journal before acting again, and nothing
   in the UI reconciles a residual open session.
