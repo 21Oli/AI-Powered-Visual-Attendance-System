@@ -915,3 +915,50 @@ the journal schema version (still 1), or the decision authority.
   tracing: they are not propagated to other services, not persisted, and the
   log format still carries them as message text rather than a structured field.
   Non-HTTP scopes (lifespan, websocket) receive no ID.
+
+### D25 — Session cookie and cookie-only authentication dependency (Phase 5, P5.4.4)
+
+* **Single cookie source.** `src/api_cookies.py` is the only place a session
+  token becomes a cookie. `set_session_cookie` and `clear_session_cookie` read
+  every attribute from the approved P5.4.2 configuration (`SESSION_COOKIE`) and
+  from `AppSettings.session_cookie_secure`; they define no second policy, no
+  `Domain`, and no override. `Lax` is mapped explicitly (header attribute
+  values are case-insensitive, RFC 6265 §5.2) rather than lowercased from
+  caller text.
+* **Attributes.** `va_session`, path `/api/v1`, `HttpOnly`, `SameSite=Lax`,
+  `Max-Age=43200`, no `Domain`, `Secure` only when
+  `session_cookie_secure` is true (staging/production). The browser lifetime is
+  the absolute 12-hour session cap, never the 8-hour idle window: the cookie is
+  a maximum age, not a renewal mechanism.
+* **Deletion.** `clear_session_cookie` repeats the same name, path, `Secure`,
+  `HttpOnly` and `SameSite` (a deletion cookie with different attributes
+  addresses a different cookie and leaves the live one behind), sets an empty
+  value, `Max-Age=0` and an epoch `Expires`, so removal does not depend on the
+  client clock.
+* **Credential handling.** The token travels only as the `Set-Cookie` value;
+  neither helper accepts or produces a response body, and a malformed token is
+  refused (`SessionTokenError`) instead of being written to a browser. Neither
+  module logs. The raw token is never persisted: only its digest is stored.
+* **Authentication dependency.** `src/api_auth.make_session_dependency(service)`
+  returns a FastAPI dependency that reads **only** the `va_session` cookie, then
+  calls the existing `SessionService.validate_session` (structural check, digest
+  lookup, revocation, absolute cap, idle deadline, account activity). Query
+  parameters, bodies, arbitrary headers and client-supplied user IDs/roles are
+  never consulted; the identity is the `app_user` row the session points at.
+  `AuthenticatedPrincipal` is a frozen dataclass carrying that `User` and the
+  server-side session row (which holds the digest and must never be serialized).
+* **Failure mapping.** Every authentication outcome — missing, malformed,
+  unknown, expired, revoked, inactive or vanished account — raises one
+  `AuthenticationRequired`, rendered by `handle_authentication_required` as
+  `401 AUTHENTICATION_REQUIRED` with the existing envelope and the P5.4.3
+  `X-Request-ID` header. Reasons are not disclosed and the refusal logs only the
+  request ID. Storage failures are not caught by the dependency:
+  `DatabaseUnavailableError` still becomes `503 DATABASE_UNAVAILABLE`, never a
+  401; unexpected failures stay 500.
+* **Composition.** `build_session_service(settings)` mirrors
+  `build_default_services` — availability is checked before the repository (and
+  psycopg) imports, and no connection is opened at construction. `create_app`
+  registers the 401 handler; **no route uses the dependency yet**, so the served
+  inventory is still the approved eight unauthenticated business endpoints.
+  No cookie is issued or refreshed by the dependency, and there is no CSRF,
+  throttling, RBAC, audit logging or proxy change (later milestones).

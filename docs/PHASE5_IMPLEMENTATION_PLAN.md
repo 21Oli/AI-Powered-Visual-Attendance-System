@@ -234,7 +234,8 @@ completed rows exists in the tree.
 | P5.4.1 | Read-only inspection of the P5.3 primitives, backend, proxy and tests | Completed (review, no code) |
 | P5.4.2 | Authentication configuration (session cookie, environment Secure rule, login throttle bounds) | Completed (offline) |
 | P5.4.3 | Request ID and correlation infrastructure (server-generated UUID, `X-Request-ID`, context access, log correlation) | Completed (offline) |
-| P5.4.4+ | Cookie utilities, authentication dependency, `/auth/login`, `/auth/logout`, `/auth/me`, route protection, login throttling (P5.4.9), integration tests and security review | Not started |
+| P5.4.4 | Session-cookie utilities and cookie-only authentication dependency (`set_session_cookie`/`clear_session_cookie`, server-side 401 resolution, 503 preserved) | Completed (offline) |
+| P5.4.5+ | `/auth/login`, `/auth/logout`, `/auth/me`, route protection, login throttling (P5.4.9), integration tests and security review | Not started |
 
 P5.4.2 adds configuration only (`src/config.py`, `SESSION_COOKIE`,
 `SECURE_COOKIE_ENVIRONMENTS`, `LOGIN_THROTTLE`, `AppSettings.session_cookie_secure`).
@@ -244,3 +245,19 @@ idle timeout, 12-hour absolute lifetime, and a 5-attempt / 15-minute login
 throttle keyed by normalized username with no permanent lockout. No switch
 exists to trust client request IDs, trust `X-Forwarded-For`, disable CSRF
 validation in staging/production, or lock an account permanently.
+
+P5.4.3 adds the request-ID middleware: `va_session`-independent, one canonical
+UUIDv4 per HTTP request, `X-Request-ID` on every response including the
+catch-all 500, and request-scoped `scope["state"]`/`ContextVar` access.
+
+P5.4.4 adds infrastructure only: `src/api_cookies.py`
+(`set_session_cookie`/`clear_session_cookie`, all attributes from
+`SESSION_COOKIE` and `AppSettings.session_cookie_secure`, no `Domain`) and
+`src/api_auth.py` (`AuthenticatedPrincipal`, `AuthenticationRequired`,
+`make_session_dependency`, `build_session_service`). The dependency reads the
+`va_session` cookie only, delegates validation to the existing `SessionService`,
+and maps every authentication outcome to one sanitized `401
+AUTHENTICATION_REQUIRED`; `DatabaseUnavailableError` still reaches the existing
+503 handler. **No route uses either module yet** — the eight business endpoints
+remain unauthenticated, and login/logout/`/me`, throttling, CSRF, RBAC, audit
+logging and first-admin provisioning are still absent.

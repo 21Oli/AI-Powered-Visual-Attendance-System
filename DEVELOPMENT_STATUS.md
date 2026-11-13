@@ -3,6 +3,72 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 55 — Phase 5 P5.4.4: session cookie and authentication dependency (2026-11-13)
+
+**Backend infrastructure only. No authentication endpoint, route protection,
+throttling, CSRF, RBAC, audit, frontend, schema or P5.3 change; no Git
+operation.**
+
+* **Baseline**: branch `main`, HEAD `bd86c786a27c15bfcd9fc6aebeb50ecfe72e580c`
+  (P5.4.3 committed), clean working tree.
+* **Preflight** — the approved P5.4.2 contract was verified before writing code:
+  `SESSION_COOKIE` is `va_session` on `/api/v1`, `HttpOnly`, `SameSite=Lax`,
+  `domain=None`, `max_age_seconds=43_200`, and
+  `AppSettings.session_cookie_secure` is `False` in development/testing and
+  `True` in staging/production. `src/config.py` and `tests/test_config.py` were
+  not modified.
+* **Cookie utilities** (`src/api_cookies.py`) — `set_session_cookie` and
+  `clear_session_cookie` derive every attribute from `SESSION_COOKIE` and
+  `session_cookie_secure`; no second policy, no `Domain`, explicit `Lax`
+  mapping. Deletion repeats the same name/path/`Secure`/`HttpOnly`/`SameSite`
+  with an empty value, `Max-Age=0` and an epoch `Expires`. A malformed token is
+  refused (`SessionTokenError`); the token only ever appears as the
+  `Set-Cookie` value.
+* **Authentication dependency** (`src/api_auth.py`) — reads only the
+  `va_session` cookie, delegates to `SessionService.validate_session` (digest
+  lookup, revocation, absolute cap, idle deadline, account activity) and returns
+  a frozen `AuthenticatedPrincipal(user, session)` with `user_id`/`role`
+  properties. Query strings, bodies, arbitrary headers and client-supplied
+  user IDs/roles are ignored. No token is issued, refreshed or logged.
+  `build_session_service(settings)` mirrors `build_default_services` (typed
+  availability error before the repository/psycopg imports; no connection at
+  construction).
+* **Failure handling** — every authentication outcome raises the same
+  `AuthenticationRequired`, rendered as `401 AUTHENTICATION_REQUIRED` with the
+  standard envelope and `X-Request-ID`; `handle_authentication_required` logs
+  only the request ID. `DatabaseUnavailableError` is not caught by the
+  dependency and still becomes `503 DATABASE_UNAVAILABLE`; unexpected failures
+  stay 500.
+* **No activation** — `create_app` registers the 401 handler but no route uses
+  the dependency, so the eight business endpoints remain unauthenticated and
+  the served inventory is unchanged.
+* **Tests** — `tests/test_api_cookies.py` (18) and `tests/test_api_auth.py`
+  (21), both offline and ASGI-only; the auth tests use a real `SessionService`
+  over in-memory P5.2 repository doubles, so expiry/revocation/inactivity and
+  storage failures are the real service's behaviour.
+* **Docs** — `ARCHITECTURE.md` D25, `CHANGELOG.md`,
+  `docs/PHASE5_IMPLEMENTATION_PLAN.md` §8.
+
+**Verified**
+
+* `tests/test_api_cookies.py` + `tests/test_api_auth.py` → **39 passed**.
+* Related suites (cookies, auth, session service/token/user session, API,
+  request context, configuration) → **292 passed**.
+* Full backend suite → **2674 passed, 32 skipped**, exit 0.
+* `git diff --check` clean; only the P5.4.4 files plus the four documentation
+  files appear in `git status`.
+
+**Not verified / deferred**
+
+* No live PostgreSQL, browser or TLS validation: the cookie header is inspected
+  from real Starlette responses, but no browser was asked to store or drop it.
+* `Secure` is set in staging/production while the development API serves plain
+  HTTP; end-to-end TLS, proxy forwarding and cross-site behaviour remain
+  untested.
+* Login, logout, `/me`, login throttling, CSRF, origin validation, RBAC,
+  permission checks, audit logging, first-admin provisioning and protection of
+  the existing business routes are still absent (P5.4.5 onward).
+
 ## Step 54 — Phase 5 P5.4.3: request ID and correlation (2026-11-13)
 
 **Backend infrastructure only. No authentication, cookie, throttling, CSRF,

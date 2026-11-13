@@ -4,6 +4,35 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5, P5.4.4: session cookie and authentication dependency
+
+### Added
+
+* `src/api_cookies.py` — the only cookie writer: `set_session_cookie(response, token=..., settings=...)` and `clear_session_cookie(response, settings=...)`, both taking every attribute from `SESSION_COOKIE` / `AppSettings.session_cookie_secure` (`va_session`, path `/api/v1`, `HttpOnly`, `SameSite=Lax`, `Max-Age=43200`, no `Domain`, `Secure` in staging/production only). Deletion repeats the matching attributes with an empty value, `Max-Age=0` and an epoch `Expires`. A malformed token is refused (`SessionTokenError`); neither helper touches a body or a log.
+* `src/api_auth.py` — `AuthenticatedPrincipal` (frozen `User` + server-side session row), `AuthenticationRequired`, `make_session_dependency(service)` (reads only the `va_session` cookie, delegates to `SessionService.validate_session`, ignores query/body/header/user-id/role input, issues and refreshes nothing) and `build_session_service(settings)` (lazy, availability-checked before the repository/psycopg imports, no connection at construction).
+* `src/api.py` — `handle_authentication_required` renders one sanitized `401 AUTHENTICATION_REQUIRED` envelope with the `X-Request-ID` header and logs the request ID only; the handler is registered in `create_app`. No route uses the dependency.
+* `tests/test_api_cookies.py` — 18 tests reading the real `Set-Cookie` header: name, path, `HttpOnly`, `SameSite=Lax`, `Max-Age=43200` (and equality with the 12-hour cap), `Secure` absent in development/testing and present in staging/production, no `Domain`, no unapproved attributes, deletion expiry and attribute matching, no token in a response body, malformed-token refusal and no logger in the module.
+* `tests/test_api_auth.py` — 21 tests through `create_app()` with a real `SessionService` over in-memory repositories: missing cookie, valid identity, unknown/malformed/expired/absolute-expired/revoked/inactive/deleted refusals, repository failure staying `503 DATABASE_UNAVAILABLE` (and never becoming 401), client-supplied user IDs/roles ignored, query/header tokens rejected, no token/digest/password hash in responses or logs, request IDs on 200/401/503, six-request concurrency isolation, principal immutability, dependency validation, handler wiring and lazy composition.
+* `ARCHITECTURE.md` — decision D25 records the cookie attributes, deletion semantics, dependency flow, failure mapping and what remains unimplemented.
+
+### Changed
+
+* `src/api.py` module docstring — the "no authentication" rule now states that P5.4.4 adds cookie utilities and a dependency but **no route uses them**, so the served inventory stays the approved eight endpoints.
+* `docs/PHASE5_IMPLEMENTATION_PLAN.md` §8, `DEVELOPMENT_STATUS.md` — record P5.4.4 completion and the remaining P5.4.5+ scope.
+
+### Verified
+
+* Focused: `tests/test_api_cookies.py` + `tests/test_api_auth.py` → **39 passed**.
+* Related: cookie/auth/session/token/user-session/API/request-context/config suites → **292 passed**.
+* Full backend suite: **2674 passed, 32 skipped**, exit 0 (`git diff --check` clean).
+* No database, migration, secret, camera, biometric, frontend or P5.3 primitive change; the P5.2/P5.3 repositories and `SessionService` are used as they are.
+
+### Notes
+
+* No `/auth/login`, `/auth/logout`, `/auth/me`, login throttle, CSRF, origin validation, RBAC, permission check, audit log, first-admin provisioning or route protection exists yet; the eight business endpoints remain unauthenticated.
+* Nothing was verified against a live PostgreSQL instance, a browser or a TLS deployment: exceptions, expiry and storage failures are exercised offline.
+* Cookies are `Secure` in staging/production while the local API serves plain HTTP by design; real cross-site behaviour, proxy forwarding and TLS remain untested.
+
 ## [Unreleased] — Phase 5, P5.4.3: request ID and correlation
 
 ### Added

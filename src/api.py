@@ -36,13 +36,16 @@ Design rules (unchanged from the foundation step)
   deliberately separate from human ``message`` text. A business check-out
   refusal additionally carries a nested ``reason`` code so a client can
   distinguish "inactive" from "no open session" without parsing prose.
-* **No CORS, no authentication.** Exactly one middleware is installed: the
-  P5.4.3 request-ID middleware (:mod:`src.api_request_context`), which only
-  assigns a server-generated UUID and echoes it as ``X-Request-ID``. No CORS,
-  authentication or authorization middleware exists. Loopback-only binding is a
-  development safety measure, explicitly not a production security boundary.
-  Documentation URLs stay disabled so the served route inventory is exactly the
-  approved eight endpoints.
+* **No CORS, no authentication on business routes yet.** Exactly one
+  middleware is installed: the P5.4.3 request-ID middleware
+  (:mod:`src.api_request_context`), which only assigns a server-generated UUID
+  and echoes it as ``X-Request-ID``. No CORS, authentication or authorization
+  middleware exists. P5.4.4 adds reusable session-cookie utilities
+  (:mod:`src.api_cookies`) and a cookie-only authentication dependency
+  (:mod:`src.api_auth`); **no route uses them yet**, so the served route
+  inventory is still exactly the approved eight endpoints. Loopback-only
+  binding is a development safety measure, explicitly not a production
+  security boundary. Documentation URLs stay disabled.
 * **No automatic retries.** A failed persisted append is reported as
   ``PERSISTENCE_UNCONFIRMED`` and never retried here.
 """
@@ -60,6 +63,11 @@ from pydantic import BaseModel
 # and the MRO-based handler lookup only walks the raised type's bases.
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from src.api_auth import (
+    AUTHENTICATION_REQUIRED_CODE,
+    AUTHENTICATION_REQUIRED_MESSAGE,
+    AuthenticationRequired,
+)
 from src.api_request_context import (
     REQUEST_ID_HEADER,
     RequestIDMiddleware,
@@ -265,6 +273,24 @@ def handle_database_config_error(
     )
     return _error_json(
         503, "DATABASE_CONFIG_INVALID", "Database configuration is invalid."
+    )
+
+
+def handle_authentication_required(
+    request: Request, exc: AuthenticationRequired
+) -> JSONResponse:
+    """No usable session was presented: a fixed 401 envelope.
+
+    The message never reveals why the credential was refused (absent,
+    malformed, unknown, expired, revoked or inactive account), and the request
+    ID keeps the refusal correlatable with server logs.
+    """
+    _logger.info(
+        "rejected request: authentication required request_id=%s",
+        request_id_for(request) or "unassigned",
+    )
+    return _error_json(
+        401, AUTHENTICATION_REQUIRED_CODE, AUTHENTICATION_REQUIRED_MESSAGE
     )
 
 
@@ -597,6 +623,7 @@ def create_app(
     app.add_exception_handler(ConfigError, handle_config_error)
     app.add_exception_handler(DatabaseUnavailableError, handle_database_unavailable)
     app.add_exception_handler(MalformedDsnError, handle_database_config_error)
+    app.add_exception_handler(AuthenticationRequired, handle_authentication_required)
     app.add_exception_handler(Exception, handle_unexpected_error)
     return app
 
