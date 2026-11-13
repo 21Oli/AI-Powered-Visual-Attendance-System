@@ -3,6 +3,51 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 56 — Phase 5 P5.4.4.1: authentication principal hardening (2026-11-13)
+
+**Narrow hardening patch from the P5.4.4 independent review. No endpoint, route
+protection, cookie-policy, P5.3, schema, frontend or dependency change; no Git
+operation.**
+
+* **Baseline**: branch `main`, HEAD `a0541a8cf11bee90fdb1b682b28b7ea1f205f798`
+  (P5.4.4), clean working tree. The P5.4.4 commit was left intact.
+* **Principal** — `AuthenticatedPrincipal` (`src/api_auth.py`) is now a frozen,
+  slotted dataclass with exactly `user_id`, `username`, `role`, `is_active`,
+  built by `AuthenticatedPrincipal.from_session(authenticated)`. It retains no
+  `User`/`UserSession` object, so `password_hash`, `session_token_hash`, raw
+  tokens and other session internals cannot be reached through `repr()` or
+  `jsonable_encoder()` (the objects are dropped, not merely hidden with
+  `repr=False`).
+* **Dependency** — unchanged semantics: `va_session` cookie only,
+  `SessionService.validate_session`, identity/role from the validated row, one
+  sanitized `401 AUTHENTICATION_REQUIRED` for every `AuthenticationError`, and
+  `DatabaseUnavailableError` still reaching the existing 503 handler.
+* **Tests** — +4 in `tests/test_api_auth.py`: credential-free
+  `repr`/`jsonable_encoder` evidence, empty `va_session=` cookie (401, no
+  `Set-Cookie`), no `Set-Cookie` for missing/malformed/unknown/revoked
+  sessions, and a `ClockError` (non-authentication service fault) staying a
+  sanitized 500 `INTERNAL_ERROR` with `X-Request-ID` and no credential or
+  exception detail. The frozen-principal test now requires
+  `dataclasses.FrozenInstanceError` and checks the exact four-field shape.
+* **Docs** — `ARCHITECTURE.md` D25, `CHANGELOG.md`,
+  `docs/PHASE5_IMPLEMENTATION_PLAN.md` §8.
+
+**Verified**
+
+* `tests/test_api_auth.py` + `tests/test_api_cookies.py` → **43 passed**.
+* Full backend suite → **2678 passed, 32 skipped**, exit 0.
+* `git diff --check` clean; only `src/api_auth.py`, `tests/test_api_auth.py` and
+  the four documentation files changed.
+
+**Not verified / deferred**
+
+* No live PostgreSQL, browser or TLS validation; the new 500 case is exercised
+  through the real `SessionService` over in-memory repositories, not a live
+  database.
+* Login, logout, `/me`, throttling, CSRF, origin validation, RBAC, audit
+  logging, first-admin provisioning and protection of the eight business routes
+  remain absent (P5.4.5 onward).
+
 ## Step 55 — Phase 5 P5.4.4: session cookie and authentication dependency (2026-11-13)
 
 **Backend infrastructure only. No authentication endpoint, route protection,

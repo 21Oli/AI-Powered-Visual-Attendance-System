@@ -235,6 +235,7 @@ completed rows exists in the tree.
 | P5.4.2 | Authentication configuration (session cookie, environment Secure rule, login throttle bounds) | Completed (offline) |
 | P5.4.3 | Request ID and correlation infrastructure (server-generated UUID, `X-Request-ID`, context access, log correlation) | Completed (offline) |
 | P5.4.4 | Session-cookie utilities and cookie-only authentication dependency (`set_session_cookie`/`clear_session_cookie`, server-side 401 resolution, 503 preserved) | Completed (offline) |
+| P5.4.4.1 | Principal hardening: credential-free immutable `AuthenticatedPrincipal`, serialization tests, authentication edge-case tests | Completed (offline) |
 | P5.4.5+ | `/auth/login`, `/auth/logout`, `/auth/me`, route protection, login throttling (P5.4.9), integration tests and security review | Not started |
 
 P5.4.2 adds configuration only (`src/config.py`, `SESSION_COOKIE`,
@@ -261,3 +262,12 @@ AUTHENTICATION_REQUIRED`; `DatabaseUnavailableError` still reaches the existing
 503 handler. **No route uses either module yet** — the eight business endpoints
 remain unauthenticated, and login/logout/`/me`, throttling, CSRF, RBAC, audit
 logging and first-admin provisioning are still absent.
+
+P5.4.4.1 hardens that principal: it now carries only `user_id`, `username`,
+`role` and `is_active`, projected from the validated session by
+`AuthenticatedPrincipal.from_session`, so no `User`/`UserSession` object (and
+therefore no `password_hash` or `session_token_hash`) is retained; `repr()` and
+`jsonable_encoder()` are covered by a regression test. It also adds regression
+tests for an empty `va_session` cookie, the absence of `Set-Cookie` on every
+authentication refusal, and a non-authentication service fault (`ClockError`)
+remaining a sanitized 500 rather than a 401.

@@ -15,8 +15,11 @@ Resolution flow
    implementation, not a second validator. It performs the structural check,
    loads the row by token *digest*, and enforces revocation, the absolute
    lifetime, the idle deadline and account activity.
-4. Wrap the returned :class:`~src.session_service.AuthenticatedSession` in a
-   frozen :class:`AuthenticatedPrincipal` for later authorization dependencies.
+4. Project the returned :class:`~src.session_service.AuthenticatedSession` onto
+   a frozen, credential-free :class:`AuthenticatedPrincipal` for later
+   authorization dependencies. The ``User`` and ``UserSession`` rows stay
+   inside this call: their ``password_hash`` and ``session_token_hash`` never
+   enter the principal.
 
 Source of truth
 ---------------
@@ -56,9 +59,12 @@ from typing import Callable
 from fastapi import Request
 
 from src.config import SESSION_COOKIE, AppSettings
-from src.session_service import AuthenticationError, SessionService
-from src.user import Role, User
-from src.user_session import UserSession
+from src.session_service import (
+    AuthenticatedSession,
+    AuthenticationError,
+    SessionService,
+)
+from src.user import Role
 
 __all__ = [
     "AUTHENTICATION_REQUIRED_CODE",
@@ -86,28 +92,41 @@ class AuthenticationRequired(Exception):
 
 @dataclass(frozen=True, slots=True)
 class AuthenticatedPrincipal:
-    """The server-side identity for one authenticated request.
+    """Minimal, credential-free server-side identity for one request.
 
-    ``user`` and ``session`` come from the database, not from the request. The
-    session row contains the token *digest*; it is internal state for later
-    logout/renewal work and must never be serialized into a response or a log.
+    Only the four fields below are retained, all sourced from the validated
+    ``app_user`` row. The ``User`` and ``UserSession`` objects are deliberately
+    **not** stored: they carry ``password_hash`` and ``session_token_hash``,
+    which FastAPI's response encoder would happily serialize and which
+    ``UserSession``'s ``repr`` would print. Dropping the objects — rather than
+    relying on ``repr=False`` — means neither ``repr(principal)`` nor
+    ``jsonable_encoder(principal)`` can expose credential material.
 
-    ``password_hash`` is excluded from ``User``'s ``repr`` by P5.2, so an
-    accidental ``repr(principal)`` cannot leak either credential material.
+    The value is immutable (frozen + slots), request-scoped, and safe to return
+    from a route or include in a response model.
     """
 
-    user: User
-    session: UserSession
+    user_id: str
+    username: str
+    role: Role
+    is_active: bool
 
-    @property
-    def user_id(self) -> str:
-        """The authenticated account identifier (authoritative, server-side)."""
-        return self.user.user_id
+    @classmethod
+    def from_session(
+        cls, authenticated: AuthenticatedSession
+    ) -> "AuthenticatedPrincipal":
+        """Project a validated session onto the identity fields only.
 
-    @property
-    def role(self) -> Role:
-        """The account's stored role, for later authorization dependencies."""
-        return self.user.role
+        This is the single boundary where server-side rows are reduced to
+        public identity; the credential-bearing objects go out of scope here.
+        """
+        user = authenticated.user
+        return cls(
+            user_id=user.user_id,
+            username=user.username,
+            role=user.role,
+            is_active=user.is_active,
+        )
 
 
 def make_session_dependency(
@@ -135,9 +154,7 @@ def make_session_dependency(
             # One refusal for every authentication outcome; the underlying
             # exception message stays server-side (and is not even logged here).
             raise AuthenticationRequired() from None
-        return AuthenticatedPrincipal(
-            user=authenticated.user, session=authenticated.session
-        )
+        return AuthenticatedPrincipal.from_session(authenticated)
 
     return require_authenticated_principal
 

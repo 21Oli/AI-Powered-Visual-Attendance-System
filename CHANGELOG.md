@@ -4,6 +4,32 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5, P5.4.4.1: principal hardening and auth edge-case tests
+
+### Changed
+
+* `src/api_auth.py` — `AuthenticatedPrincipal` is now a minimal immutable principal with exactly four fields (`user_id`, `username`, `role`, `is_active`), projected from the validated session by `AuthenticatedPrincipal.from_session(...)`. It no longer retains the `User` or `UserSession` objects at all, so `password_hash`, `session_token_hash`, raw tokens and other session internals cannot reach `repr()`, `fastapi.encoders.jsonable_encoder()` or a future response body even if the principal is returned or logged. Dependency behaviour is unchanged: `va_session` cookie only, `SessionService.validate_session`, one sanitized 401 for every `AuthenticationError`, `DatabaseUnavailableError` still 503.
+* `tests/test_api_auth.py` — the frozen-principal test now asserts `dataclasses.FrozenInstanceError` specifically (instead of the broad `Exception`), checks the four-field shape and asserts no `user`/`session` attribute remains.
+
+### Added
+
+* `tests/test_api_auth.py` — credential-free serialization test: `repr(principal)` and `jsonable_encoder(principal)` contain neither the password hash, the token digest nor the raw token, and encode exactly the four identity fields.
+* `tests/test_api_auth.py` — empty `va_session=` cookie returns the standard sanitized 401 with no `Set-Cookie`.
+* `tests/test_api_auth.py` — missing, malformed, unknown and revoked sessions all return 401 and never emit `Set-Cookie`.
+* `tests/test_api_auth.py` — a non-authentication service fault (`ClockError` from a naive clock, raised by the real `SessionService`) stays a sanitized 500 `INTERNAL_ERROR` with `X-Request-ID`, no `Set-Cookie` and no token, digest, password hash or exception detail in the body.
+* `ARCHITECTURE.md` — D25 records the credential-free principal and why the objects are dropped rather than masked; `docs/PHASE5_IMPLEMENTATION_PLAN.md` §8, `DEVELOPMENT_STATUS.md` — record P5.4.4.1.
+
+### Verified
+
+* Focused: `tests/test_api_auth.py` + `tests/test_api_cookies.py` → **43 passed**.
+* Full backend suite: **2678 passed, 32 skipped**, exit 0.
+* `git diff --check` clean; no dependency, schema, migration, frontend, cookie-policy or P5.3 primitive change; no route protected; P5.4.5 not started.
+
+### Notes
+
+* Still no login, logout, `/me`, RBAC, permission checks, CSRF/Origin validation, throttling, audit logging or first-admin provisioning; no route uses the dependency and `/health` remains anonymous.
+* Verified offline only: no live PostgreSQL, browser, TLS or deployment validation.
+
 ## [Unreleased] — Phase 5, P5.4.4: session cookie and authentication dependency
 
 ### Added

@@ -10,12 +10,14 @@ the real service's, not a mock's.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import Depends
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
 
@@ -33,7 +35,7 @@ from src.api_auth import (
 from src.api_request_context import REQUEST_ID_HEADER
 from src.config import AppSettings
 from src.db import DatabaseUnavailableError
-from src.session_service import SessionService
+from src.session_service import ClockError, SessionService
 from src.session_token import generate_session_token, session_token_digest
 from src.user import Role, User
 
@@ -167,7 +169,13 @@ def _scope(path: str, headers: dict[str, str] | None = None) -> dict:
     }
 
 
-async def _call(app, path: str, headers: dict[str, str] | None = None) -> dict:
+async def _call(
+    app,
+    path: str,
+    headers: dict[str, str] | None = None,
+    *,
+    swallow: bool = False,
+) -> dict:
     messages: list[dict] = []
 
     async def receive() -> dict:
@@ -176,7 +184,11 @@ async def _call(app, path: str, headers: dict[str, str] | None = None) -> dict:
     async def send(message: dict) -> None:
         messages.append(message)
 
-    await app(_scope(path, headers), receive, send)
+    try:
+        await app(_scope(path, headers), receive, send)
+    except BaseException:  # noqa: BLE001 - Starlette re-raises after rendering
+        if not swallow:
+            raise
     start = next(m for m in messages if m["type"] == "http.response.start")
     body = b"".join(
         m.get("body", b"") for m in messages if m["type"] == "http.response.body"
@@ -192,8 +204,14 @@ async def _call(app, path: str, headers: dict[str, str] | None = None) -> dict:
     }
 
 
-def request(app, path: str, *, headers: dict[str, str] | None = None) -> dict:
-    return asyncio.run(_call(app, path, headers))
+def request(
+    app,
+    path: str,
+    *,
+    headers: dict[str, str] | None = None,
+    swallow: bool = False,
+) -> dict:
+    return asyncio.run(_call(app, path, headers, swallow=swallow))
 
 
 def _probe_app(service: SessionService):
@@ -338,6 +356,81 @@ def test_deleted_user_cannot_authenticate() -> None:
         _probe_app(service), "/probe/whoami", headers=_cookie_header(issued.token)
     )
     _assert_refused(response)
+
+
+# ---------------------------------------------------------------------------
+# 7b. Edge cases: empty cookie, no Set-Cookie on refusal, unexpected errors
+# ---------------------------------------------------------------------------
+
+
+def _set_cookie_values(response: dict) -> list[str]:
+    return [value for name, value in response["headers"] if name == "set-cookie"]
+
+
+def test_empty_session_cookie_is_a_sanitized_401_without_a_cookie() -> None:
+    """``Cookie: va_session=`` is a missing credential, not an anonymous pass."""
+    service, _, _, _ = build()
+    service.issue_session("user-1")
+    response = request(
+        _probe_app(service), "/probe/whoami", headers={"cookie": "va_session="}
+    )
+    _assert_refused(response)
+    assert _set_cookie_values(response) == []
+    assert _request_id(response)
+
+
+def test_authentication_failures_never_issue_a_session_cookie() -> None:
+    service, _, _, _ = build()
+    issued = service.issue_session("user-1")
+    service.revoke_session(issued.token)
+    app = _probe_app(service)
+    cases: dict[str, dict[str, str] | None] = {
+        "missing": None,
+        "malformed": _cookie_header("not-a-session-token"),
+        "unknown": _cookie_header(generate_session_token()),
+        "revoked": _cookie_header(issued.token),
+    }
+    for label, headers in cases.items():
+        response = request(app, "/probe/whoami", headers=headers)
+        _assert_refused(response)
+        assert _set_cookie_values(response) == [], label
+
+
+def test_unexpected_service_failure_remains_a_sanitized_500() -> None:
+    """A non-authentication service fault must not become a 401."""
+    service, users, sessions, _ = build()
+    issued = service.issue_session("user-1")
+    digest = session_token_digest(issued.token)
+
+    # The real SessionService refuses a naive clock with ClockError, which is a
+    # SessionServiceError, not an AuthenticationError.
+    broken = SessionService(
+        users=users,  # type: ignore[arg-type]
+        sessions=sessions,  # type: ignore[arg-type]
+        clock=lambda: datetime(2026, 1, 15, 9, 0),  # deliberately naive
+    )
+    dependency = make_session_dependency(broken)
+    with pytest.raises(ClockError):
+        dependency(Request(_scope("/probe/whoami", _cookie_header(issued.token))))
+
+    response = request(
+        _probe_app(broken),
+        "/probe/whoami",
+        headers=_cookie_header(issued.token),
+        swallow=True,
+    )
+    assert response["status"] == 500
+    assert response["payload"] == {
+        "error": {
+            "code": "INTERNAL_ERROR",
+            "message": "Internal server error.",
+        }
+    }
+    assert _request_id(response)
+    assert _set_cookie_values(response) == []
+    text = response["body"].decode("utf-8")
+    for secret in (issued.token, digest, _PASSWORD_HASH, "Traceback", "clock"):
+        assert secret not in text
 
 
 # ---------------------------------------------------------------------------
@@ -507,18 +600,65 @@ def test_concurrent_requests_cannot_share_identity() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_principal_is_an_immutable_server_side_identity() -> None:
-    service, _, _, _ = build(users=[make_user(user_id="user-1", role=Role.ADMIN)])
+def test_principal_is_a_minimal_immutable_identity() -> None:
+    service, _, _, _ = build(
+        users=[make_user(user_id="user-1", username="ada", role=Role.ADMIN)]
+    )
     issued = service.issue_session("user-1")
     principal = make_session_dependency(service)(
         Request(_scope("/probe/whoami", _cookie_header(issued.token)))
     )
-    assert principal.user_id == "user-1"
-    assert principal.role is Role.ADMIN
-    assert principal.session.user_id == "user-1"
     assert isinstance(principal, AuthenticatedPrincipal)
-    with pytest.raises(Exception):
-        principal.user = make_user(user_id="other")  # type: ignore[misc]
+    assert principal == AuthenticatedPrincipal(
+        user_id="user-1",
+        username="ada",
+        role=Role.ADMIN,
+        is_active=True,
+    )
+    assert [field.name for field in dataclasses.fields(principal)] == [
+        "user_id",
+        "username",
+        "role",
+        "is_active",
+    ]
+    # The credential-bearing rows are not retained in any form.
+    assert not hasattr(principal, "user")
+    assert not hasattr(principal, "session")
+    with pytest.raises(FrozenInstanceError):
+        principal.role = Role.OPERATOR  # type: ignore[misc]
+
+
+def test_principal_representation_and_serialization_are_credential_free() -> None:
+    """P5.4.4.1: no hash, digest or raw token may leave through repr/encoder."""
+    service, _, _, _ = build(
+        users=[make_user(user_id="user-1", username="ada", role=Role.ADMIN)]
+    )
+    issued = service.issue_session("user-1")
+    digest = session_token_digest(issued.token)
+    principal = make_session_dependency(service)(
+        Request(_scope("/probe/whoami", _cookie_header(issued.token)))
+    )
+
+    rendered = repr(principal)
+    encoded = json.dumps(jsonable_encoder(principal), sort_keys=True)
+
+    for blob in (rendered, encoded):
+        assert _PASSWORD_HASH not in blob
+        assert "$argon2id" not in blob
+        assert digest not in blob
+        assert issued.token not in blob
+        assert "password_hash" not in blob
+        assert "session_token_hash" not in blob
+
+    assert encoded == json.dumps(
+        {
+            "user_id": "user-1",
+            "username": "ada",
+            "role": "Admin",
+            "is_active": True,
+        },
+        sort_keys=True,
+    )
 
 
 def test_dependency_rejects_an_object_without_validate_session() -> None:

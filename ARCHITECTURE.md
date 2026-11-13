@@ -945,8 +945,17 @@ the journal schema version (still 1), or the decision authority.
   lookup, revocation, absolute cap, idle deadline, account activity). Query
   parameters, bodies, arbitrary headers and client-supplied user IDs/roles are
   never consulted; the identity is the `app_user` row the session points at.
-  `AuthenticatedPrincipal` is a frozen dataclass carrying that `User` and the
-  server-side session row (which holds the digest and must never be serialized).
+  `AuthenticatedPrincipal` is a frozen dataclass with exactly four fields
+  (`user_id`, `username`, `role`, `is_active`) projected from that row by
+  `AuthenticatedPrincipal.from_session`.
+* **Principal is credential-free (P5.4.4.1).** The principal does not retain the
+  `User` or `UserSession` objects at all — not as hidden fields and not behind
+  `repr=False`. Dropping the objects, rather than masking them, means neither
+  `repr(principal)` nor `fastapi.encoders.jsonable_encoder(principal)` can emit
+  `password_hash`, `session_token_hash`, a raw token or any other session
+  internal, so the value is safe to return from a route or use in a response
+  model. The credential-bearing rows exist only as locals inside
+  `SessionService.validate_session` and the dependency call.
 * **Failure mapping.** Every authentication outcome — missing, malformed,
   unknown, expired, revoked, inactive or vanished account — raises one
   `AuthenticationRequired`, rendered by `handle_authentication_required` as
