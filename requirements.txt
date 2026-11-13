@@ -26,3 +26,8 @@ pytest==9.1.1
 fastapi==0.162.0
 uvicorn==0.54.0
 psycopg[binary]==3.3.6
+# Phase 5 P5.3 - the single approved authentication dependency.
+#   argon2-cffi 25.1.0: current stable release, officially supports
+#   Python 3.14 and ships abi3 wheels for Windows x64. Installed and
+#   smoke-tested on this venv (Argon2id, m=19456, t=2, p=1).
+argon2-cffi==25.1.0

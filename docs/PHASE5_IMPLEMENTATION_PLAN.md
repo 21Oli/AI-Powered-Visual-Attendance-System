@@ -1,6 +1,6 @@
 # Phase 5 — Authentication, Accounts and Role-Based Access
 
-**Status: in progress — P5.2 implemented offline (no live PostgreSQL run).**
+**Status: in progress — P5.3 implemented offline (no live PostgreSQL run).**
 
 Phase 5 adds operator accounts, sessions and role-based access to the
 attendance system. It is delivered as small, separately reviewable steps. This
@@ -26,8 +26,8 @@ audit table, and does not introduce biometric storage of any kind.
 | Milestone | Scope | Status |
 | --- | --- | --- |
 | P5.1 | Phase 5 inspection, gap analysis and approved decisions | Completed (review, no code) |
-| **P5.2** | **Identity data model and persistence: `V002__security.sql`, user/session models and repositories, offline tests** | **Completed (offline)** |
-| P5.3 | Password hashing and credential verification | Not started |
+| P5.2 | Identity data model and persistence: `V002__security.sql`, user/session models and repositories, offline tests | Completed (offline) |
+| **P5.3** | **Authentication primitives: Argon2id hashing, opaque session tokens, session lifecycle** | **Completed (offline)** |
 | P5.4 | Session issuance, validation and revocation service | Not started |
 | P5.5 | Login/logout endpoints and the authentication dependency | Not started |
 | P5.6 | Role-based authorization for existing endpoints | Not started |
@@ -162,7 +162,64 @@ live database or a real connection pool. This is the same limitation recorded
 for V001, and it is closed only by a separately authorized read-only or
 disposable-database run.
 
-## 6. Next step
+## 6. P5.3 — what this milestone delivered
 
-P5.3 (password hashing and credential verification), gated on owner approval of
-P5.2.
+### 6.1 Approved configuration (`src/config.py`)
+
+`PasswordHashingConfig` / `PASSWORD_HASHING`: Argon2id, memory cost 19,456 KiB,
+time cost 2, parallelism 1, salt 16 bytes, hash 32 bytes, minimum password
+length 8 characters, defensive maximum 1,024 characters (rejection, never
+truncation). `SessionPolicyConfig` / `SESSION_POLICY`: 8-hour idle timeout,
+12-hour absolute lifetime, 256-bit token entropy. Both are frozen dataclasses
+that refuse values below the approved floors; the idle timeout may not exceed
+the absolute lifetime.
+
+### 6.2 Password service (`src/password.py`)
+
+`PasswordService.hash_password` / `verify_password` / `needs_rehash`.
+Passwords are used verbatim — never trimmed, folded or NFKC-normalised. The
+minimum length applies at creation only, so a shorter legacy secret simply
+fails to match. Verification returns `False` only for a genuine mismatch;
+malformed, non-Argon2id (e.g. Argon2i) or over-budget stored hashes raise
+`InvalidPasswordHash`, so verification can never accept what it could not
+check. Bounds on type, version 19, memory, iterations, lanes, salt and derived
+key length protect against a tampered hash requesting gigabytes of memory. The
+encoded result is re-parsed before it is returned.
+
+### 6.3 Token service (`src/session_token.py`)
+
+`generate_session_token` produces 32 bytes from `secrets` (OS CSPRNG) and
+validates the result before returning; `session_token_digest` returns the
+lowercase SHA-256 hex digest accepted by `CHAR(64)`; `is_valid_session_token`
+is a strict structural check (43 base64url characters decoding to exactly 32
+bytes) run before any repository call. Only the digest is persisted.
+
+### 6.4 Session lifecycle (`src/session_service.py`, `src/clock.py`)
+
+`SessionService.issue_session` / `validate_session` / `revoke_session` /
+`revoke_all_for_user` over the P5.2 repositories, with an injectable clock
+(`src.clock.utc_now` by default). Issuance refuses unknown or inactive
+accounts before writing. Validation checks structure (no I/O), existence,
+clock sanity, revocation, absolute cap, idle deadline, then account existence
+and activity, and slides `expires_at` to `min(now + 8h, absolute_expires_at)`
+— activity can never extend the cap. Concurrent revocation fails closed.
+Every rejection is a typed `AuthenticationError` subtype with a generic
+message; repository failures propagate.
+
+### 6.5 Deliberately not done in P5.3
+
+No login/logout/me endpoint, no cookies or CSRF, no throttling, no RBAC, no
+audit logging, no user administration, no frontend authentication, no
+deployment change. No migration was executed and no database was contacted.
+
+### 6.6 Verification status
+
+Offline only: 90 focused tests (`tests/test_password.py`,
+`tests/test_session_token.py`, `tests/test_session_service.py`) plus the full
+suite. The services have not been exercised against PostgreSQL; the argon2
+work factor was not benchmarked on target hardware.
+
+## 7. Next step
+
+P5.4 (session issuance/validation service integration — cookie and request
+plumbing), gated on owner approval of P5.3.

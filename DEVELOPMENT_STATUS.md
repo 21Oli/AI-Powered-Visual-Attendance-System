@@ -3,6 +3,65 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 52 — Phase 5 P5.3: authentication primitives (2026-11-13)
+
+**Offline implementation only. No database connection, no `.env`/secret, no
+migration execution, no endpoint, no frontend change, no Git mutation.**
+
+* **Baseline**: branch `main`, HEAD `a61b2e2` (P5.2 committed by the owner),
+  clean working tree.
+* **Dependency**: `argon2-cffi==25.1.0` pinned in `requirements.txt` — the one
+  approved dependency, current stable release with official Python 3.14
+  support; installed in the venv and smoke-tested (Argon2id,
+  `v=19,m=19456,t=2,p=1`). Transitive `argon2-cffi-bindings` 26.2.0 and
+  `cffi` 2.1.1 are resolved by pip, not pinned separately.
+* **Configuration** — `src/config.py` gains `PASSWORD_HASHING` (19,456 KiB
+  memory, time cost 2, parallelism 1, 16-byte salt, 32-byte hash, minimum
+  password 8 characters, defensive maximum 1,024) and `SESSION_POLICY`
+  (8-hour idle timeout, 12-hour absolute lifetime, 256-bit token entropy).
+  Both frozen dataclasses reject values below the approved floors and the idle
+  timeout may not exceed the absolute lifetime.
+* **Password service** — `src/password.py`: Argon2id hash/verify/rehash with
+  parameters taken only from configuration. Passwords are never trimmed or
+  NFKC-normalised; the 8-character floor applies at creation, so a shorter
+  legacy secret fails to match rather than being re-policied. Only a genuine
+  mismatch returns `False`; malformed, non-Argon2id, wrong-version or
+  over-budget stored hashes raise `InvalidPasswordHash` (fail closed). The
+  produced encoding is re-parsed before being returned.
+* **Token service** — `src/session_token.py`: 256 bits from `secrets`
+  (43 unpadded base64url characters, validated before return), SHA-256 hex
+  digest for `user_session.session_token_hash CHAR(64)`, and a strict
+  structural check that runs before any repository call. Only the digest is
+  ever persisted or passed to persistence.
+* **Session lifecycle** — `src/session_service.py` over the P5.2 repositories
+  with `src/clock.py` as an injectable clock: `issue_session` refuses unknown
+  or inactive accounts before writing and fails closed on a digest collision;
+  `validate_session` checks structure (no I/O), existence, clock sanity,
+  revocation, the absolute cap, the idle deadline, then account existence and
+  activity, and slides the idle deadline to
+  `min(now + 8h, absolute_expires_at)` so activity never extends the cap;
+  `revoke_session` and `revoke_all_for_user` operate on digests only. Every
+  rejection is a typed `AuthenticationError` subtype with a generic message;
+  repository failures propagate untouched.
+* **Docs** — `docs/PHASE5_IMPLEMENTATION_PLAN.md` §6, `CHANGELOG.md`,
+  `requirements.txt`.
+
+**Verified**
+
+* Focused suites: `tests/test_password.py`, `tests/test_session_token.py`,
+  `tests/test_session_service.py` → **90 passed**.
+* Full offline suite: `.venv/Scripts/python.exe -m pytest tests/ -q` →
+  **2540 passed, 32 skipped**, exit 0.
+* `git diff --check` clean; `git status --short` lists only the intended files.
+
+**Not verified / deferred**
+
+* Nothing was run against PostgreSQL; no session row was ever written.
+* Argon2id cost is the approved OWASP 19 MiB profile, not a measured latency
+  budget on target hardware.
+* No login/logout/me endpoint, cookie, CSRF, throttling, RBAC, audit logging,
+  user administration or frontend authentication exists — P5.4 has not started.
+
 ## Step 51 — Phase 5 P5.2: identity data model and persistence (2026-11-13)
 
 **Offline implementation only. No database connection, no `.env`/secret, no

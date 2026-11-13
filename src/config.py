@@ -33,6 +33,7 @@ import ipaddress
 import math
 import os
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Final, Literal
 
@@ -61,6 +62,10 @@ __all__ = [
     "PAGINATION",
     "UserPaginationConfig",
     "USER_PAGINATION",
+    "PasswordHashingConfig",
+    "PASSWORD_HASHING",
+    "SessionPolicyConfig",
+    "SESSION_POLICY",
     "AppSettings",
     "Settings",
     "ConfigError",
@@ -686,6 +691,140 @@ class UserPaginationConfig:
 
 
 USER_PAGINATION: Final[UserPaginationConfig] = UserPaginationConfig()
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 authentication constants (owner-approved, P5.3)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PasswordHashingConfig:
+    """Owner-approved Argon2id parameters (P5.3).
+
+    These values are the single source of truth for the password service:
+    changing them here changes every future hash, and existing hashes are
+    upgraded through ``needs_rehash`` rather than rewritten in place.
+
+    ``memory_cost_kib`` is expressed in KiB because that is what Argon2
+    (and ``argon2-cffi``) takes; 19,456 KiB is the approved 19 MiB profile.
+    """
+
+    #: Argon2id memory cost in KiB (19 MiB).
+    memory_cost_kib: int = 19456
+    #: Argon2id iterations.
+    time_cost: int = 2
+    #: Argon2id lanes/threads.
+    parallelism: int = 1
+    #: CSPRNG salt length in bytes (Argon2 default is 16).
+    salt_length: int = 16
+    #: Derived key length in bytes.
+    hash_length: int = 32
+    #: Inclusive minimum password length in characters (never trimmed).
+    min_password_length: int = 8
+    #: Defensive upper bound, in characters, so hashing cannot be used as a
+    #: memory/CPU amplifier. Rejection, never truncation.
+    max_password_length: int = 1024
+
+    def __post_init__(self) -> None:
+        for name in (
+            "memory_cost_kib",
+            "time_cost",
+            "parallelism",
+            "salt_length",
+            "hash_length",
+            "min_password_length",
+            "max_password_length",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(
+                    f"{name} must be a plain int (bool rejected), got "
+                    f"{type(value).__name__}"
+                )
+            if value < 1:
+                raise ValueError(f"{name} must be >= 1, got {value}")
+        if self.memory_cost_kib < 8:
+            raise ValueError(
+                "memory_cost_kib must be >= 8 (Argon2 minimum), got "
+                f"{self.memory_cost_kib}"
+            )
+        if self.salt_length < 8:
+            raise ValueError(
+                f"salt_length must be >= 8 bytes, got {self.salt_length}"
+            )
+        if self.hash_length < 16:
+            raise ValueError(
+                f"hash_length must be >= 16 bytes, got {self.hash_length}"
+            )
+        if self.min_password_length < 8:
+            raise ValueError(
+                "min_password_length must be >= 8 characters, got "
+                f"{self.min_password_length}"
+            )
+        if self.max_password_length < self.min_password_length:
+            raise ValueError(
+                "max_password_length must be >= min_password_length, got "
+                f"{self.max_password_length} < {self.min_password_length}"
+            )
+
+
+@dataclass(frozen=True)
+class SessionPolicyConfig:
+    """Owner-approved session policy (P5.3).
+
+    ``idle_timeout`` is the sliding inactivity window; ``absolute_lifetime``
+    is the hard cap measured from issuance. Activity can never push a session
+    past the cap (``idle_timeout`` must be <= ``absolute_lifetime``).
+    """
+
+    #: Sliding inactivity timeout (8 hours).
+    idle_timeout: timedelta = timedelta(hours=8)
+    #: Hard session lifetime from issuance (12 hours).
+    absolute_lifetime: timedelta = timedelta(hours=12)
+    #: Opaque session-token entropy (256 bits).
+    token_entropy_bits: int = 256
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.idle_timeout, timedelta):
+            raise ValueError(
+                "idle_timeout must be a timedelta, got "
+                f"{type(self.idle_timeout).__name__}"
+            )
+        if not isinstance(self.absolute_lifetime, timedelta):
+            raise ValueError(
+                "absolute_lifetime must be a timedelta, got "
+                f"{type(self.absolute_lifetime).__name__}"
+            )
+        if self.idle_timeout <= timedelta(0):
+            raise ValueError(
+                f"idle_timeout must be positive, got {self.idle_timeout}"
+            )
+        if self.absolute_lifetime <= timedelta(0):
+            raise ValueError(
+                f"absolute_lifetime must be positive, got {self.absolute_lifetime}"
+            )
+        if self.idle_timeout > self.absolute_lifetime:
+            raise ValueError(
+                "idle_timeout must not exceed absolute_lifetime, got "
+                f"{self.idle_timeout} > {self.absolute_lifetime}"
+            )
+        if isinstance(self.token_entropy_bits, bool) or not isinstance(
+            self.token_entropy_bits, int
+        ):
+            raise ValueError(
+                "token_entropy_bits must be a plain int, got "
+                f"{type(self.token_entropy_bits).__name__}"
+            )
+        if self.token_entropy_bits < 256 or self.token_entropy_bits % 8:
+            raise ValueError(
+                "token_entropy_bits must be a whole number of bytes and at "
+                f"least 256, got {self.token_entropy_bits}"
+            )
+
+
+PASSWORD_HASHING: Final[PasswordHashingConfig] = PasswordHashingConfig()
+SESSION_POLICY: Final[SessionPolicyConfig] = SessionPolicyConfig()
 
 
 # ---------------------------------------------------------------------------

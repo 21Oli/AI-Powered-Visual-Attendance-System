@@ -4,6 +4,35 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5, P5.3: authentication primitives
+
+### Added
+
+* `argon2-cffi==25.1.0` — the one approved authentication dependency (Argon2id, Python 3.14 / Windows x64 wheels verified). Transitive `argon2-cffi-bindings` and `cffi` are resolved by pip and are not pinned separately.
+* `src/config.py` — `PasswordHashingConfig` / `PASSWORD_HASHING` (Argon2id, memory 19,456 KiB, time 2, parallelism 1, salt 16 B, hash 32 B, minimum password 8 characters, defensive maximum 1,024) and `SessionPolicyConfig` / `SESSION_POLICY` (8-hour idle timeout, 12-hour absolute lifetime, 256-bit token entropy), both frozen and validated.
+* `src/password.py` — `PasswordService.hash_password` / `verify_password` / `needs_rehash` with `PasswordPolicyError` and `InvalidPasswordHash`. Passwords are never trimmed or normalised; verification returns `False` only for a genuine mismatch and fails closed on malformed, non-Argon2id, wrong-version or over-budget stored hashes; the returned encoding is re-validated.
+* `src/session_token.py` — `generate_session_token` (256 bits from `secrets`, 43 base64url characters), `session_token_digest` (lowercase SHA-256 hex for `CHAR(64)`), `is_valid_session_token` (strict 43-character/32-byte structural check) and `SessionTokenError`.
+* `src/session_service.py` — `SessionService.issue_session` / `validate_session` / `revoke_session` / `revoke_all_for_user` with `IssuedSession`, `AuthenticatedSession` and typed `AuthenticationError` subtypes (`InvalidSessionToken`, `SessionExpired`, `SessionRevoked`, `UserInactive`, `UserUnknown`), plus `SessionIssueError` and `ClockError`. Activity slides the idle deadline but is clamped to `absolute_expires_at`; inactive and missing accounts are refused.
+* `src/clock.py` — `utc_now` and the `Clock` callable seam so tests inject deterministic time.
+* Offline suites `tests/test_password.py`, `tests/test_session_token.py`, `tests/test_session_service.py` — 90 tests using the real hasher and in-memory repository doubles with a mutable injected clock.
+
+### Changed
+
+* `requirements.txt` — adds the pinned `argon2-cffi==25.1.0` with its rationale; no other pin changed.
+* `docs/PHASE5_IMPLEMENTATION_PLAN.md` — P5.3 marked completed with its delivered scope, decisions and verification status; next step is P5.4.
+* `DEVELOPMENT_STATUS.md` — Step 52 records the P5.3 implementation.
+
+### Verified
+
+* Focused suites: **90 passed** (`tests/test_password.py`, `tests/test_session_token.py`, `tests/test_session_service.py`).
+* Full offline suite: **2540 passed, 32 skipped**, exit 0. No live database, `.env`, secret, camera or biometric data was accessed.
+
+### Notes
+
+* Primitives only: there is no login/logout/me endpoint, no cookie, CSRF, throttling, RBAC, audit logging, user administration or frontend authentication, and no migration was executed.
+* `validate_session` slides `expires_at` and records `last_seen_at`; it does not revoke expired rows (a sweep is later work).
+* Argon2id cost was not benchmarked on target hardware; the approved parameters are OWASP's 19 MiB profile, not a measured latency budget.
+
 ## [Unreleased] — Phase 5, P5.2: identity data model and persistence
 
 ### Added
