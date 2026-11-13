@@ -23,7 +23,8 @@ Covers :mod:`src.api` and the settings-driven runner ``tools/run_api.py``:
 7. Runner contract: ``--print-bind`` prints the validated loopback bind
    address (no serving); an invalid ``API_HOST`` fails the runner
    without starting any server.
-8. No CORS/auth middleware is installed; response models are declared.
+8. Exactly one middleware is installed — the P5.4.3 request-ID middleware (no
+   CORS/auth middleware); response models are declared.
 
 No test connects to PostgreSQL, touches a camera, or reads real data.
 """
@@ -133,9 +134,19 @@ def test_documentation_urls_are_disabled() -> None:
     assert "/openapi.json" not in paths
 
 
-def test_no_cors_middleware_installed() -> None:
+def test_only_the_request_id_middleware_is_installed() -> None:
+    """P5.4.3 added server-generated request IDs. That is the *only* middleware:
+    still no CORS, authentication or authorization middleware."""
+    from starlette.middleware.cors import CORSMiddleware
+    from starlette.middleware.gzip import GZipMiddleware
+
+    from src.api_request_context import RequestIDMiddleware
+
     app = create_app()
-    assert app.user_middleware == [], "middleware must not be installed in Step 1.3"
+    installed = [middleware.cls for middleware in app.user_middleware]
+    assert installed == [RequestIDMiddleware]
+    assert CORSMiddleware not in installed
+    assert GZipMiddleware not in installed
 
 
 # ---------------------------------------------------------------------------

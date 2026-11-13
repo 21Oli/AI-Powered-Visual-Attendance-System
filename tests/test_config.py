@@ -16,6 +16,7 @@ import dataclasses
 import os
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,11 @@ from src.config import (
     CAMERA,
     ENROLLMENT,
     FACE_PROCESSING,
+    LOGIN_THROTTLE,
+    PASSWORD_HASHING,
+    SECURE_COOKIE_ENVIRONMENTS,
+    SESSION_COOKIE,
+    SESSION_POLICY,
     SETTINGS,
     AppSettings,
     AttendanceConfig,
@@ -37,6 +43,8 @@ from src.config import (
     ConfigError,
     EnrollmentConfig,
     FaceProcessingConfig,
+    LoginThrottleConfig,
+    SessionCookieConfig,
     PROJECT_ROOT as CONFIG_PROJECT_ROOT,
     ensure_directories,
     load_settings,
@@ -462,3 +470,229 @@ def test_phase3_fields_frozen_like_the_rest() -> None:
         settings.api_port = 9999  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
         settings.database_url = "postgresql://attacker@127.0.0.1/evil"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# 8. Phase 5 P5.4.2: authentication API configuration
+# ---------------------------------------------------------------------------
+
+
+def test_session_policy_values_are_the_approved_ones() -> None:
+    assert SESSION_POLICY.idle_timeout == timedelta(hours=8)
+    assert SESSION_POLICY.absolute_lifetime == timedelta(hours=12)
+
+
+def test_session_cookie_attributes_match_the_approved_decision() -> None:
+    assert SESSION_COOKIE.name == "va_session"
+    assert SESSION_COOKIE.path == "/api/v1"
+    assert SESSION_COOKIE.http_only is True
+    assert SESSION_COOKIE.same_site == "Lax"
+    assert SESSION_COOKIE.domain is None
+    assert SESSION_COOKIE.max_age_seconds == 43_200
+
+
+def test_cookie_lifetime_tracks_the_absolute_cap_not_the_idle_timeout() -> None:
+    absolute_seconds = int(SESSION_POLICY.absolute_lifetime.total_seconds())
+    idle_seconds = int(SESSION_POLICY.idle_timeout.total_seconds())
+    assert SESSION_COOKIE.max_age_seconds == absolute_seconds
+    assert SESSION_COOKIE.max_age_seconds != idle_seconds
+
+
+@pytest.mark.parametrize(
+    ("app_env", "expected"),
+    [
+        ("development", False),
+        ("testing", False),
+        ("staging", True),
+        ("production", True),
+    ],
+)
+def test_secure_cookie_flag_follows_the_environment(
+    app_env: str, expected: bool
+) -> None:
+    assert SESSION_COOKIE.secure_for(app_env) is expected
+    assert AppSettings(app_env=app_env).session_cookie_secure is expected  # type: ignore[arg-type]
+
+
+def test_secure_environments_are_exactly_staging_and_production() -> None:
+    assert SECURE_COOKIE_ENVIRONMENTS == frozenset({"staging", "production"})
+
+
+@pytest.mark.parametrize(
+    "bad_env", ["", "prod", "production ", "Production", "test", None, 1]
+)
+def test_unknown_environment_is_rejected_rather_than_downgraded(
+    bad_env: object,
+) -> None:
+    with pytest.raises(ConfigError):
+        SESSION_COOKIE.secure_for(bad_env)  # type: ignore[arg-type]
+
+
+def test_directly_constructed_settings_refuse_an_unknown_environment_at_use() -> None:
+    with pytest.raises(ConfigError):
+        AppSettings(app_env="prod").session_cookie_secure  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"name": ""},
+        {"name": "va session"},
+        {"name": "va;session"},
+        {"name": "a" * 101},
+        {"name": "__Host-va_session"},
+        {"name": "__Secure-va_session"},
+        {"path": ""},
+        {"path": "api/v1"},
+        {"path": "/api/v1/"},
+        {"path": "/api//v1"},
+        {"path": "/api/v1;secure"},
+        {"path": "/api/v1?x=1"},
+        {"path": "/api/v1\x00"},
+        {"http_only": False},
+        {"http_only": "true"},
+        {"same_site": "Laxx"},
+        {"same_site": "lax"},
+        {"same_site": "Lax "},
+        {"same_site": "Strict"},
+        {"same_site": "None"},
+        {"same_site": None},
+        {"max_age_seconds": 0},
+        {"max_age_seconds": -1},
+        {"max_age_seconds": 59},
+        {"max_age_seconds": 3_600},
+        {"max_age_seconds": 43_199},
+        {"max_age_seconds": 43_201},
+        {"max_age_seconds": 86_400},
+        {"max_age_seconds": 43_200.0},
+        {"max_age_seconds": "43200"},
+        {"max_age_seconds": True},
+        {"max_age_seconds": 2_592_001},
+        {"domain": ""},
+        {"domain": "example.com"},
+        {"domain": "sub.example.com"},
+        {"domain": ".example.com"},
+        {"domain": "example.com:443"},
+        {"domain": "https://example.com"},
+        {"domain": "Example.com"},
+        {"domain": 123},
+    ],
+)
+def test_invalid_cookie_configuration_is_rejected(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        SessionCookieConfig(**kwargs)  # type: ignore[arg-type]
+
+
+def test_valid_non_default_cookie_name_and_path_are_accepted() -> None:
+    cookie = SessionCookieConfig(name="attendance_session", path="/api")
+    assert cookie.name == "attendance_session"
+    assert cookie.path == "/api"
+    assert cookie.same_site == "Lax"
+    assert cookie.max_age_seconds == 43_200
+    assert cookie.domain is None
+
+
+def test_cookie_domain_must_remain_unset() -> None:
+    """Approved policy: no ``Domain`` attribute, with no override mechanism."""
+    assert SessionCookieConfig(domain=None).domain is None
+
+    # A syntactically valid hostname is still refused: the policy is "unset",
+    # not "well-formed Domain".
+    with pytest.raises(ValueError):
+        SessionCookieConfig(domain="attendance.example.com")
+
+    # Invalid hostnames are refused for the same reason.
+    for invalid in (".example.com", "example.com:443", "https://x", "", 123):
+        with pytest.raises(ValueError):
+            SessionCookieConfig(domain=invalid)  # type: ignore[arg-type]
+
+
+def test_same_site_is_exactly_lax() -> None:
+    """Approved policy: exactly ``Lax``; no configurable override."""
+    assert SessionCookieConfig(same_site="Lax").same_site == "Lax"
+
+    for refused in ("Strict", "None", "lax", "LAX", "Lax ", "", None, 1):
+        with pytest.raises(ValueError):
+            SessionCookieConfig(same_site=refused)  # type: ignore[arg-type]
+
+
+def test_cookie_lifetime_is_enforced_for_every_instance() -> None:
+    """The 43,200 s lifetime is a per-instance invariant, not a singleton check."""
+    absolute_seconds = int(SESSION_POLICY.absolute_lifetime.total_seconds())
+    assert absolute_seconds == 43_200
+    assert SessionCookieConfig(max_age_seconds=absolute_seconds).max_age_seconds == 43_200
+
+    for refused in (
+        absolute_seconds - 1,  # shorter
+        absolute_seconds + 1,  # longer
+        3_600,
+        86_400,
+        0,
+        -1,
+    ):
+        with pytest.raises(ValueError):
+            SessionCookieConfig(max_age_seconds=refused)
+
+    # Numeric type validation still runs before the equality check.
+    for malformed in (43_200.0, "43200", True, None):
+        with pytest.raises(ValueError):
+            SessionCookieConfig(max_age_seconds=malformed)  # type: ignore[arg-type]
+
+
+def test_login_throttle_defaults_are_the_approved_ones() -> None:
+    assert LOGIN_THROTTLE.max_failed_attempts == 5
+    assert LOGIN_THROTTLE.window == timedelta(minutes=15)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_failed_attempts": 0},
+        {"max_failed_attempts": -1},
+        {"max_failed_attempts": 101},
+        {"max_failed_attempts": 5.0},
+        {"max_failed_attempts": "5"},
+        {"max_failed_attempts": True},
+        {"window": timedelta(0)},
+        {"window": timedelta(seconds=-1)},
+        {"window": 900},
+        {"window": "15m"},
+        {"window": timedelta(hours=25)},
+    ],
+)
+def test_invalid_throttle_configuration_is_rejected(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        LoginThrottleConfig(**kwargs)  # type: ignore[arg-type]
+
+
+def test_auth_configuration_is_frozen() -> None:
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        SESSION_COOKIE.name = "other"  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        SESSION_COOKIE.path = "/"  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        LOGIN_THROTTLE.max_failed_attempts = 10  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        LOGIN_THROTTLE.window = timedelta(hours=1)  # type: ignore[misc]
+
+
+def test_password_policy_is_unchanged_by_this_milestone() -> None:
+    assert PASSWORD_HASHING.memory_cost_kib == 19456
+    assert PASSWORD_HASHING.time_cost == 2
+    assert PASSWORD_HASHING.parallelism == 1
+    assert PASSWORD_HASHING.salt_length == 16
+    assert PASSWORD_HASHING.hash_length == 32
+    assert PASSWORD_HASHING.min_password_length == 8
+    assert PASSWORD_HASHING.max_password_length == 1024
+
+
+def test_no_client_controlled_or_security_disable_switch_exists() -> None:
+    """Request-ID trust, CSRF disablement and proxy-header trust must never
+    become configuration: the approved design has no such switch."""
+    public_names = {name.upper() for name in dir(config_module)}
+    forbidden_fragments = ("FORWARDED", "REQUEST_ID", "CSRF", "LOCKOUT")
+    assert not any(
+        fragment in name
+        for name in public_names
+        for fragment in forbidden_fragments
+    )

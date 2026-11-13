@@ -4,6 +4,62 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5, P5.4.3: request ID and correlation
+
+### Added
+
+* `src/api_request_context.py` — server-generated request IDs: `new_request_id()` (canonical UUIDv4 from `uuid.uuid4()`), `RequestIDMiddleware` (pure ASGI, ID created before routing, published in `scope["state"]` and a `ContextVar`, reset in `finally`), `current_request_id()`, `request_id_for(request)` and the `X-Request-ID` header constant.
+* `src/api.py` — registers the middleware once in `create_app`; refusal and unexpected-error log lines now carry `request_id`; `handle_unexpected_error` attaches `X-Request-ID` itself because Starlette renders the catch-all 500 above user middleware.
+* `tests/test_request_context.py` — 20 offline ASGI tests covering generation, uniqueness, UUID format, ignored caller-supplied IDs, header presence on success and on handled/unhandled errors, handler/context-variable access (async and sync), spoofed response headers, concurrency isolation, non-HTTP scopes, wiring, log correlation and sanitization.
+* `ARCHITECTURE.md` — decision D24 records generation, access, header population, why inbound IDs are not trusted and the known limitations.
+
+### Changed
+
+* `tests/test_api.py` — the pre-existing `test_no_cors_middleware_installed` assertion is now `test_only_the_request_id_middleware_is_installed`: exactly one middleware (request IDs), still no CORS, authentication or authorization middleware. No assertion was weakened; the expectation was updated for the P5.4.3 requirement.
+* `docs/PHASE5_IMPLEMENTATION_PLAN.md` §8, `DEVELOPMENT_STATUS.md` — record P5.4.3 completion.
+
+### Verified
+
+* Focused: `tests/test_request_context.py` + `tests/test_api.py` → **44 passed**.
+* Full backend suite: **2635 passed, 32 skipped**, exit 0. No database, secret, camera or biometric access; no frontend, schema or P5.3 primitive change.
+
+### Notes
+
+* Request bodies, headers, cookies, credentials, tokens, hashes and employee/biometric data are never logged; correlation uses the request ID only.
+* IDs are per-process evidence, not distributed tracing, are not persisted and are not a structured log field yet.
+* No authentication, cookie, throttling, CSRF or RBAC behaviour was added.
+
+## [Unreleased] — Phase 5, P5.4.2: authentication configuration
+
+### Added
+
+* `src/config.py` — `SessionCookieConfig` / `SESSION_COOKIE` (name `va_session`, path `/api/v1`, `HttpOnly` enforced as an invariant, `SameSite=Lax`, host-only/`domain=None`, `max_age_seconds=43_200`) with validated RFC 6265 name/path/domain syntax, rejection of the `__Host-`/`__Secure-` prefixes and of `SameSite=None` (both require `Secure` everywhere), and a `secure_for(app_env)` resolver that raises on an unknown environment instead of downgrading.
+* `src/config.py` — `SECURE_COOKIE_ENVIRONMENTS` (`staging`, `production`) as a constant, not a switch; `AppSettings.session_cookie_secure` derives the cookie's `Secure` flag from it.
+* `src/config.py` — `LoginThrottleConfig` / `LOGIN_THROTTLE` (5 failed attempts per 15-minute window keyed by normalized username) with plain-int/timedelta validation and sanity ceilings. Bounds only; no limiter.
+* A per-instance invariant in `SessionCookieConfig.__post_init__` tying `max_age_seconds` to the absolute session lifetime (43,200 s = 12 hours), so no construction path — including direct construction — can produce a cookie lifetime that disagrees with the server-side cap.
+* `tests/test_config.py` — 20 new test functions (75 collected cases, mostly parameterized) covering the session/cookie values, the four environment mappings, invalid environments, invalid cookie attributes, throttle bounds, frozenness and the absence of client-controlled switches.
+
+### Corrected during P5.4.2 review
+
+* Cookie `Domain`: every non-null value is now refused, including syntactically valid hostnames. The cookie is host-only by policy and has no override mechanism.
+* `SameSite`: only `Lax` is accepted. `Strict`, `None` and every other value are refused; there is no configurable override.
+* Cookie lifetime: the equality with the 12-hour absolute session lifetime is enforced in `__post_init__` for **every** constructed `SessionCookieConfig`, replacing the import-time check that protected only the module-level singleton. Frozen-dataclass behaviour is unchanged.
+
+### Changed
+
+* `docs/PHASE5_IMPLEMENTATION_PLAN.md` — new §8 records the P5.4 milestone breakdown with P5.4.2 complete.
+* `DEVELOPMENT_STATUS.md` — Step 53 records the P5.4.2 configuration.
+
+### Verified
+
+* Focused: `tests/test_config.py` → **123 passed**.
+* Full backend suite: **2581 passed, 32 skipped**, exit 0. No endpoints, middleware, cookie utilities, limiter, CSRF code, migrations or frontend files were added or changed.
+
+### Notes
+
+* Configuration only. No `/auth/*` route, no authentication dependency, no request-ID middleware, no cookie writer, no throttling logic and no CSRF validation exists yet (P5.4.3 onward).
+* No `X-Forwarded-For` trust setting, request-ID trust setting, CSRF disable switch or permanent-lockout setting exists by design; a test asserts none of those names can appear in the configuration surface.
+
 ## [Unreleased] — Phase 5, P5.3: authentication primitives
 
 ### Added

@@ -881,3 +881,37 @@ the journal schema version (still 1), or the decision authority.
   consumer (report CLI exit 2, durable startup, session lookup)
   unable to read the journal; the documented practice is a verified
   backup restore, never hand-editing journal lines.
+
+### D24 — Request IDs: server-generated only, echoed on every response (Phase 5, P5.4.3)
+
+* **Generation.** A pure-ASGI middleware (`src.api_request_context.RequestIDMiddleware`,
+  registered once in `create_app`) generates a canonical UUIDv4 from
+  `uuid.uuid4()` for every HTTP request, before routing. It is published in
+  `scope["state"]["request_id"]` (Starlette's per-request state) and in a
+  `ContextVar`, and the `ContextVar` is reset in a `finally` block. There is no
+  module-level "current request" object, so concurrent requests cannot overwrite
+  or leak one another's ID; Starlette copies the context into its thread pool,
+  so synchronous endpoints see it too.
+* **Response header.** `X-Request-ID` is written on `http.response.start`, so it
+  is present on successes and on every error the application renders. Assignment
+  through `MutableHeaders` replaces rather than duplicates an existing value.
+* **Caller-supplied IDs are not trusted.** An inbound `X-Request-ID` (or any
+  correlation header) is never read or reused, and there is no configuration to
+  trust one: letting a client choose the identifier that later appears in audit
+  records and incident timelines would allow collisions or planted correlations.
+  Proxy headers are not consulted for the same reason.
+* **Handler access.** Routes read `request.state.request_id` (via
+  `request_id_for(request)`); code without a `Request` uses
+  `current_request_id()`.
+* **One exception to the middleware path.** Starlette's `ServerErrorMiddleware`
+  is outermost, so the catch-all `Exception` handler renders *above* the
+  request-ID middleware. That handler therefore attaches the header itself from
+  `request.state`; every other handled error passes back through the middleware.
+* **Logging.** Refusal and unexpected-error log lines carry the request ID only.
+  Request bodies, headers, cookies, authorization values, passwords, hashes,
+  session tokens/digests, connection strings and employee/biometric data are
+  never logged.
+* **Limitations (deliberate).** IDs are per-process evidence, not distributed
+  tracing: they are not propagated to other services, not persisted, and the
+  log format still carries them as message text rather than a structured field.
+  Non-HTTP scopes (lifespan, websocket) receive no ID.

@@ -32,6 +32,7 @@ from __future__ import annotations
 import ipaddress
 import math
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -66,6 +67,11 @@ __all__ = [
     "PASSWORD_HASHING",
     "SessionPolicyConfig",
     "SESSION_POLICY",
+    "SECURE_COOKIE_ENVIRONMENTS",
+    "SessionCookieConfig",
+    "SESSION_COOKIE",
+    "LoginThrottleConfig",
+    "LOGIN_THROTTLE",
     "AppSettings",
     "Settings",
     "ConfigError",
@@ -931,6 +937,240 @@ def _validate_api_host_value(host: str) -> str:
     return host
 
 
+# ---------------------------------------------------------------------------
+# Phase 5 authentication API constants (owner-approved, P5.4.2)
+#
+# Configuration only: immutable session-cookie attributes, the environment
+# rule that decides ``Secure``, and the login-throttle bounds. No cookie
+# writer, limiter, middleware or endpoint lives here — those belong to later
+# P5.4 milestones and must consume these values rather than restate them.
+#
+# Deliberately absent, because the approved design has no such switch:
+#
+# * no client-supplied request-ID trust setting — IDs are always generated
+#   server-side;
+# * no CSRF disable switch — same-origin ``Origin`` validation stays mandatory
+#   in staging and production;
+# * no ``X-Forwarded-For`` trust setting — proxy headers are never trusted, so
+#   the throttle key is the normalized username alone;
+# * no permanent-lockout setting — a throttle key expires with its window and
+#   an account is never locked until an operator intervenes.
+# ---------------------------------------------------------------------------
+
+#: Environments in which the session cookie must be sent with ``Secure``.
+#: Development and testing stay non-secure so loopback (http) development and
+#: deterministic offline tests keep working; staging and production must never
+#: downgrade. This mapping is a constant, not a configurable switch.
+SECURE_COOKIE_ENVIRONMENTS: Final[frozenset[str]] = frozenset(
+    {"staging", "production"}
+)
+
+#: RFC 6265 cookie-name token characters (no separators, spaces or controls).
+_COOKIE_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$"
+)
+#: Browser-enforced cookie name prefixes this policy cannot satisfy (both
+#: require ``Secure`` in every environment, which development/testing disable).
+_FORBIDDEN_COOKIE_NAME_PREFIXES: Final[tuple[str, ...]] = (
+    "__Host-",
+    "__Secure-",
+)
+#: Sanity ceiling for a throttle window (24 hours).
+_MAX_THROTTLE_WINDOW: Final[timedelta] = timedelta(hours=24)
+
+
+@dataclass(frozen=True)
+class SessionCookieConfig:
+    """Owner-approved session-cookie attributes (P5.4.2).
+
+    Attributes
+    ----------
+    name:
+        Cookie name. A plain RFC 6265 token; the ``__Host-``/``__Secure-``
+        prefixes are refused because both require ``Secure`` everywhere while
+        development and testing deliberately run without it.
+    path:
+        Absolute cookie path (``/api/v1``): the cookie is never sent to the
+        dashboard origin's own routes or to unrelated paths.
+    http_only:
+        Approved invariant, always enabled: script cannot read the cookie.
+        Present as an explicit field so tests pin it, but a ``False`` value is
+        refused rather than honoured.
+    same_site:
+        Exactly ``Lax`` (approved). ``Strict`` and ``None`` are refused, as is
+        any other value: the policy is a single approved attribute, not a
+        choice, and ``None`` would additionally require ``Secure`` on every
+        environment (development/testing deliberately disable it).
+    max_age_seconds:
+        Browser-side lifetime, which must equal the absolute session lifetime
+        (12 hours = 43,200 s). Enforced per instance, so no construction path
+        can create a cookie lifetime that disagrees with the server-side hard
+        cap. It is a maximum, never a sliding renewal of its own.
+    domain:
+        Must remain unset (``None``, host-only cookie). Every non-null value is
+        refused, including syntactically valid hostnames: the approved policy
+        has no ``Domain`` attribute and no override mechanism.
+    """
+
+    #: Cookie name.
+    name: str = "va_session"
+    #: Cookie path (the API namespace only).
+    path: str = "/api/v1"
+    #: Script-inaccessible cookie (approved invariant; must stay enabled).
+    http_only: bool = True
+    #: SameSite policy: exactly ``Lax`` (approved).
+    same_site: Literal["Lax"] = "Lax"
+    #: Browser lifetime in seconds (must equal the absolute session lifetime).
+    max_age_seconds: int = 43_200
+    #: Must remain ``None``; the cookie is host-only by policy.
+    domain: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not _COOKIE_NAME_PATTERN.fullmatch(
+            self.name
+        ):
+            raise ValueError(
+                "name must be a valid RFC 6265 cookie token (letters, digits "
+                "and token punctuation only)"
+            )
+        if len(self.name) > 100:
+            raise ValueError("name must be at most 100 characters")
+        for prefix in _FORBIDDEN_COOKIE_NAME_PREFIXES:
+            if self.name.startswith(prefix):
+                raise ValueError(
+                    f"name must not use the {prefix!r} prefix: it requires "
+                    "Secure on every environment, and development/testing "
+                    "deliberately disable Secure"
+                )
+
+        if not isinstance(self.path, str) or not self.path.startswith("/"):
+            raise ValueError("path must be an absolute cookie path starting with '/'")
+        if len(self.path) > 1 and self.path.endswith("/"):
+            raise ValueError("path must not end with '/'")
+        if "//" in self.path or any(
+            character in self.path for character in ";,?# 	"
+        ):
+            raise ValueError(
+                "path must be a single absolute path with no separators, "
+                "query, fragment or whitespace"
+            )
+        for character in self.path:
+            code_point = ord(character)
+            if code_point < 0x20 or code_point == 0x7F:
+                raise ValueError("path must not contain control characters")
+
+        if not isinstance(self.http_only, bool):
+            raise ValueError(
+                "http_only must be a bool, got "
+                f"{type(self.http_only).__name__}"
+            )
+        if not self.http_only:
+            raise ValueError(
+                "http_only is an approved invariant: the session cookie must "
+                "remain script-inaccessible"
+            )
+
+        if not isinstance(self.same_site, str) or self.same_site != "Lax":
+            raise ValueError(
+                "same_site must be exactly 'Lax' (the approved policy has no "
+                "override); 'Strict', 'None' and every other value are "
+                f"refused, got {self.same_site!r}"
+            )
+
+        if isinstance(self.max_age_seconds, bool) or not isinstance(
+            self.max_age_seconds, int
+        ):
+            raise ValueError(
+                "max_age_seconds must be a plain int (bool rejected), got "
+                f"{type(self.max_age_seconds).__name__}"
+            )
+        absolute_seconds = int(
+            SESSION_POLICY.absolute_lifetime.total_seconds()
+        )
+        if self.max_age_seconds != absolute_seconds:
+            raise ValueError(
+                "max_age_seconds must equal the absolute session lifetime "
+                f"({absolute_seconds}s), got {self.max_age_seconds}s; the "
+                "cookie must never outlive or cut short the server-side cap"
+            )
+
+        if self.domain is not None:
+            raise ValueError(
+                "domain must remain unset (host-only cookie): the approved "
+                "policy has no Domain attribute and no override mechanism, "
+                f"got {self.domain!r}"
+            )
+
+    def secure_for(self, app_env: str) -> bool:
+        """Whether the cookie must carry ``Secure`` in ``app_env``.
+
+        Deterministic and total: an unknown environment raises rather than
+        defaulting to a weaker answer, so a typo can never downgrade cookie
+        transport in staging or production.
+        """
+        if not isinstance(app_env, str) or app_env not in _VALID_ENVS:
+            raise ConfigError(
+                f"Unknown application environment {app_env!r}: expected one "
+                f"of {', '.join(_VALID_ENVS)}"
+            )
+        return app_env in SECURE_COOKIE_ENVIRONMENTS
+
+
+@dataclass(frozen=True)
+class LoginThrottleConfig:
+    """Owner-approved login-throttle bounds (P5.4.2).
+
+    A failed sign-in is counted against the **normalized username** for a
+    fixed window; the counter expires with the window, so there is no
+    permanent lockout and no operator unlock path to build. These are bounds
+    only — the limiter itself is P5.4.9.
+    """
+
+    #: Failed attempts allowed inside one window before refusals begin.
+    max_failed_attempts: int = 5
+    #: Sliding window length (15 minutes).
+    window: timedelta = timedelta(minutes=15)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.max_failed_attempts, bool) or not isinstance(
+            self.max_failed_attempts, int
+        ):
+            raise ValueError(
+                "max_failed_attempts must be a plain int (bool rejected), "
+                f"got {type(self.max_failed_attempts).__name__}"
+            )
+        if self.max_failed_attempts < 1:
+            raise ValueError(
+                "max_failed_attempts must be >= 1, got "
+                f"{self.max_failed_attempts}"
+            )
+        if self.max_failed_attempts > 100:
+            raise ValueError(
+                "max_failed_attempts must be <= 100, got "
+                f"{self.max_failed_attempts}"
+            )
+
+        if not isinstance(self.window, timedelta):
+            raise ValueError(
+                "window must be a timedelta, got "
+                f"{type(self.window).__name__}"
+            )
+        if self.window <= timedelta(0):
+            raise ValueError(f"window must be positive, got {self.window}")
+        if self.window > _MAX_THROTTLE_WINDOW:
+            raise ValueError(
+                f"window must be <= {_MAX_THROTTLE_WINDOW}, got {self.window}"
+            )
+
+
+SESSION_COOKIE: Final[SessionCookieConfig] = SessionCookieConfig()
+LOGIN_THROTTLE: Final[LoginThrottleConfig] = LoginThrottleConfig()
+
+# The browser lifetime is tied to the absolute session cap (never the idle
+# timeout) by ``SessionCookieConfig.__post_init__``, so the coupling holds for
+# every constructed instance and not only for this singleton.
+
+
 @dataclass(frozen=True)
 class AppSettings:
     """Environment-specific settings plus derived project paths.
@@ -965,6 +1205,16 @@ class AppSettings:
         # constant-level rule (like CameraConfig index/frame bounds).
         _validate_api_port_value(self.api_port)
         _validate_api_host_value(self.api_host)
+
+    @property
+    def session_cookie_secure(self) -> bool:
+        """Whether the session cookie must carry ``Secure`` in this environment.
+
+        Derived from :data:`SECURE_COOKIE_ENVIRONMENTS` through
+        :meth:`SessionCookieConfig.secure_for`; an unrecognized ``app_env``
+        raises :class:`ConfigError` instead of assuming a weaker answer.
+        """
+        return SESSION_COOKIE.secure_for(self.app_env)
 
     # -- Derived paths (constants by composition, not environment) ---------
 

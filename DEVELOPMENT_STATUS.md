@@ -3,6 +3,102 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 54 — Phase 5 P5.4.3: request ID and correlation (2026-11-13)
+
+**Backend infrastructure only. No authentication, cookie, throttling, CSRF,
+RBAC, audit, frontend, schema or P5.3 change; no Git operation.**
+
+* **Baseline**: branch `main`, HEAD `9bf5c9a611a384a1b74c13211204c0530662b2dd`,
+  P5.4.2 changes present in the working tree.
+* **Generation** — `RequestIDMiddleware` (pure ASGI,
+  `src/api_request_context.py`) creates a canonical UUIDv4 with `uuid.uuid4()`
+  for every HTTP request before routing, stores it in `scope["state"]` and a
+  `ContextVar`, and resets the context token in `finally`. Non-HTTP scopes pass
+  through untouched. No module-level current-request state exists, so
+  concurrent requests cannot overwrite one another.
+* **Header** — `X-Request-ID` is written on `http.response.start`, replaces any
+  existing value and is therefore present on successes and on every handled
+  error.
+* **Untrusted inbound IDs** — a caller-supplied `X-Request-ID` is never read,
+  echoed or reused, and no configuration can enable trusting it.
+* **Catch-all 500** — Starlette's `ServerErrorMiddleware` sits above user
+  middleware, so `handle_unexpected_error` attaches the header itself from
+  `request.state`; the sanitized `INTERNAL_ERROR` envelope is unchanged.
+* **Logging** — refusal and unexpected-error lines carry `request_id` only; no
+  bodies, headers, cookies, credentials, tokens, hashes or biometric data.
+* **Tests** — `tests/test_request_context.py` (20 offline ASGI tests) plus the
+  updated `test_only_the_request_id_middleware_is_installed` in
+  `tests/test_api.py` (the previous assertion required zero middleware; the
+  expectation changed with this milestone, no assertion was weakened).
+* **Docs** — `ARCHITECTURE.md` D24, `CHANGELOG.md`,
+  `docs/PHASE5_IMPLEMENTATION_PLAN.md` §8.
+
+**Verified**
+
+* `tests/test_request_context.py` + `tests/test_api.py` → **44 passed**.
+* Full backend suite → **2635 passed, 32 skipped**, exit 0.
+* `git diff --check` clean; only the P5.4.3 files plus the carried P5.4.2 work
+  appear in `git status`.
+
+**Not verified / deferred**
+
+* No live server, browser, PostgreSQL, camera or deployment validation: the
+  tests drive the ASGI application directly.
+* IDs are not propagated to other services, not persisted and not a structured
+  log field; no audit log consumes them yet (later milestone).
+
+## Step 53 — Phase 5 P5.4.2: authentication configuration (2026-11-13)
+
+**Configuration only. No endpoint, middleware, cookie utility, throttling,
+CSRF code, migration, dependency or frontend change; no Git operation.**
+
+* **Baseline**: branch `main`, HEAD `9bf5c9a611a384a1b74c13211204c0530662b2dd`
+  (P5.3), clean working tree.
+* **Session cookie** — `SESSION_COOKIE` (`SessionCookieConfig`): `va_session`,
+  path `/api/v1`, `HttpOnly` always on, `SameSite=Lax`, `domain=None`
+  (host-only), `max_age_seconds=43_200`. Validation rejects non-token names,
+  `__Host-`/`__Secure-` prefixes, non-absolute or separator-bearing paths,
+  `http_only=False`, **any** `same_site` value other than `Lax`, **any**
+  non-null `domain` (valid hostnames included) and any `max_age_seconds` that
+  is not the plain integer 43,200.
+* **Environment behaviour** — `SECURE_COOKIE_ENVIRONMENTS` is a constant
+  (`staging`, `production`); `SESSION_COOKIE.secure_for(app_env)` returns
+  `False` for development/testing and `True` for staging/production, and raises
+  `ConfigError` for an unknown environment. `AppSettings.session_cookie_secure`
+  exposes it per instance. No switch can disable `Secure` in staging or
+  production, and `load_settings()` still validates `APP_ENV` exactly as before.
+* **Throttle** — `LOGIN_THROTTLE` (`LoginThrottleConfig`): 5 failed attempts per
+  15-minute window, keyed by normalized username. Plain-int/timedelta
+  validation, positive bounds, sanity ceilings (100 attempts / 24 h). Bounds
+  only — the limiter is P5.4.9.
+* **Invariants** — `SessionCookieConfig.__post_init__` requires
+  `max_age_seconds` to equal the absolute session lifetime (43,200 s) for
+  every instance, so direct construction cannot bypass the coupling; password
+  policy (`PASSWORD_HASHING`) and session policy (`SESSION_POLICY`) are
+  untouched.
+* **Deliberately absent** — request-ID trust, CSRF disablement,
+  `X-Forwarded-For` trust, cookie-`Domain` override, `SameSite` override and
+  permanent-lockout settings. A test asserts no such configuration name can
+  appear.
+* **Review corrections (P5.4.2 review)** — cookie `Domain` now refuses every
+  non-null value (valid hostnames included), `SameSite` accepts only `Lax`,
+  and the 43,200 s cookie lifetime is enforced per constructed instance
+  instead of only at import.
+
+**Verified**
+
+* `tests/test_config.py` → **135 passed** (75 new cases from 20 new test
+  functions).
+* Full backend suite → **2581 passed, 32 skipped**, exit 0.
+* `git diff --check` clean; only `src/config.py`, `tests/test_config.py` and
+  the three documentation files changed.
+
+**Not verified / deferred**
+
+* No cookie is ever set, no limiter runs and no CSRF check exists yet; the
+  values are consumed from P5.4.3 onward.
+* `Secure` behaviour over a real TLS deployment remains unverified.
+
 ## Step 52 — Phase 5 P5.3: authentication primitives (2026-11-13)
 
 **Offline implementation only. No database connection, no `.env`/secret, no

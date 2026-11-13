@@ -223,3 +223,24 @@ work factor was not benchmarked on target hardware.
 
 P5.4 (session issuance/validation service integration — cookie and request
 plumbing), gated on owner approval of P5.3.
+
+## 8. P5.4 authentication API — sub-milestone status
+
+P5.4 is delivered in separately reviewed sub-milestones. Nothing beyond the
+completed rows exists in the tree.
+
+| Sub-milestone | Scope | Status |
+| --- | --- | --- |
+| P5.4.1 | Read-only inspection of the P5.3 primitives, backend, proxy and tests | Completed (review, no code) |
+| P5.4.2 | Authentication configuration (session cookie, environment Secure rule, login throttle bounds) | Completed (offline) |
+| P5.4.3 | Request ID and correlation infrastructure (server-generated UUID, `X-Request-ID`, context access, log correlation) | Completed (offline) |
+| P5.4.4+ | Cookie utilities, authentication dependency, `/auth/login`, `/auth/logout`, `/auth/me`, route protection, login throttling (P5.4.9), integration tests and security review | Not started |
+
+P5.4.2 adds configuration only (`src/config.py`, `SESSION_COOKIE`,
+`SECURE_COOKIE_ENVIRONMENTS`, `LOGIN_THROTTLE`, `AppSettings.session_cookie_secure`).
+The approved values are `va_session` on `/api/v1`, `HttpOnly`, `SameSite=Lax`,
+no `Domain`, `Max-Age` 43,200 s, `Secure` in staging/production only, 8-hour
+idle timeout, 12-hour absolute lifetime, and a 5-attempt / 15-minute login
+throttle keyed by normalized username with no permanent lockout. No switch
+exists to trust client request IDs, trust `X-Forwarded-For`, disable CSRF
+validation in staging/production, or lock an account permanently.

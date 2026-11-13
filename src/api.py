@@ -36,10 +36,13 @@ Design rules (unchanged from the foundation step)
   deliberately separate from human ``message`` text. A business check-out
   refusal additionally carries a nested ``reason`` code so a client can
   distinguish "inactive" from "no open session" without parsing prose.
-* **No CORS, no authentication.** No middleware is installed. Loopback-only
-  binding is a development safety measure, explicitly not a production security
-  boundary. Documentation URLs stay disabled so the served route inventory is
-  exactly the approved eight endpoints.
+* **No CORS, no authentication.** Exactly one middleware is installed: the
+  P5.4.3 request-ID middleware (:mod:`src.api_request_context`), which only
+  assigns a server-generated UUID and echoes it as ``X-Request-ID``. No CORS,
+  authentication or authorization middleware exists. Loopback-only binding is a
+  development safety measure, explicitly not a production security boundary.
+  Documentation URLs stay disabled so the served route inventory is exactly the
+  approved eight endpoints.
 * **No automatic retries.** A failed persisted append is reported as
   ``PERSISTENCE_UNCONFIRMED`` and never retried here.
 """
@@ -57,6 +60,11 @@ from pydantic import BaseModel
 # and the MRO-based handler lookup only walks the raised type's bases.
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from src.api_request_context import (
+    REQUEST_ID_HEADER,
+    RequestIDMiddleware,
+    request_id_for,
+)
 from src.config import AppSettings, ConfigError, load_settings
 from src.db import DatabaseUnavailableError, MalformedDsnError
 from src.logging_setup import get_logger
@@ -224,7 +232,9 @@ def handle_config_error(request: Request, exc: ConfigError) -> JSONResponse:
     """Invalid service configuration — never confused with an offline
     database, and never exposing the configuration value itself."""
     _logger.warning(
-        "rejected request: invalid service configuration (%s)", type(exc).__name__
+        "rejected request: invalid service configuration (%s) request_id=%s",
+        type(exc).__name__,
+        request_id_for(request) or "unassigned",
     )
     return _error_json(503, "CONFIG_INVALID", "Service configuration is invalid.")
 
@@ -234,7 +244,11 @@ def handle_database_unavailable(
 ) -> JSONResponse:
     """PostgreSQL could not be reached (availability-class failures only,
     with the connection layer's redaction discipline)."""
-    _logger.warning("rejected request: postgres unavailable (%s)", type(exc).__name__)
+    _logger.warning(
+        "rejected request: postgres unavailable (%s) request_id=%s",
+        type(exc).__name__,
+        request_id_for(request) or "unassigned",
+    )
     return _error_json(503, "DATABASE_UNAVAILABLE", "Database is temporarily unavailable.")
 
 
@@ -245,7 +259,9 @@ def handle_database_config_error(
     caller-value config contract failure) — never folded into
     ``DATABASE_UNAVAILABLE``."""
     _logger.warning(
-        "rejected request: invalid database configuration (%s)", type(exc).__name__
+        "rejected request: invalid database configuration (%s) request_id=%s",
+        type(exc).__name__,
+        request_id_for(request) or "unassigned",
     )
     return _error_json(
         503, "DATABASE_CONFIG_INVALID", "Database configuration is invalid."
@@ -254,9 +270,25 @@ def handle_database_config_error(
 
 def handle_unexpected_error(request: Request, exc: BaseException) -> JSONResponse:
     """Last-resort 500: the client sees only a generic message; trusted
-    diagnostics are logged server-side and never returned."""
-    _logger.exception("unhandled error while handling a request")
-    return _error_json(500, _INTERNAL_ERROR_CODE, _INTERNAL_ERROR_MESSAGE)
+    diagnostics are logged server-side and never returned.
+
+    Starlette renders this handler from its outermost ``ServerErrorMiddleware``,
+    above the request-ID middleware, so the response never passes back through
+    that middleware. The request ID is therefore attached here (taken from the
+    ``request.state`` the middleware already populated); when the handler is
+    invoked without that state — as in direct unit tests — no header is added.
+    """
+    request_id = request_id_for(request)
+    _logger.exception(
+        "unhandled error while handling a request request_id=%s",
+        request_id or "unassigned",
+    )
+    response = _error_json(
+        500, _INTERNAL_ERROR_CODE, _INTERNAL_ERROR_MESSAGE
+    )
+    if request_id is not None:
+        response.headers[REQUEST_ID_HEADER] = request_id
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +373,9 @@ def create_app(
         redoc_url=None,
         openapi_url=None,
     )
-    # No CORS or other middleware is installed, deliberately.
+    # Exactly one middleware: server-generated request IDs (P5.4.3). It adds no
+    # CORS, authentication or authorization behaviour — deliberately.
+    app.add_middleware(RequestIDMiddleware)
 
     # -- health ---------------------------------------------------------
 
