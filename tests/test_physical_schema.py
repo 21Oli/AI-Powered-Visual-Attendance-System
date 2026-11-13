@@ -71,12 +71,29 @@ def _column(
 
 
 def _base_columns() -> tuple[ColumnFact, ...]:
-    """The physically correct column facts for both contracted tables."""
+    """The physically correct column facts for every contracted table."""
     return (
         _column("employee", "employee_id", "text", 1),
         _column("employee", "full_name", "text", 2),
         _column("employee", "is_active", "boolean", 3, default_expression="true"),
         _column("employee", "created_at", "timestamp with time zone", 4),
+        _column("app_user", "user_id", "text", 1),
+        _column("app_user", "username", "text", 2),
+        _column("app_user", "username_key", "text", 3),
+        _column("app_user", "password_hash", "text", 4),
+        _column("app_user", "role", "text", 5),
+        _column("app_user", "is_active", "boolean", 6, default_expression="true"),
+        _column("app_user", "created_at", "timestamp with time zone", 7),
+        _column("app_user", "updated_at", "timestamp with time zone", 8),
+        _column("user_session", "session_token_hash", "character(64)", 1),
+        _column("user_session", "user_id", "text", 2),
+        _column("user_session", "issued_at", "timestamp with time zone", 3),
+        _column("user_session", "expires_at", "timestamp with time zone", 4),
+        _column("user_session", "absolute_expires_at", "timestamp with time zone", 5),
+        _column(
+            "user_session", "revoked_at", "timestamp with time zone", 6, nullable=True
+        ),
+        _column("user_session", "last_seen_at", "timestamp with time zone", 7),
         _column("schema_version", "version", "integer", 1),
         _column("schema_version", "checksum", "text", 2),
         _column("schema_version", "applied_at", "timestamp with time zone", 3),
@@ -84,9 +101,18 @@ def _base_columns() -> tuple[ColumnFact, ...]:
 
 
 def _customized(**changes: dict) -> tuple[ColumnFact, ...]:
-    """Base columns with per-column ``dataclasses.replace`` changes."""
+    """Base columns with per-column changes, applied to ``employee`` only.
+
+    Names such as ``created_at`` and ``is_active`` exist in more than one
+    contracted table now, so changes are scoped to the employee table to keep
+    these fixtures expressing exactly one deliberate fault per case (the
+    identity/session tables are covered by their own tests below and by
+    ``tests/test_migration_v002.py``).
+    """
     return tuple(
         dataclasses.replace(column, **changes.get(column.name, {}))
+        if column.table in {"employee", "schema_version"}
+        else column
         for column in _base_columns()
     )
 
@@ -95,6 +121,13 @@ def _relations(*, employee_kind: str = "r") -> tuple[RelationFact, ...]:
     return (
         RelationFact("public", "employee", employee_kind),
         RelationFact("public", "employee_pkey", "i"),
+        RelationFact("public", "app_user", "r"),
+        RelationFact("public", "app_user_pkey", "i"),
+        RelationFact("public", "app_user_username_key_key", "i"),
+        RelationFact("public", "user_session", "r"),
+        RelationFact("public", "user_session_pkey", "i"),
+        RelationFact("public", "user_session_user_id_idx", "i"),
+        RelationFact("public", "user_session_expires_at_idx", "i"),
         RelationFact("public", "schema_version", "r"),
         RelationFact("public", "schema_version_pkey", "i"),
     )
@@ -124,6 +157,24 @@ def _indexes() -> tuple[IndexFact, ...]:
         ),
         IndexFact(
             schema="public",
+            table="app_user",
+            name="app_user_pkey",
+            is_unique=True,
+            is_primary=True,
+            columns=("user_id",),
+            definition="CREATE UNIQUE INDEX app_user_pkey ON public.app_user USING btree (user_id)",
+        ),
+        IndexFact(
+            schema="public",
+            table="user_session",
+            name="user_session_pkey",
+            is_unique=True,
+            is_primary=True,
+            columns=("session_token_hash",),
+            definition="CREATE UNIQUE INDEX user_session_pkey ON public.user_session USING btree (session_token_hash)",
+        ),
+        IndexFact(
+            schema="public",
             table="schema_version",
             name="schema_version_pkey",
             is_unique=True,
@@ -147,6 +198,8 @@ def _snapshot(
         constraints=(
             (
                 _pk("employee", ("employee_id",)),
+                _pk("app_user", ("user_id",)),
+                _pk("user_session", ("session_token_hash",)),
                 _pk("schema_version", ("version",)),
             )
             if constraints is None
@@ -190,6 +243,8 @@ def test_reordered_physical_columns_are_compatible() -> None:
     }
     columns = tuple(
         dataclasses.replace(column, ordinal=order[column.name])
+        if column.table in {"employee", "schema_version"}
+        else column
         for column in _base_columns()
     )
     result = _evaluate(_snapshot(columns=columns))
@@ -295,10 +350,17 @@ def test_empty_snapshot_is_never_compatible() -> None:
     result = _evaluate(CatalogSnapshot(relations=(), columns=(), constraints=(), indexes=()))
     assert result.compatible is False
     assert result.status is ps.CompatibilityStatus.INCOMPATIBLE
-    assert _codes(result) == [ps.SCHEMA_TABLE_MISSING, ps.SCHEMA_TABLE_MISSING]
+    assert _codes(result) == [
+        ps.SCHEMA_TABLE_MISSING,
+        ps.SCHEMA_TABLE_MISSING,
+        ps.SCHEMA_TABLE_MISSING,
+        ps.SCHEMA_TABLE_MISSING,
+    ]
     assert [finding.object for finding in result.findings] == [
+        "app_user",
         "employee",
         "schema_version",
+        "user_session",
     ]
 
 
@@ -400,7 +462,11 @@ def test_duplicate_column_facts_are_incomplete_metadata() -> None:
     ],
 )
 def test_missing_required_column(name: str, table: str) -> None:
-    columns = tuple(column for column in _base_columns() if column.name != name)
+    columns = tuple(
+        column
+        for column in _base_columns()
+        if not (column.table == table and column.name == name)
+    )
     result = _evaluate(_snapshot(columns=columns))
     assert _codes(result) == [ps.SCHEMA_COLUMN_MISSING]
     assert result.findings[0].column == name
@@ -538,7 +604,11 @@ def test_default_expression_text_is_never_echoed() -> None:
 
 
 def test_missing_primary_key() -> None:
-    constraints = (_pk("schema_version", ("version",)),)
+    constraints = (
+        _pk("app_user", ("user_id",)),
+        _pk("user_session", ("session_token_hash",)),
+        _pk("schema_version", ("version",)),
+    )
     result = _evaluate(_snapshot(constraints=constraints))
     assert _codes(result) == [ps.SCHEMA_PRIMARY_KEY_MISSING]
     assert result.findings[0].object == "employee"
@@ -547,6 +617,8 @@ def test_missing_primary_key() -> None:
 def test_wrong_primary_key_column() -> None:
     constraints = (
         _pk("employee", ("full_name",)),
+        _pk("app_user", ("user_id",)),
+        _pk("user_session", ("session_token_hash",)),
         _pk("schema_version", ("version",)),
     )
     result = _evaluate(_snapshot(constraints=constraints))
@@ -558,6 +630,8 @@ def test_wrong_primary_key_column() -> None:
 def test_wrong_ledger_primary_key_column() -> None:
     constraints = (
         _pk("employee", ("employee_id",)),
+        _pk("app_user", ("user_id",)),
+        _pk("user_session", ("session_token_hash",)),
         _pk("schema_version", ("checksum",)),
     )
     result = _evaluate(_snapshot(constraints=constraints))
@@ -569,6 +643,8 @@ def test_conflicting_primary_key_metadata() -> None:
     constraints = (
         _pk("employee", ("employee_id",)),
         _pk("employee", ("employee_id",), name="employee_pkey_duplicate"),
+        _pk("app_user", ("user_id",)),
+        _pk("user_session", ("session_token_hash",)),
         _pk("schema_version", ("version",)),
     )
     result = _evaluate(_snapshot(constraints=constraints))
@@ -586,6 +662,8 @@ def test_primary_key_without_columns_is_incomplete() -> None:
             definition="PRIMARY KEY (employee_id)",
             columns=(),
         ),
+        _pk("app_user", ("user_id",)),
+        _pk("user_session", ("session_token_hash",)),
         _pk("schema_version", ("version",)),
     )
     result = _evaluate(_snapshot(constraints=constraints))
@@ -593,7 +671,11 @@ def test_primary_key_without_columns_is_incomplete() -> None:
 
 
 def test_unique_index_does_not_satisfy_the_primary_key() -> None:
-    constraints = (_pk("schema_version", ("version",)),)
+    constraints = (
+        _pk("app_user", ("user_id",)),
+        _pk("user_session", ("session_token_hash",)),
+        _pk("schema_version", ("version",)),
+    )
     indexes = _indexes()  # includes employee_pkey with is_primary=True
     result = _evaluate(_snapshot(constraints=constraints, indexes=indexes))
     assert _codes(result) == [ps.SCHEMA_PRIMARY_KEY_MISSING]
@@ -797,7 +879,11 @@ def test_findings_follow_documented_precedence() -> None:
 
 def test_relation_kind_mismatch_suppresses_downstream_findings() -> None:
     columns = _customized(employee_id={"pg_type": "integer"})
-    ledger_key = (_pk("schema_version", ("version",)),)
+    ledger_key = (
+        _pk("app_user", ("user_id",)),
+        _pk("user_session", ("session_token_hash",)),
+        _pk("schema_version", ("version",)),
+    )
     result = _evaluate(
         _snapshot(
             relations=_relations(employee_kind="v"),

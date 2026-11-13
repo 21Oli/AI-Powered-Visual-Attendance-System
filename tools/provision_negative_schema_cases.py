@@ -127,7 +127,7 @@ import argparse
 import json
 import os
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
@@ -560,7 +560,10 @@ class ProvisioningEnvironment:
     catalog_probe: Callable[[Any], CatalogSnapshot] = read_public_catalog
     facts_reader: Callable[[Any], MigrationFacts] | None = None
     ensure_ledger: Callable[[], None] | None = None
-    shipped_checksum: str = ""
+    #: Either one checksum (single-version callers) or a per-version mapping.
+    #: The shipped set now contains two migrations with different checksums, so
+    #: the live environment always supplies the mapping.
+    shipped_checksum: "str | Mapping[int, str]" = ""
     migrations_dir: Path | None = None
     dsn: str = field(default=_PLACEHOLDER_DSN, repr=False)
     #: Set by every live entry point. When it is ``None`` the identity probe is
@@ -1722,7 +1725,7 @@ def _live_environment(
     from src.db_migrate_executor import PsycopgMigrationExecutor  # lazy
 
     scripts = load_migrations(migrations_dir)
-    checksum = scripts[0].checksum if scripts else ""
+    checksums = {script.version: script.checksum for script in scripts}
 
     def _open() -> Any:
         return open_connection(dsn)
@@ -1734,7 +1737,7 @@ def _live_environment(
     return ProvisioningEnvironment(
         open_connection=_open,
         ensure_ledger=_ensure,
-        shipped_checksum=checksum,
+        shipped_checksum=checksums,
         migrations_dir=migrations_dir,
         dsn=dsn,
         target_database=scenario.database_name,

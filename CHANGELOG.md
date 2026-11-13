@@ -4,6 +4,36 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5, P5.2: identity data model and persistence
+
+### Added
+
+* `migrations/V002__security.sql` — `app_user` (identity, role `CHECK` in `Admin`/`HR Manager`/`Operator`/`Auditor`, active flag, application-authored timestamps) and `user_session` (`CHAR(64)` hashed-token primary key, `user_id` foreign key, sliding and absolute expiry, `revoked_at`, `last_seen_at`), with justified indexes on `user_session.user_id` and `user_session.expires_at` and no database timestamp defaults.
+* `src/user.py` — `Role`, `User`, `normalize_username`, `username_key_for`, `UserValidationError` (NFKC normalisation, whitespace collapsing, case-insensitive key, 3–64 characters, control characters rejected, `password_hash` hidden from `repr`).
+* `src/user_session.py` — `UserSession`, `is_valid_session_token_hash`, `SessionValidationError`.
+* `src/user_repository.py`, `src/session_repository.py` — parameterised create/find/list/update and insert/find/touch/revoke/revoke-all operations with explicit error types; no hashing, issuance, auth dependency or endpoint code.
+* `src/db_security_repository.py` — `open_user_repository` / `open_session_repository` with one connection per operation, commit on success and rollback on failure.
+* `src/config.py` — `UserPaginationConfig` and `USER_PAGINATION` (default 50, maximum 100) so account listing is bounded.
+* `docs/PHASE5_IMPLEMENTATION_PLAN.md` — Phase 5 milestones, approved decisions, P5.2 scope and open limitations.
+* Offline test suites: `tests/test_user.py`, `tests/test_user_session.py`, `tests/test_user_repository.py`, `tests/test_session_repository.py`, `tests/test_db_security_repository.py`, `tests/test_migration_v002.py`, plus the shared fake in `tests/security_support.py`.
+
+### Changed
+
+* `src/schema_contract.py` — declares `app_user` and `user_session`, `CONTRACT_MIGRATION_VERSION = 2`, four required tables and the new migration-set digest (V001 is unchanged).
+* `tests/test_schema_contract.py`, `tests/test_physical_schema.py`, `tests/test_api_physical_gate.py`, `tests/test_startup_schema.py`, `tests/test_db_migrate_executor.py`, `tests/test_db_migrate_executor_catalog.py`, `tests/test_run_migrations_cli.py`, `tests/test_negative_schema_scenarios.py`, `tests/test_provision_negative_schema_cases.py` — moved from a one-migration to a two-migration world (four contracted tables, pending `2`, applied `[1, 2]`).
+* `tools/negative_schema_scenarios.py`, `tools/provision_negative_schema_cases.py` — security tables merged into the declared state, two-version applied history and shipped-checksum mappings.
+* `DB_DESIGN.md` — new §12 documents the V002 identity schema and its constraints.
+
+### Verified
+
+* Full offline suite: **2450 passed, 32 skipped**, exit 0 (`.venv/Scripts/python.exe -m pytest tests/ -q`). No live database, `.env`, secret or dependency was used.
+
+### Notes
+
+* P5.2 stops at the data model. There is no password hashing, session issuance, login endpoint, authentication dependency or RBAC; P5.3 was not started.
+* `V002__security.sql` has not been applied to PostgreSQL and the repositories have not been exercised against a live database — both remain unverified until a separately authorized run.
+* The schema contract can express tables, columns and primary keys only; unique constraints, the foreign key, the role `CHECK` and indexes are asserted against the migration text in `tests/test_migration_v002.py`.
+
 ## [Unreleased] — Phase 4, P4.9: final regression and acceptance
 
 ### Verified

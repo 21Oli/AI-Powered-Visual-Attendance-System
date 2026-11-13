@@ -59,6 +59,8 @@ __all__ = [
     "UNKNOWN_FACE",
     "ATTENDANCE",
     "PAGINATION",
+    "UserPaginationConfig",
+    "USER_PAGINATION",
     "AppSettings",
     "Settings",
     "ConfigError",
@@ -640,6 +642,50 @@ class PaginationConfig:
 
 
 PAGINATION: Final[PaginationConfig] = PaginationConfig()
+
+
+# ---------------------------------------------------------------------------
+# Identity-list pagination constants (Phase 5, P5.2; consumer is the user
+# repository). Deliberately separate from PAGINATION: that contract is the
+# approved employee-metadata pagination (OQ-6) and must not be silently
+# widened to cover a second resource.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class UserPaginationConfig:
+    """Approved bounds for the bounded, deterministic user listing.
+
+    The user list is keyset-only (``user_id`` ascending, ``WHERE user_id >
+    after``) like the employee list; these bounds exist so a caller can never
+    request an unbounded identity dump. They are engineering defaults for
+    P5.2, not an approved business contract: authentication milestones may
+    consume the list without paging semantics.
+    """
+
+    #: Default number of users returned per page.
+    default_page_size: int = 50
+    #: Hard ceiling on any single page request (no caller may exceed it).
+    max_page_size: int = 100
+
+    def __post_init__(self) -> None:
+        for name in ("default_page_size", "max_page_size"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(
+                    f"{name} must be a plain int (bool and float rejected), "
+                    f"got {type(value).__name__}"
+                )
+            if value < 1:
+                raise ValueError(f"{name} must be >= 1, got {value}")
+        if self.default_page_size > self.max_page_size:
+            raise ValueError(
+                "default_page_size must be <= max_page_size, got "
+                f"{self.default_page_size} > {self.max_page_size}"
+            )
+
+
+USER_PAGINATION: Final[UserPaginationConfig] = UserPaginationConfig()
 
 
 # ---------------------------------------------------------------------------

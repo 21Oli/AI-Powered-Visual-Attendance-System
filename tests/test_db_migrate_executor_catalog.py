@@ -157,6 +157,13 @@ def _healthy_rows():
     relations = [
         ("public", "employee", "r"),
         ("public", "employee_pkey", "i"),
+        ("public", "app_user", "r"),
+        ("public", "app_user_pkey", "i"),
+        ("public", "app_user_username_key_key", "i"),
+        ("public", "user_session", "r"),
+        ("public", "user_session_pkey", "i"),
+        ("public", "user_session_user_id_idx", "i"),
+        ("public", "user_session_expires_at_idx", "i"),
         ("public", "schema_version", "r"),
         ("public", "schema_version_pkey", "i"),
     ]
@@ -174,6 +181,101 @@ def _healthy_rows():
             "",
             "",
             4,
+        ),
+        ("public", "app_user", "user_id", "text", True, None, "", "", 1),
+        ("public", "app_user", "username", "text", True, None, "", "", 2),
+        ("public", "app_user", "username_key", "text", True, None, "", "", 3),
+        ("public", "app_user", "password_hash", "text", True, None, "", "", 4),
+        ("public", "app_user", "role", "text", True, None, "", "", 5),
+        ("public", "app_user", "is_active", "boolean", True, "true", "", "", 6),
+        (
+            "public",
+            "app_user",
+            "created_at",
+            "timestamp with time zone",
+            True,
+            None,
+            "",
+            "",
+            7,
+        ),
+        (
+            "public",
+            "app_user",
+            "updated_at",
+            "timestamp with time zone",
+            True,
+            None,
+            "",
+            "",
+            8,
+        ),
+        (
+            "public",
+            "user_session",
+            "session_token_hash",
+            "character(64)",
+            True,
+            None,
+            "",
+            "",
+            1,
+        ),
+        ("public", "user_session", "user_id", "text", True, None, "", "", 2),
+        (
+            "public",
+            "user_session",
+            "issued_at",
+            "timestamp with time zone",
+            True,
+            None,
+            "",
+            "",
+            3,
+        ),
+        (
+            "public",
+            "user_session",
+            "expires_at",
+            "timestamp with time zone",
+            True,
+            None,
+            "",
+            "",
+            4,
+        ),
+        (
+            "public",
+            "user_session",
+            "absolute_expires_at",
+            "timestamp with time zone",
+            True,
+            None,
+            "",
+            "",
+            5,
+        ),
+        (
+            "public",
+            "user_session",
+            "revoked_at",
+            "timestamp with time zone",
+            False,
+            None,
+            "",
+            "",
+            6,
+        ),
+        (
+            "public",
+            "user_session",
+            "last_seen_at",
+            "timestamp with time zone",
+            True,
+            None,
+            "",
+            "",
+            7,
         ),
         ("public", "schema_version", "version", "integer", True, None, "", "", 1),
         ("public", "schema_version", "checksum", "text", True, None, "", "", 2),
@@ -197,6 +299,22 @@ def _healthy_rows():
             "p",
             "PRIMARY KEY (employee_id)",
             ["employee_id"],
+        ),
+        (
+            "public",
+            "app_user",
+            "app_user_pkey",
+            "p",
+            "PRIMARY KEY (user_id)",
+            ["user_id"],
+        ),
+        (
+            "public",
+            "user_session",
+            "user_session_pkey",
+            "p",
+            "PRIMARY KEY (session_token_hash)",
+            ["session_token_hash"],
         ),
         (
             "public",
@@ -238,7 +356,12 @@ def _handler(
     indexes=None,
     applied: tuple[tuple[int, str], ...] = ((1, "checksum-1"),),
     ledger_present: bool = True,
-    tables: tuple[str, ...] = ("employee", "schema_version"),
+    tables: tuple[str, ...] = (
+        "employee",
+        "app_user",
+        "user_session",
+        "schema_version",
+    ),
     lock_result: bool = True,
     unlock_result: bool = True,
     raise_on_unlock: bool = False,
@@ -302,7 +425,7 @@ def _counting_probe(calls: list):
 
 def _write_migrations(directory: Path, *versions: int) -> dict[int, str]:
     directory.mkdir(parents=True, exist_ok=True)
-    for version in versions or (1,):
+    for version in versions or (1, 2):
         (directory / f"V{version:03d}__step_{version}.sql").write_text(
             MIGRATION_SQL, encoding="utf-8"
         )
@@ -508,7 +631,7 @@ def test_real_g2_gate_allows_valid_history_then_reads_the_catalog(
     directory = tmp_path / "migrations"
     checksums = _write_migrations(directory)
     calls: list = []
-    executor, _, opened = _executor(_handler(applied=((1, checksums[1]),)))
+    executor, _, opened = _executor(_handler(applied=((1, checksums[1]), (2, checksums[2]))))
 
     result = executor.verify_schema_locked(
         lambda snapshot: evaluate_migration_state(snapshot, directory),
@@ -517,7 +640,7 @@ def test_real_g2_gate_allows_valid_history_then_reads_the_catalog(
 
     assert isinstance(result, LockedSchemaVerification)
     assert result.physical.status is CompatibilityStatus.COMPATIBLE
-    assert result.migration.applied == ((1, checksums[1]),)
+    assert result.migration.applied == ((1, checksums[1]), (2, checksums[2]))
     assert len(calls) == 1
     assert opened[0].closed == 1
 
@@ -544,17 +667,20 @@ def test_physical_drift_does_not_replace_a_valid_g2_result(tmp_path: Path) -> No
     checksums = _write_migrations(directory)
     _, columns, _, _ = _healthy_rows()
     drifted = [
-        tuple(row[:3]) + ("integer",) + tuple(row[4:]) for row in columns
+        tuple(row[:3]) + ("integer",) + tuple(row[4:])
+        if row[1] == "employee"
+        else row
+        for row in columns
     ]
     calls: list = []
-    executor, _, _ = _executor(_handler(applied=((1, checksums[1]),), columns=drifted))
+    executor, _, _ = _executor(_handler(applied=((1, checksums[1]), (2, checksums[2])), columns=drifted))
 
     result = executor.verify_schema_locked(
         lambda snapshot: evaluate_migration_state(snapshot, directory),
         catalog_probe=_counting_probe(calls),
     )
 
-    assert result.migration.applied == ((1, checksums[1]),)
+    assert result.migration.applied == ((1, checksums[1]), (2, checksums[2]))
     assert result.physical.status is CompatibilityStatus.INCOMPATIBLE
     assert SCHEMA_COLUMN_TYPE_MISMATCH in result.physical.codes
 

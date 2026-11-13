@@ -3,6 +3,66 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 51 — Phase 5 P5.2: identity data model and persistence (2026-11-13)
+
+**Offline implementation only. No database connection, no `.env`/secret, no
+dependency install, no auth behaviour, no frontend change, no Git mutation.**
+
+* **Baseline**: branch `main`, HEAD `8542832` (`854283281a95d7c5a0d47837249d91729a3b8484`)
+  with a clean working tree.
+* **Migration `V002__security.sql`** — two tables in one transaction:
+  `app_user(user_id PK, username, username_key UNIQUE, password_hash, role
+  CHECK IN ('Admin','HR Manager','Operator','Auditor'), is_active DEFAULT TRUE,
+  created_at, updated_at)` and `user_session(session_token_hash CHAR(64) PK,
+  user_id FK → app_user, issued_at, expires_at, absolute_expires_at,
+  revoked_at NULL, last_seen_at)`. Timestamps are application-authored (no
+  database defaults); indexes on `user_session.user_id` (revoke-all) and
+  `user_session.expires_at` (expiry sweeps) are justified in the file; the
+  foreign key has no cascade because accounts are deactivated, not deleted.
+  `V001` is untouched; the migration-set digest is re-pinned in the contract.
+* **Models** — `src/user.py` (`Role`, `User`, `normalize_username`,
+  `username_key_for`, `UserValidationError`; NFKC → trim → collapse whitespace,
+  casefold key, 3–64 characters, control characters rejected, `password_hash`
+  excluded from `repr`) and `src/user_session.py` (`UserSession`,
+  `is_valid_session_token_hash`, `SessionValidationError`; 64 lowercase hex).
+* **Repositories** — `src/user_repository.py` (create, find-by-username,
+  find-by-id, bounded list, update-role, update-active) and
+  `src/session_repository.py` (insert, find, touch, revoke, revoke-all), with
+  typed errors (`UserAlreadyExists`, `UserNotFound`, `SessionAlreadyExists`,
+  `SessionNotFound`, `SessionUserNotFound`) and exclusively parameterised SQL.
+  `src/db_security_repository.py` scopes one connection per operation with
+  commit/rollback/close. `src/config.py` gains `USER_PAGINATION` (default 50,
+  maximum 100) so listing cannot be unbounded.
+* **Schema contract** — `app_user` and `user_session` declared,
+  `CONTRACT_MIGRATION_VERSION = 2`, required order `employee`, `app_user`,
+  `user_session`, `schema_version`, new digest. The contract can express tables,
+  columns and primary keys only, so the unique constraint, foreign key, role
+  `CHECK` and indexes are asserted against the V002 text in
+  `tests/test_migration_v002.py` and documented as a limitation.
+* **Tests** — new offline suites `tests/test_user.py`,
+  `tests/test_user_session.py`, `tests/test_user_repository.py`,
+  `tests/test_session_repository.py`, `tests/test_db_security_repository.py`,
+  `tests/test_migration_v002.py` and the shared fake in
+  `tests/security_support.py`; the schema-contract, physical-schema, negative
+  schema, provisioning, API-gate, startup and migration-executor/CLI suites now
+  model two migrations and four contracted tables.
+* **Docs** — `docs/PHASE5_IMPLEMENTATION_PLAN.md`, `CHANGELOG.md`,
+  `DB_DESIGN.md` §12 and this record.
+
+**Verified**
+
+* Full offline suite: `.venv/Scripts/python.exe -m pytest tests/ -q` →
+  **2450 passed, 32 skipped**, exit 0.
+* `git diff --check` clean; `git status --short` lists only the intended files.
+
+**Not verified**
+
+* `V002__security.sql` was never applied to PostgreSQL; foreign-key/`CHECK`
+  behaviour, index plans and real collation are unverified.
+* No repository was run against a live database or connection pool.
+* No password hashing, session issuance, login endpoint, authentication
+  dependency or RBAC exists yet — P5.3 has not started.
+
 ## Step 50 — Phase 4 P4.9: final regression and Phase 4 acceptance (2026-11-12)
 
 **Final verification and acceptance review. No application source, test, proxy

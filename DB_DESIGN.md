@@ -1205,3 +1205,70 @@ Uvicorn, release of the guard on refusal, that the production default is
 the real verifier (no bypass), and the runner's exit codes `0`/`3`/`4` with
 sanitized stderr. `ATTENDANCE_DATABASE_URL` was not contacted: no live
 application-database startup verification has been performed.
+
+## 12. Phase 5 P5.2 — identity schema (V002, implemented offline)
+
+`migrations/V002__security.sql` adds two tables. It runs in a single
+transaction, follows the V001 conventions (explicit `public.` qualification,
+no `IF NOT EXISTS`, no database defaults for timestamps) and leaves `employee`,
+its guard and the attendance journal untouched.
+
+### 12.1 `app_user`
+
+| Column | Type | Constraints |
+| --- | --- | --- |
+| `user_id` | `text` | primary key |
+| `username` | `text` | not null (display form, case preserved) |
+| `username_key` | `text` | not null, unique (`app_user_username_key_key`) |
+| `password_hash` | `text` | not null, opaque until P5.3 |
+| `role` | `text` | not null, `CHECK` in `Admin`/`HR Manager`/`Operator`/`Auditor` |
+| `is_active` | `boolean` | not null, default `TRUE` |
+| `created_at` | `timestamptz` | not null, application-authored |
+| `updated_at` | `timestamptz` | not null, application-authored |
+
+Usernames are normalised in the application (NFKC → trim → collapse internal
+whitespace) and compared through `username_key`, the casefold of the display
+form. The unique index on `username_key` is therefore the real identity
+constraint; `user_id` is an opaque surrogate the application mints.
+
+The role `CHECK` is the only database-level authorization fact. Permission
+decisions per endpoint belong to P5.6.
+
+### 12.2 `user_session`
+
+| Column | Type | Constraints |
+| --- | --- | --- |
+| `session_token_hash` | `character(64)` | primary key (SHA-256 hex) |
+| `user_id` | `text` | not null, `REFERENCES app_user(user_id)` |
+| `issued_at` | `timestamptz` | not null, application-authored |
+| `expires_at` | `timestamptz` | not null (sliding expiry) |
+| `absolute_expires_at` | `timestamptz` | not null (immutable cap) |
+| `revoked_at` | `timestamptz` | nullable (set on revoke) |
+| `last_seen_at` | `timestamptz` | not null (activity tracking) |
+
+Only the hash of a session token is stored. The plaintext token never reaches
+the database, a log line or an exception message; hashing and issuance are
+P5.4.
+
+Indexes: `user_session_pkey` (primary key),
+`user_session_user_id_idx` (revoke-all and per-user lookups, which the foreign
+key alone does not serve) and `user_session_expires_at_idx` (expiry sweeps).
+The foreign key has **no** `ON DELETE CASCADE` — accounts are deactivated with
+`is_active`, never deleted, so session history is not silently dropped.
+
+### 12.3 Contract and verification status
+
+`src/schema_contract.py` declares both tables, their columns and primary keys,
+`CONTRACT_MIGRATION_VERSION = 2`, and the required-table order `employee`,
+`app_user`, `user_session`, `schema_version`. The contract cannot express
+unique constraints, foreign keys, `CHECK`s or secondary indexes (the S3 reader
+has no `secondary_indexes` fact), so those are asserted against the migration
+text in `tests/test_migration_v002.py`; this is a documented contract
+limitation, not a relaxed gate.
+
+Offline verification only. `V002` has not been applied to any PostgreSQL
+instance, and the repositories (`src/user_repository.py`,
+`src/session_repository.py`, wired by `src/db_security_repository.py`) have
+not been exercised against a live database. Foreign-key enforcement, `CHECK`
+enforcement, index plans and case-insensitive uniqueness under the real
+collation remain unverified until a separately authorized run.

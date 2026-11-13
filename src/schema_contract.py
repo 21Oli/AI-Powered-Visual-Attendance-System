@@ -3,7 +3,7 @@
 G2 (:mod:`src.startup_schema`) proves that the database's *migration history*
 matches the shipped migration files, and inspects no physical object of its
 own. G8 closes that gap and is enforced at startup alongside G2: a database
-whose ledger says ``V001`` while ``employee`` has the wrong types, a missing
+whose ledger says ``V002`` while ``employee`` has the wrong types, a missing
 primary key, or a ``created_at`` default is refused at startup rather than
 served.
 
@@ -91,6 +91,8 @@ from typing import Final
 __all__ = [
     "CONTRACT_MIGRATION_VERSION",
     "EMPLOYEE_TABLE",
+    "APP_USER_TABLE",
+    "USER_SESSION_TABLE",
     "LEDGER_TABLE",
     "MIGRATION_SET_DIGEST",
     "PROHIBITED_TABLE_NAMES",
@@ -261,8 +263,138 @@ LEDGER_TABLE: Final[TableContract] = TableContract(
     primary_key=("version",),
 )
 
+#: ``public.app_user`` — Phase 5 identity metadata
+#: (``migrations/V002__security.sql``, ``src/user_repository.py``).
+#:
+#: ``username_key`` is the deterministic casefolded lookup form derived from
+#: the displayed ``username``; its UNIQUE constraint lives in the migration
+#: (this contract models columns, primary keys and no defaults, so uniqueness,
+#: the role ``CHECK`` and the session foreign key are PostgreSQL-enforced but
+#: not re-verified by the G8 physical gate — a documented limitation).
+#:
+#: Timestamps are application-authored: ``created_at``/``updated_at`` must have
+#: **no** database default, matching the V001 convention.
+APP_USER_TABLE: Final[TableContract] = TableContract(
+    name="app_user",
+    columns=(
+        ColumnContract(
+            name="user_id",
+            pg_type="text",
+            nullable=False,
+            default=ColumnDefault.NONE,
+        ),
+        ColumnContract(
+            name="username",
+            pg_type="text",
+            nullable=False,
+            default=ColumnDefault.NONE,
+        ),
+        ColumnContract(
+            name="username_key",
+            pg_type="text",
+            nullable=False,
+            default=ColumnDefault.NONE,
+        ),
+        ColumnContract(
+            name="password_hash",
+            pg_type="text",
+            nullable=False,
+            default=ColumnDefault.NONE,
+        ),
+        ColumnContract(
+            name="role",
+            pg_type="text",
+            nullable=False,
+            default=ColumnDefault.NONE,
+        ),
+        ColumnContract(
+            name="is_active",
+            pg_type="boolean",
+            nullable=False,
+            default=ColumnDefault.TRUE,
+        ),
+        ColumnContract(
+            name="created_at",
+            pg_type="timestamp with time zone",
+            nullable=False,
+            default=ColumnDefault.NONE,
+        ),
+        ColumnContract(
+            name="updated_at",
+            pg_type="timestamp with time zone",
+            nullable=False,
+            default=ColumnDefault.NONE,
+        ),
+    ),
+    primary_key=("user_id",),
+)
+
+#: ``public.user_session`` — Phase 5 server-side sessions
+#: (``migrations/V002__security.sql``, ``src/session_repository.py``).
+#:
+#: Only the SHA-256 hex digest of the opaque token is stored
+#: (``character(64)`` — PostgreSQL's canonical spelling for ``CHAR(64)``).
+#: ``revoked_at`` is the one nullable column. No timestamp carries a default.
+#: Secondary indexes are not declared here because the G8 evaluator refuses
+#: index requirements (it cannot distinguish key from ``INCLUDE`` columns);
+#: V002 still creates the two maintenance indexes, asserted offline.
+USER_SESSION_TABLE: Final[TableContract] = TableContract(
+    name="user_session",
+    columns=(
+        ColumnContract(
+            name="session_token_hash",
+            pg_type="character(64)",
+            nullable=False,
+            default=ColumnDefault.NONE,
+        ),
+        ColumnContract(
+            name="user_id",
+            pg_type="text",
+            nullable=False,
+            default=ColumnDefault.NONE,
+        ),
+        ColumnContract(
+            name="issued_at",
+            pg_type="timestamp with time zone",
+            nullable=False,
+            default=ColumnDefault.NONE,
+        ),
+        ColumnContract(
+            name="expires_at",
+            pg_type="timestamp with time zone",
+            nullable=False,
+            default=ColumnDefault.NONE,
+        ),
+        ColumnContract(
+            name="absolute_expires_at",
+            pg_type="timestamp with time zone",
+            nullable=False,
+            default=ColumnDefault.NONE,
+        ),
+        ColumnContract(
+            name="revoked_at",
+            pg_type="timestamp with time zone",
+            nullable=True,
+            default=ColumnDefault.NONE,
+        ),
+        ColumnContract(
+            name="last_seen_at",
+            pg_type="timestamp with time zone",
+            nullable=False,
+            default=ColumnDefault.NONE,
+        ),
+    ),
+    primary_key=("session_token_hash",),
+)
+
+
 #: Every table the application itself requires, in review order.
-REQUIRED_TABLES: Final[tuple[TableContract, ...]] = (EMPLOYEE_TABLE, LEDGER_TABLE)
+REQUIRED_TABLES: Final[tuple[TableContract, ...]] = (
+    EMPLOYEE_TABLE,
+    APP_USER_TABLE,
+    USER_SESSION_TABLE,
+    LEDGER_TABLE,
+)
 
 #: Lookup by unqualified table name. ``MappingProxyType`` keeps the mapping
 #: immutable without a custom class.
@@ -392,7 +524,7 @@ def is_prohibited_table_name(table_name: str) -> bool:
 #: Highest shipped migration version this contract describes. Must equal the
 #: highest ``V<N>`` in ``migrations/`` — a new migration without a contract
 #: update fails offline.
-CONTRACT_MIGRATION_VERSION: Final[int] = 1
+CONTRACT_MIGRATION_VERSION: Final[int] = 2
 
 #: SHA-256 of the canonical migration-set listing, pinned as a literal.
 #:
@@ -404,15 +536,16 @@ CONTRACT_MIGRATION_VERSION: Final[int] = 1
 #: version, render one line per script as ``V<version>:<checksum>``, join the
 #: lines with ``"\n"`` (no trailing newline), and SHA-256 the UTF-8 bytes.
 #:
-#: For the current single-script set that payload is one line::
+#: For the current two-script set that payload is::
 #:
 #:     V1:9e6ac6b5d1e0fd016a99c007ec5b91070dd480853d54d37cdab5b069dd2deac9
+#:     V2:35bc00cd7a947a9eca31a7502d3a17e0ff55163f1c5222cf8fcb88a6328082d3
 #:
 #: Because entries are sorted by version, discovery order cannot affect the
 #: digest; because each entry carries both version and content checksum,
 #: swapping content between versions (a rename/reorder) does change it.
 MIGRATION_SET_DIGEST: Final[str] = (
-    "dcf2ed2ca62bc3a8a8cb741adf7446cfc84a43c83d329b5dc5e1c1059748f63c"
+    "45625084c670137b6221af31b70c3e07c8dd53342d90811bdd70b4664a128cd9"
 )
 
 

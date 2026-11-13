@@ -138,6 +138,13 @@ def _healthy_rows():
     relations = [
         ("public", "employee", "r"),
         ("public", "employee_pkey", "i"),
+        ("public", "app_user", "r"),
+        ("public", "app_user_pkey", "i"),
+        ("public", "app_user_username_key_key", "i"),
+        ("public", "user_session", "r"),
+        ("public", "user_session_pkey", "i"),
+        ("public", "user_session_user_id_idx", "i"),
+        ("public", "user_session_expires_at_idx", "i"),
         ("public", "schema_version", "r"),
         ("public", "schema_version_pkey", "i"),
     ]
@@ -155,6 +162,101 @@ def _healthy_rows():
             "",
             "",
             4,
+        ),
+        ("public", "app_user", "user_id", "text", True, None, "", "", 1),
+        ("public", "app_user", "username", "text", True, None, "", "", 2),
+        ("public", "app_user", "username_key", "text", True, None, "", "", 3),
+        ("public", "app_user", "password_hash", "text", True, None, "", "", 4),
+        ("public", "app_user", "role", "text", True, None, "", "", 5),
+        ("public", "app_user", "is_active", "boolean", True, "true", "", "", 6),
+        (
+            "public",
+            "app_user",
+            "created_at",
+            "timestamp with time zone",
+            True,
+            None,
+            "",
+            "",
+            7,
+        ),
+        (
+            "public",
+            "app_user",
+            "updated_at",
+            "timestamp with time zone",
+            True,
+            None,
+            "",
+            "",
+            8,
+        ),
+        (
+            "public",
+            "user_session",
+            "session_token_hash",
+            "character(64)",
+            True,
+            None,
+            "",
+            "",
+            1,
+        ),
+        ("public", "user_session", "user_id", "text", True, None, "", "", 2),
+        (
+            "public",
+            "user_session",
+            "issued_at",
+            "timestamp with time zone",
+            True,
+            None,
+            "",
+            "",
+            3,
+        ),
+        (
+            "public",
+            "user_session",
+            "expires_at",
+            "timestamp with time zone",
+            True,
+            None,
+            "",
+            "",
+            4,
+        ),
+        (
+            "public",
+            "user_session",
+            "absolute_expires_at",
+            "timestamp with time zone",
+            True,
+            None,
+            "",
+            "",
+            5,
+        ),
+        (
+            "public",
+            "user_session",
+            "revoked_at",
+            "timestamp with time zone",
+            False,
+            None,
+            "",
+            "",
+            6,
+        ),
+        (
+            "public",
+            "user_session",
+            "last_seen_at",
+            "timestamp with time zone",
+            True,
+            None,
+            "",
+            "",
+            7,
         ),
         ("public", "schema_version", "version", "integer", True, None, "", "", 1),
         ("public", "schema_version", "checksum", "text", True, None, "", "", 2),
@@ -178,6 +280,22 @@ def _healthy_rows():
             "p",
             "PRIMARY KEY (employee_id)",
             ["employee_id"],
+        ),
+        (
+            "public",
+            "app_user",
+            "app_user_pkey",
+            "p",
+            "PRIMARY KEY (user_id)",
+            ["user_id"],
+        ),
+        (
+            "public",
+            "user_session",
+            "user_session_pkey",
+            "p",
+            "PRIMARY KEY (session_token_hash)",
+            ["session_token_hash"],
         ),
         (
             "public",
@@ -243,7 +361,12 @@ def _handler(
         if label == "shape":
             return list(EXPECTED_SHAPE)
         if label == "tables":
-            return [("employee",), ("schema_version",)]
+            return [
+                ("employee",),
+                ("app_user",),
+                ("user_session",),
+                ("schema_version",),
+            ]
         if label == "applied":
             return list(applied)
         return list(rows.get(label, []))
@@ -269,8 +392,8 @@ def _write_migrations(directory: Path, *versions: int) -> dict[int, str]:
 def _run_gate(
     tmp_path: Path,
     *,
-    versions: tuple[int, ...] = (1,),
-    applied_versions: tuple[int, ...] = (1,),
+    versions: tuple[int, ...] = (1, 2),
+    applied_versions: tuple[int, ...] = (1, 2),
     handler_kwargs: dict | None = None,
 ):
     directory = tmp_path / "migrations"
@@ -308,8 +431,19 @@ def test_compatible_physical_schema_allows_startup(tmp_path: Path) -> None:
 
 
 def test_incompatible_physical_schema_refuses(tmp_path: Path) -> None:
+    """A type drift on the employee table is refused with its finding code.
+
+    Only the employee table is mutated: the identity tables share column
+    names (``created_at``, ``user_id``), so a blanket mutation would produce
+    findings that do not start with ``public.employee``.
+    """
     _, columns, _, _ = _healthy_rows()
-    drifted = [tuple(row[:3]) + ("integer",) + tuple(row[4:]) for row in columns]
+    drifted = [
+        tuple(row[:3]) + ("integer",) + tuple(row[4:])
+        if row[1] == "employee"
+        else row
+        for row in columns
+    ]
     with pytest.raises(StartupSchemaError) as excinfo:
         _run_gate(tmp_path, handler_kwargs={"columns": drifted})
     error = excinfo.value

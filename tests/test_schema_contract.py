@@ -26,9 +26,11 @@ import src.schema_contract as contract
 from src.db_migrate import LEDGER_TABLE as MIGRATION_LEDGER_TABLE
 from src.db_migrate import load_migrations
 from src.schema_contract import (
+    APP_USER_TABLE,
     CONTRACT_MIGRATION_VERSION,
     EMPLOYEE_TABLE,
     LEDGER_TABLE,
+    USER_SESSION_TABLE,
     MIGRATION_SET_DIGEST,
     PROHIBITED_TABLE_NAMES,
     PROHIBITED_TABLE_PATTERNS,
@@ -46,14 +48,15 @@ from src.schema_contract import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-#: Hard-coded: SHA-256 of the single canonical line
-#: ``V1:9e6ac6b5d1e0fd016a99c007ec5b91070dd480853d54d37cdab5b069dd2deac9``
-#: (the shipped ``migrations/V001__employee.sql`` checksum as the existing
-#: loader derives it). Never computed from the repository here.
-PINNED_DIGEST = "dcf2ed2ca62bc3a8a8cb741adf7446cfc84a43c83d329b5dc5e1c1059748f63c"
+#: Hard-coded: SHA-256 of the two canonical lines
+#: ``V1:9e6ac6b5d1e0fd016a99c007ec5b91070dd480853d54d37cdab5b069dd2deac9`` and
+#: ``V2:35bc00cd7a947a9eca31a7502d3a17e0ff55163f1c5222cf8fcb88a6328082d3``
+#: (the shipped V001/V002 checksums as the existing loader derives them).
+#: Never computed from the repository here.
+PINNED_DIGEST = "45625084c670137b6221af31b70c3e07c8dd53342d90811bdd70b4664a128cd9"
 
-#: Hard-coded: ``migrations/`` ships exactly one migration, ``V001``.
-PINNED_VERSION = 1
+#: Hard-coded: ``migrations/`` ships exactly two migrations, ``V001`` and ``V002``.
+PINNED_VERSION = 2
 
 
 def _shipped_entries() -> list[tuple[int, str]]:
@@ -70,13 +73,22 @@ def test_contract_targets_the_public_schema() -> None:
     assert TARGET_SCHEMA == "public"
 
 
-def test_contract_declares_exactly_the_two_application_tables() -> None:
+def test_contract_declares_exactly_the_four_application_tables() -> None:
     assert tuple(table.name for table in REQUIRED_TABLES) == (
         "employee",
+        "app_user",
+        "user_session",
         "schema_version",
     )
-    assert set(REQUIRED_TABLES_BY_NAME) == {"employee", "schema_version"}
+    assert set(REQUIRED_TABLES_BY_NAME) == {
+        "employee",
+        "app_user",
+        "user_session",
+        "schema_version",
+    }
     assert REQUIRED_TABLES_BY_NAME["employee"] is EMPLOYEE_TABLE
+    assert REQUIRED_TABLES_BY_NAME["app_user"] is APP_USER_TABLE
+    assert REQUIRED_TABLES_BY_NAME["user_session"] is USER_SESSION_TABLE
     assert REQUIRED_TABLES_BY_NAME["schema_version"] is LEDGER_TABLE
 
 
@@ -126,11 +138,14 @@ def test_contract_ledger_name_matches_the_migration_ledger() -> None:
 
 
 def test_no_secondary_index_is_required() -> None:
-    """Documented decision: the primary-key index serves every repository query.
+    """The G8 evaluator refuses index requirements, so none is declared.
 
-    An inventarised requirement would refuse a harmless index removal or
-    addition, so ``secondary_indexes`` stays empty until repository evidence
-    demands one.
+    ``src.physical_schema`` cannot distinguish key columns from ``INCLUDE``
+    columns (S2's documented limitation), so the contract declares no
+    secondary index even though V002 creates two maintenance indexes on
+    ``user_session``. Those indexes are asserted against the migration text in
+    ``tests/test_migration_v002.py`` instead of inventing an unenforceable
+    requirement here.
     """
     for table in REQUIRED_TABLES:
         assert table.secondary_indexes == ()
@@ -142,7 +157,13 @@ def test_contract_migration_version_is_pinned() -> None:
 
 def test_all_declared_types_are_canonical_catalog_spellings() -> None:
     """``format_type`` spellings only — never ``information_schema`` aliases."""
-    allowed = {"text", "boolean", "integer", "timestamp with time zone"}
+    allowed = {
+        "text",
+        "boolean",
+        "integer",
+        "timestamp with time zone",
+        "character(64)",
+    }
     for table in REQUIRED_TABLES:
         for column in table.columns:
             assert column.pg_type in allowed, column
@@ -413,7 +434,8 @@ def test_import_hygiene_fresh_process() -> None:
         "loaded = banned & set(sys.modules);"
         "assert not loaded, f'unexpected imports: {loaded}';"
         "from src.schema_contract import REQUIRED_TABLES as t;"
-        "assert [x.name for x in t] == ['employee', 'schema_version'], t;"
+        "assert [x.name for x in t] == ['employee', 'app_user', 'user_session', "
+        "'schema_version'], t;"
         "print('OK')"
     )
     result = subprocess.run(
@@ -435,11 +457,17 @@ def test_contract_holds_no_employee_or_biometric_values() -> None:
         for table in REQUIRED_TABLES
         for column in table.columns
     }
-    assert declared_types <= {"text", "boolean", "integer", "timestamp with time zone"}
+    assert declared_types <= {
+        "text",
+        "boolean",
+        "integer",
+        "timestamp with time zone",
+        "character(64)",
+    }
     assert not declared_types & {"bytea", "jsonb", "json", "vector", "real[]"}
 
 
-def test_tables_are_only_the_approved_two() -> None:
+def test_tables_are_only_the_approved_four() -> None:
     """Guard against someone adding an attendance/embedding table to the contract."""
     for table in REQUIRED_TABLES:
         assert not is_prohibited_table_name(table.name), table.name

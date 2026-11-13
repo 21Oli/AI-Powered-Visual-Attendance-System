@@ -26,12 +26,14 @@ from src.db_schema_catalog import CatalogProbeError, CatalogSnapshot, RelationFa
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TOOL_PATH = PROJECT_ROOT / "tools" / "provision_negative_schema_cases.py"
-SHIPPED = {script.version: script.checksum for script in load_migrations()}[1]
+SHIPPED_CHECKSUMS = {script.version: script.checksum for script in load_migrations()}
+SHIPPED = SHIPPED_CHECKSUMS[1]
+SHIPPED_V2 = SHIPPED_CHECKSUMS[2]
 
 _BASELINE_FACTS = s7.MigrationFacts(
     ledger_present=True,
-    applied=((1, SHIPPED),),
-    tables=("employee", "schema_version"),
+    applied=((1, SHIPPED), (2, SHIPPED_V2)),
+    tables=("employee", "app_user", "user_session", "schema_version"),
 )
 
 
@@ -136,7 +138,7 @@ def _environment(
     probe=None,
     reader=None,
     ensure=None,
-    shipped: str = SHIPPED,
+    shipped: dict = SHIPPED_CHECKSUMS,
 ) -> tool.ProvisioningEnvironment:
     """Build an environment whose probe/reader ignore connection identity."""
     return tool.ProvisioningEnvironment(
@@ -210,8 +212,14 @@ def test_a_committed_g8_defect_reports_the_declared_codes_and_status() -> None:
     catalog = s7.declared_snapshot(scenario.expected_object_state, declared_by="N09")
     facts = s7.MigrationFacts(
         ledger_present=True,
-        applied=((1, SHIPPED),),
-        tables=("attendance_event", "employee", "schema_version"),
+        applied=((1, SHIPPED), (2, SHIPPED_V2)),
+        tables=(
+            "attendance_event",
+            "employee",
+            "app_user",
+            "user_session",
+            "schema_version",
+        ),
     )
     defect = FakeConnection("defect")
     verify = FakeConnection("verify")
@@ -475,8 +483,8 @@ def test_post_commit_verification_mismatch_is_exit_six() -> None:
     # connection then observes a different, wrong state.
     declared_facts = s7.MigrationFacts(
         ledger_present=True,
-        applied=((1, SHIPPED),),
-        tables=("schema_version",),
+        applied=((1, SHIPPED), (2, SHIPPED_V2)),
+        tables=("app_user", "user_session", "schema_version"),
     )
 
     def _probe(connection):
@@ -991,7 +999,7 @@ def test_every_provisionable_migrate_scenario_reaches_ready_through_the_lifecycl
             continue
 
         applied = s7.resolve_expected_applied(
-            scenario.expected_migration_facts, shipped_checksum=SHIPPED
+            scenario.expected_migration_facts, shipped_checksum=SHIPPED_CHECKSUMS
         )
         facts = s7.MigrationFacts(
             ledger_present=scenario.expected_migration_facts.ledger_present,
@@ -1122,7 +1130,9 @@ def test_default_identity_parser_accepts_a_loopback_database() -> None:
 _N01 = s7.scenario_by_id("N01")
 _N01_CATALOG = s7.declared_snapshot(_N01.expected_object_state, declared_by="N01")
 _N01_FACTS = s7.MigrationFacts(
-    ledger_present=True, applied=((1, SHIPPED),), tables=("schema_version",)
+    ledger_present=True,
+    applied=((1, SHIPPED), (2, SHIPPED_V2)),
+    tables=("app_user", "user_session", "schema_version"),
 )
 
 
@@ -1137,7 +1147,7 @@ def _identity_env(
         open_connection=opener,
         catalog_probe=lambda connection: catalog,
         facts_reader=lambda connection: facts,
-        shipped_checksum=SHIPPED,
+        shipped_checksum=SHIPPED_CHECKSUMS,
         target_database=_N01.database_name,
         server_identity_reader=identity_reader,
     )
@@ -1256,14 +1266,20 @@ _N09 = s7.scenario_by_id("N09")
 _N09_CATALOG = s7.declared_snapshot(_N09.expected_object_state, declared_by="N09")
 _N09_FACTS = s7.MigrationFacts(
     ledger_present=True,
-    applied=((1, SHIPPED),),
-    tables=("attendance_event", "employee", "schema_version"),
+    applied=((1, SHIPPED), (2, SHIPPED_V2)),
+    tables=(
+        "attendance_event",
+        "employee",
+        "app_user",
+        "user_session",
+        "schema_version",
+    ),
 )
 
 
 def test_cleanup_plan_is_authorized_in_manifest_order() -> None:
     plan = tool.plan_cleanup(
-        _N09, _N09_CATALOG, _N09_FACTS, shipped_checksum=SHIPPED
+        _N09, _N09_CATALOG, _N09_FACTS, shipped_checksum=SHIPPED_CHECKSUMS
     )
 
     assert plan.authorized is True
@@ -1271,6 +1287,8 @@ def test_cleanup_plan_is_authorized_in_manifest_order() -> None:
     assert plan.state == "expected"
     assert plan.statements == (
         "DROP TABLE public.employee",
+        "DROP TABLE public.user_session",
+        "DROP TABLE public.app_user",
         "DROP TABLE public.schema_version",
         "DROP TABLE public.attendance_event",
     )
@@ -1281,20 +1299,22 @@ def test_cleanup_drops_a_view_before_its_dependency() -> None:
     plan = tool.plan_cleanup(
         _N02,
         catalog,
-        s7.MigrationFacts(True, ((1, SHIPPED),), ("schema_version",)),
-        shipped_checksum=SHIPPED,
+        s7.MigrationFacts(True, ((1, SHIPPED), (2, SHIPPED_V2)), ("schema_version",)),
+        shipped_checksum=SHIPPED_CHECKSUMS,
     )
 
     assert plan.authorized is True
     assert plan.statements == (
         "DROP VIEW public.employee",
+        "DROP TABLE public.user_session",
+        "DROP TABLE public.app_user",
         "DROP TABLE public.schema_version",
     )
 
 
 def test_cleanup_statements_are_never_broad_or_cascading() -> None:
     catalog = s7.declared_snapshot(_N09.expected_object_state, declared_by="N09")
-    plan = tool.plan_cleanup(_N09, catalog, _N09_FACTS, shipped_checksum=SHIPPED)
+    plan = tool.plan_cleanup(_N09, catalog, _N09_FACTS, shipped_checksum=SHIPPED_CHECKSUMS)
     joined = " | ".join(plan.statements).upper()
 
     assert "CASCADE" not in joined
@@ -1312,7 +1332,7 @@ def test_cleanup_refuses_an_unexpected_object() -> None:
         relations=_N09_CATALOG.relations
         + (RelationFact(schema="public", name="notes", kind="r"),),
     )
-    plan = tool.plan_cleanup(_N09, catalog, _N09_FACTS, shipped_checksum=SHIPPED)
+    plan = tool.plan_cleanup(_N09, catalog, _N09_FACTS, shipped_checksum=SHIPPED_CHECKSUMS)
 
     assert plan.authorized is False
     assert plan.refusal == "cleanup_unexpected_object"
@@ -1331,8 +1351,8 @@ def test_cleanup_refuses_a_relation_kind_mismatch() -> None:
     plan = tool.plan_cleanup(
         _N02,
         catalog,
-        s7.MigrationFacts(True, ((1, SHIPPED),), ("schema_version",)),
-        shipped_checksum=SHIPPED,
+        s7.MigrationFacts(True, ((1, SHIPPED), (2, SHIPPED_V2)), ("schema_version",)),
+        shipped_checksum=SHIPPED_CHECKSUMS,
     )
 
     assert plan.authorized is False
@@ -1349,7 +1369,7 @@ def test_cleanup_refuses_a_state_the_scenario_does_not_allow() -> None:
             for column in _N09_CATALOG.columns
         ),
     )
-    plan = tool.plan_cleanup(_N09, catalog, _N09_FACTS, shipped_checksum=SHIPPED)
+    plan = tool.plan_cleanup(_N09, catalog, _N09_FACTS, shipped_checksum=SHIPPED_CHECKSUMS)
 
     assert plan.authorized is False
     assert plan.refusal == "cleanup_state_not_allowed"
@@ -1358,7 +1378,7 @@ def test_cleanup_refuses_a_state_the_scenario_does_not_allow() -> None:
 def test_cleanup_refuses_an_unsupported_manifest_kind() -> None:
     scenario = dc_replace(_N09, cleanup_manifest=(("employee", "X"),))
     plan = tool.plan_cleanup(
-        scenario, _N09_CATALOG, _N09_FACTS, shipped_checksum=SHIPPED
+        scenario, _N09_CATALOG, _N09_FACTS, shipped_checksum=SHIPPED_CHECKSUMS
     )
 
     assert plan.authorized is False
@@ -1379,7 +1399,7 @@ def _cleanup_environment(opener: Opener, mapping):
         open_connection=opener,
         catalog_probe=lambda connection: mapping[connection][0],
         facts_reader=lambda connection: mapping[connection][1],
-        shipped_checksum=SHIPPED,
+        shipped_checksum=SHIPPED_CHECKSUMS,
     )
 
 
@@ -1390,7 +1410,7 @@ def test_cleanup_drops_only_the_manifest_and_verifies_the_empty_state() -> None:
     verify = FakeConnection("verify")
     empty_catalog, empty_facts = _empty()
     mapping = {
-        classify: (declared, s7.MigrationFacts(True, ((1, SHIPPED),), ("schema_version",))),
+        classify: (declared, s7.MigrationFacts(True, ((1, SHIPPED), (2, SHIPPED_V2)), ("schema_version",))),
         drop: (empty_catalog, empty_facts),
         verify: (empty_catalog, empty_facts),
     }
@@ -1404,6 +1424,8 @@ def test_cleanup_drops_only_the_manifest_and_verifies_the_empty_state() -> None:
     assert result.recovery is tool.Recovery.EXPECTED_COMMITTED
     assert drop.statements == list(tool.SESSION_GUARDS) + [
         "DROP VIEW public.employee",
+        "DROP TABLE public.user_session",
+        "DROP TABLE public.app_user",
         "DROP TABLE public.schema_version",
     ]
     assert drop.commits == 1 and drop.rollbacks == 0 and drop.closed == 1
@@ -1454,6 +1476,8 @@ def test_cleanup_from_the_ledger_only_state_is_partial_recovery() -> None:
     assert result.cleanup is not None
     assert result.cleanup.already_absent == (
         ("employee", "r"),
+        ("user_session", "r"),
+        ("app_user", "r"),
         ("attendance_event", "r"),
     )
 
@@ -1478,7 +1502,7 @@ def test_cleanup_with_an_unreadable_ledger_is_refused() -> None:
         open_connection=Opener(classify),
         catalog_probe=lambda connection: _empty_catalog(),
         facts_reader=_reader,
-        shipped_checksum=SHIPPED,
+        shipped_checksum=SHIPPED_CHECKSUMS,
     )
     result = tool.run_cleanup(_N09, environment)
 
@@ -1494,7 +1518,7 @@ def test_cleanup_commit_failure_is_unconfirmed() -> None:
     drop = FakeConnection("drop", commit_error=True)
     empty_catalog, empty_facts = _empty()
     mapping = {
-        classify: (declared, s7.MigrationFacts(True, ((1, SHIPPED),), ("schema_version",))),
+        classify: (declared, s7.MigrationFacts(True, ((1, SHIPPED), (2, SHIPPED_V2)), ("schema_version",))),
         drop: (empty_catalog, empty_facts),
     }
     opener = Opener(classify, drop)
@@ -1515,9 +1539,9 @@ def test_cleanup_post_commit_mismatch_is_exit_six() -> None:
     verify = FakeConnection("verify")
     empty_catalog, empty_facts = _empty()
     mapping = {
-        classify: (declared, s7.MigrationFacts(True, ((1, SHIPPED),), ("schema_version",))),
+        classify: (declared, s7.MigrationFacts(True, ((1, SHIPPED), (2, SHIPPED_V2)), ("schema_version",))),
         drop: (empty_catalog, empty_facts),
-        verify: (declared, s7.MigrationFacts(True, ((1, SHIPPED),), ("schema_version",))),
+        verify: (declared, s7.MigrationFacts(True, ((1, SHIPPED), (2, SHIPPED_V2)), ("schema_version",))),
     }
 
     result = tool.run_cleanup(
@@ -1642,7 +1666,7 @@ def test_report_carries_the_cleanup_decision() -> None:
     verify = FakeConnection("verify")
     empty_catalog, empty_facts = _empty()
     mapping = {
-        classify: (declared, s7.MigrationFacts(True, ((1, SHIPPED),), ("schema_version",))),
+        classify: (declared, s7.MigrationFacts(True, ((1, SHIPPED), (2, SHIPPED_V2)), ("schema_version",))),
         drop: (empty_catalog, empty_facts),
         verify: (empty_catalog, empty_facts),
     }
@@ -1652,7 +1676,7 @@ def test_report_carries_the_cleanup_decision() -> None:
     document = tool.build_report(result, _N02, timestamp=_FIXED_TIME)
 
     assert document["cleanup"]["authorized"] is True
-    assert document["cleanup"]["statements"] == 2
+    assert document["cleanup"]["statements"] == 4
     assert document["cleanup"]["state"] == "expected"
 
 
@@ -1719,7 +1743,7 @@ def test_cli_cleanup_writes_reports_with_an_injected_environment(
     verify = FakeConnection("verify")
     empty_catalog, empty_facts = _empty()
     mapping = {
-        classify: (declared, s7.MigrationFacts(True, ((1, SHIPPED),), ("schema_version",))),
+        classify: (declared, s7.MigrationFacts(True, ((1, SHIPPED), (2, SHIPPED_V2)), ("schema_version",))),
         drop: (empty_catalog, empty_facts),
         verify: (empty_catalog, empty_facts),
     }

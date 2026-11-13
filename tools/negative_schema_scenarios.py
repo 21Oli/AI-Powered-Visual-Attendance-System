@@ -59,6 +59,7 @@ this module reads no ``.env`` and establishes no database surface.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final
@@ -289,7 +290,23 @@ def _state(
     indexes: tuple[ExpectedIndex, ...],
     sequences: tuple[ExpectedSequence, ...] = (),
 ) -> ExpectedObjectState:
-    """Freeze one state with its components in canonical order."""
+    """Freeze one state with its components in canonical order.
+
+    The Phase 5 identity tables (:data:`_SECURITY_TABLES`) are invariant across
+    every scenario in this matrix: no scenario in the approved negative set
+    alters or drops ``app_user`` or ``user_session``. When a declared state
+    includes both tables, their columns, primary keys and primary-key indexes
+    are merged in centrally, so each scenario declares only its deliberate
+    defect and the two declarations cannot drift apart.
+    """
+    declared_names = {name for name, _kind in relations}
+    if set(_SECURITY_TABLES) <= declared_names:
+        columns = tuple(columns) + tuple(
+            column for column in _security_columns()
+            if column.table in declared_names
+        )
+        constraints = tuple(constraints) + _SECURITY_CONSTRAINTS
+        indexes = tuple(indexes) + _SECURITY_INDEXES
     return ExpectedObjectState(
         relations=tuple(sorted(relations)),
         columns=tuple(sorted(columns, key=lambda column: (column.table, column.ordinal))),
@@ -418,10 +435,86 @@ def _primary_key_index(table: str, columns: tuple[str, ...]) -> ExpectedIndex:
 
 EMPLOYEE_PRIMARY_KEY: Final[tuple[str, ...]] = ("employee_id",)
 LEDGER_PRIMARY_KEY: Final[tuple[str, ...]] = ("version",)
+APP_USER_PRIMARY_KEY: Final[tuple[str, ...]] = ("user_id",)
+USER_SESSION_PRIMARY_KEY: Final[tuple[str, ...]] = ("session_token_hash",)
+
+#: The P5.2 identity tables. They are never the subject of a scenario in the
+#: approved negative matrix, so :func:`_state` merges their facts centrally.
+_SECURITY_TABLES: Final[tuple[str, ...]] = ("app_user", "user_session")
+
+
+def _security_columns() -> tuple[ExpectedColumn, ...]:
+    """The declared ``app_user`` and ``user_session`` columns (V002).
+
+    Mirrors ``migrations/V002__security.sql``: no timestamp default anywhere,
+    ``is_active`` defaults to true, and ``revoked_at`` is the one nullable
+    column. ``session_token_hash`` is ``character(64)`` — the canonical
+    ``format_type`` spelling of the ``CHAR(64)`` column.
+    """
+    return (
+        ExpectedColumn("app_user", "user_id", 1, "text", False, None),
+        ExpectedColumn("app_user", "username", 2, "text", False, None),
+        ExpectedColumn("app_user", "username_key", 3, "text", False, None),
+        ExpectedColumn("app_user", "password_hash", 4, "text", False, None),
+        ExpectedColumn("app_user", "role", 5, "text", False, None),
+        ExpectedColumn("app_user", "is_active", 6, "boolean", False, "true"),
+        ExpectedColumn(
+            "app_user", "created_at", 7, "timestamp with time zone", False, None
+        ),
+        ExpectedColumn(
+            "app_user", "updated_at", 8, "timestamp with time zone", False, None
+        ),
+        ExpectedColumn(
+            "user_session", "session_token_hash", 1, "character(64)", False, None
+        ),
+        ExpectedColumn("user_session", "user_id", 2, "text", False, None),
+        ExpectedColumn(
+            "user_session", "issued_at", 3, "timestamp with time zone", False, None
+        ),
+        ExpectedColumn(
+            "user_session", "expires_at", 4, "timestamp with time zone", False, None
+        ),
+        ExpectedColumn(
+            "user_session",
+            "absolute_expires_at",
+            5,
+            "timestamp with time zone",
+            False,
+            None,
+        ),
+        ExpectedColumn(
+            "user_session",
+            "revoked_at",
+            6,
+            "timestamp with time zone",
+            True,
+            None,
+        ),
+        ExpectedColumn(
+            "user_session", "last_seen_at", 7, "timestamp with time zone", False, None
+        ),
+    )
+
+
+_SECURITY_CONSTRAINTS: Final[tuple[ExpectedConstraint, ...]] = (
+    _primary_key("app_user", APP_USER_PRIMARY_KEY),
+    _primary_key("user_session", USER_SESSION_PRIMARY_KEY),
+)
+_SECURITY_INDEXES: Final[tuple[ExpectedIndex, ...]] = (
+    _primary_key_index("app_user", APP_USER_PRIMARY_KEY),
+    _primary_key_index("user_session", USER_SESSION_PRIMARY_KEY),
+)
 
 _BASELINE_RELATIONS: Final[tuple[tuple[str, str], ...]] = (
     ("employee", "r"),
     ("employee_pkey", "i"),
+    ("app_user", "r"),
+    ("app_user_pkey", "i"),
+    ("app_user_username_key_key", "i"),
+    ("user_session", "r"),
+    ("user_session_pkey", "i"),
+    ("user_session_user_id_idx", "i"),
+    ("user_session_expires_at_idx", "i"),
     ("schema_version", "r"),
     ("schema_version_pkey", "i"),
 )
@@ -451,12 +544,17 @@ LEDGER_ONLY_STATE: Final[ExpectedObjectState] = _state(
 #: The state ``baseline_mode='none'`` produces (``G01``): nothing at all.
 EMPTY_STATE: Final[ExpectedObjectState] = ExpectedObjectState()
 
-_BASELINE_TABLES: Final[tuple[str, ...]] = ("employee", "schema_version")
+_BASELINE_TABLES: Final[tuple[str, ...]] = (
+    "employee",
+    "app_user",
+    "user_session",
+    "schema_version",
+)
 
-#: The G2 facts of a correct baseline.
+#: The G2 facts of a correct baseline: both shipped migrations applied.
 BASELINE_MIGRATION_FACTS: Final[ExpectedMigrationFacts] = ExpectedMigrationFacts(
     ledger_present=True,
-    applied=((1, SHIPPED_CHECKSUM_TOKEN),),
+    applied=((1, SHIPPED_CHECKSUM_TOKEN), (2, SHIPPED_CHECKSUM_TOKEN)),
     tables=_BASELINE_TABLES,
 )
 
@@ -470,6 +568,10 @@ _NO_BASELINE_RECOVERY: Final[tuple[str, ...]] = (STATE_EMPTY,)
 
 _G8_BASELINE_CLEANUP: Final[tuple[tuple[str, str], ...]] = (
     ("employee", "r"),
+    # ``user_session`` references ``app_user``, so the session table is
+    # dropped first (no CASCADE is ever used).
+    ("user_session", "r"),
+    ("app_user", "r"),
     ("schema_version", "r"),
 )
 
@@ -629,21 +731,35 @@ _N01 = Scenario(
     baseline_mode="migrate",
     statements=(_DROP_EMPLOYEE,),
     expected_object_state=_state(
-        (("schema_version", "r"), ("schema_version_pkey", "i")),
+        (
+            ("app_user", "r"),
+            ("app_user_pkey", "i"),
+            ("app_user_username_key_key", "i"),
+            ("user_session", "r"),
+            ("user_session_pkey", "i"),
+            ("user_session_user_id_idx", "i"),
+            ("user_session_expires_at_idx", "i"),
+            ("schema_version", "r"),
+            ("schema_version_pkey", "i"),
+        ),
         _ledger_columns(),
         (_primary_key("schema_version", LEDGER_PRIMARY_KEY),),
         (_primary_key_index("schema_version", LEDGER_PRIMARY_KEY),),
     ),
     expected_migration_facts=ExpectedMigrationFacts(
         ledger_present=True,
-        applied=((1, SHIPPED_CHECKSUM_TOKEN),),
-        tables=("schema_version",),
+        applied=((1, SHIPPED_CHECKSUM_TOKEN), (2, SHIPPED_CHECKSUM_TOKEN)),
+        tables=("app_user", "user_session", "schema_version"),
     ),
     expected_codes=(SCHEMA_TABLE_MISSING,),
     expected_status=CompatibilityStatus.INCOMPATIBLE,
     expected_gate_code=None,
     gate_code_path=None,
-    cleanup_manifest=(("schema_version", "r"),),
+    cleanup_manifest=(
+        ("user_session", "r"),
+        ("app_user", "r"),
+        ("schema_version", "r"),
+    ),
     allowed_recovery_states=_MIGRATE_RECOVERY,
 )
 
@@ -661,6 +777,13 @@ _N02 = Scenario(
     expected_object_state=_state(
         (
             ("employee", "v"),
+            ("app_user", "r"),
+            ("app_user_pkey", "i"),
+            ("app_user_username_key_key", "i"),
+            ("user_session", "r"),
+            ("user_session_pkey", "i"),
+            ("user_session_user_id_idx", "i"),
+            ("user_session_expires_at_idx", "i"),
             ("schema_version", "r"),
             ("schema_version_pkey", "i"),
         ),
@@ -670,14 +793,19 @@ _N02 = Scenario(
     ),
     expected_migration_facts=ExpectedMigrationFacts(
         ledger_present=True,
-        applied=((1, SHIPPED_CHECKSUM_TOKEN),),
-        tables=("schema_version",),
+        applied=((1, SHIPPED_CHECKSUM_TOKEN), (2, SHIPPED_CHECKSUM_TOKEN)),
+        tables=("app_user", "user_session", "schema_version"),
     ),
     expected_codes=(SCHEMA_TABLE_KIND_MISMATCH,),
     expected_status=CompatibilityStatus.INCOMPATIBLE,
     expected_gate_code=None,
     gate_code_path=None,
-    cleanup_manifest=(("employee", "v"), ("schema_version", "r")),
+    cleanup_manifest=(
+        ("employee", "v"),
+        ("user_session", "r"),
+        ("app_user", "r"),
+        ("schema_version", "r"),
+    ),
     allowed_recovery_states=_MIGRATE_RECOVERY,
 )
 
@@ -887,7 +1015,18 @@ _N08A = Scenario(
     baseline_mode="migrate",
     statements=(_DROP_EMPLOYEE, _CREATE_EMPLOYEE_NO_PRIMARY_KEY),
     expected_object_state=_state(
-        (("employee", "r"), ("schema_version", "r"), ("schema_version_pkey", "i")),
+        (
+            ("employee", "r"),
+            ("app_user", "r"),
+            ("app_user_pkey", "i"),
+            ("app_user_username_key_key", "i"),
+            ("user_session", "r"),
+            ("user_session_pkey", "i"),
+            ("user_session_user_id_idx", "i"),
+            ("user_session_expires_at_idx", "i"),
+            ("schema_version", "r"),
+            ("schema_version_pkey", "i"),
+        ),
         _employee_columns() + _ledger_columns(),
         (_primary_key("schema_version", LEDGER_PRIMARY_KEY),),
         (_primary_key_index("schema_version", LEDGER_PRIMARY_KEY),),
@@ -961,8 +1100,14 @@ _N09 = Scenario(
     ),
     expected_migration_facts=ExpectedMigrationFacts(
         ledger_present=True,
-        applied=((1, SHIPPED_CHECKSUM_TOKEN),),
-        tables=("attendance_event", "employee", "schema_version"),
+        applied=((1, SHIPPED_CHECKSUM_TOKEN), (2, SHIPPED_CHECKSUM_TOKEN)),
+        tables=(
+            "attendance_event",
+            "employee",
+            "app_user",
+            "user_session",
+            "schema_version",
+        ),
     ),
     expected_codes=(SCHEMA_OBJECT_PROHIBITED,),
     expected_status=CompatibilityStatus.INCOMPATIBLE,
@@ -1027,8 +1172,14 @@ _N10 = Scenario(
     ),
     expected_migration_facts=ExpectedMigrationFacts(
         ledger_present=True,
-        applied=((1, SHIPPED_CHECKSUM_TOKEN),),
-        tables=("employee", "face_embeddings", "schema_version"),
+        applied=((1, SHIPPED_CHECKSUM_TOKEN), (2, SHIPPED_CHECKSUM_TOKEN)),
+        tables=(
+            "employee",
+            "face_embeddings",
+            "app_user",
+            "user_session",
+            "schema_version",
+        ),
     ),
     expected_codes=(SCHEMA_OBJECT_PROHIBITED,),
     expected_status=CompatibilityStatus.INCOMPATIBLE,
@@ -1046,7 +1197,18 @@ _N11 = Scenario(
     baseline_mode="migrate",
     statements=(_DROP_EMPLOYEE, _CREATE_EMPLOYEE_ZERO_COLUMNS),
     expected_object_state=_state(
-        (("employee", "r"), ("schema_version", "r"), ("schema_version_pkey", "i")),
+        (
+            ("employee", "r"),
+            ("app_user", "r"),
+            ("app_user_pkey", "i"),
+            ("app_user_username_key_key", "i"),
+            ("user_session", "r"),
+            ("user_session_pkey", "i"),
+            ("user_session_user_id_idx", "i"),
+            ("user_session_expires_at_idx", "i"),
+            ("schema_version", "r"),
+            ("schema_version_pkey", "i"),
+        ),
         _ledger_columns(),
         (_primary_key("schema_version", LEDGER_PRIMARY_KEY),),
         (_primary_key_index("schema_version", LEDGER_PRIMARY_KEY),),
@@ -1075,6 +1237,13 @@ _N12 = Scenario(
         (
             ("employee", "p"),
             ("employee_pkey", "I"),
+            ("app_user", "r"),
+            ("app_user_pkey", "i"),
+            ("app_user_username_key_key", "i"),
+            ("user_session", "r"),
+            ("user_session_pkey", "i"),
+            ("user_session_user_id_idx", "i"),
+            ("user_session_expires_at_idx", "i"),
             ("schema_version", "r"),
             ("schema_version_pkey", "i"),
         ),
@@ -1209,8 +1378,14 @@ _N15 = Scenario(
     ),
     expected_migration_facts=ExpectedMigrationFacts(
         ledger_present=True,
-        applied=((1, SHIPPED_CHECKSUM_TOKEN),),
-        tables=("_phase3_test_guard", "employee", "schema_version"),
+        applied=((1, SHIPPED_CHECKSUM_TOKEN), (2, SHIPPED_CHECKSUM_TOKEN)),
+        tables=(
+            "_phase3_test_guard",
+            "employee",
+            "app_user",
+            "user_session",
+            "schema_version",
+        ),
     ),
     expected_codes=(SCHEMA_OBJECT_PROHIBITED,),
     expected_status=CompatibilityStatus.INCOMPATIBLE,
@@ -1273,16 +1448,20 @@ _G03 = Scenario(
     scenario_id="G03",
     layer="G2",
     title="unknown applied version",
-    defect="the ledger records version 2, which ships no script",
+    defect="the ledger records version 3, which ships no script",
     baseline_mode="migrate",
     statements=(
         "INSERT INTO public.schema_version (version, checksum, applied_at) "
-        "VALUES (2, repeat('0', 64), now())",
+        "VALUES (3, repeat('0', 64), now())",
     ),
     expected_object_state=BASELINE_STATE,
     expected_migration_facts=ExpectedMigrationFacts(
         ledger_present=True,
-        applied=((1, SHIPPED_CHECKSUM_TOKEN), (2, ZEROS_CHECKSUM)),
+        applied=(
+            (1, SHIPPED_CHECKSUM_TOKEN),
+            (2, SHIPPED_CHECKSUM_TOKEN),
+            (3, ZEROS_CHECKSUM),
+        ),
         tables=_BASELINE_TABLES,
     ),
     expected_codes=(),
@@ -1357,7 +1536,7 @@ _G05 = Scenario(
     ),
     expected_migration_facts=ExpectedMigrationFacts(
         ledger_present=True,
-        applied=((1, SHIPPED_CHECKSUM_TOKEN),),
+        applied=((1, SHIPPED_CHECKSUM_TOKEN), (2, SHIPPED_CHECKSUM_TOKEN)),
         tables=_BASELINE_TABLES,
     ),
     expected_codes=(),
@@ -1843,15 +2022,32 @@ def compare_object_state(
 def resolve_expected_applied(
     expected: ExpectedMigrationFacts,
     *,
-    shipped_checksum: str,
+    shipped_checksum: str | Mapping[int, str],
 ) -> tuple[tuple[int, str], ...]:
     """Resolve the shipped-checksum token and order the history by version.
+
+    ``shipped_checksum`` is either one checksum (the single-version callers)
+    or a per-version mapping, because the shipped set now contains two
+    migrations with different checksums and ``V1`` and ``V2`` must resolve to
+    their own content digests. A mapping that lacks an entry for a tokenised
+    version is a declaration error and raises ``KeyError`` rather than silently
+    reusing another version's checksum.
 
     The recorded history is compared version-ordered because S2's applied-row
     query has no ``ORDER BY``; row order is never treated as meaning.
     """
+    per_version = shipped_checksum if isinstance(shipped_checksum, Mapping) else None
     resolved = tuple(
-        (version, shipped_checksum if checksum == SHIPPED_CHECKSUM_TOKEN else checksum)
+        (
+            version,
+            (
+                per_version[version]
+                if per_version is not None
+                else shipped_checksum  # type: ignore[assignment]
+            )
+            if checksum == SHIPPED_CHECKSUM_TOKEN
+            else checksum,
+        )
         for version, checksum in expected.applied
     )
     return tuple(sorted(resolved))

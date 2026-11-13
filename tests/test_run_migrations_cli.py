@@ -37,6 +37,7 @@ from src.db_migrate_executor import MigrationDriverError  # noqa: E402
 TARGET = "postgresql://app_user:app-secret@localhost:5432/attendance_app"
 TEST_DSN = "postgresql://tier2_user:tier2-secret@localhost:5432/visual_attendance_tier2_test"
 V001_CHECKSUM = load_migrations()[0].checksum
+V002_CHECKSUM = load_migrations()[1].checksum
 
 
 @pytest.fixture
@@ -58,9 +59,11 @@ def executor_stub(monkeypatch):
     state = SimpleNamespace(
         created=[],
         snapshot=MigrationSnapshot(
-            tables=frozenset({"employee", "schema_version"}),
+            tables=frozenset(
+                {"employee", "app_user", "user_session", "schema_version"}
+            ),
             ledger_present=True,
-            applied=((1, V001_CHECKSUM),),
+            applied=((1, V001_CHECKSUM), (2, V002_CHECKSUM)),
         ),
     )
 
@@ -108,8 +111,8 @@ def test_status_reports_up_to_date_and_is_read_only(settings, executor_stub, cap
 
     captured = capsys.readouterr()
     assert "ledger: present" in captured.out
-    assert "current version: 1" in captured.out
-    assert "applied: 1" in captured.out
+    assert "current version: 2" in captured.out
+    assert "applied: 1, 2" in captured.out
     assert "pending: none" in captured.out
     assert "status: up-to-date" in captured.out
     assert "dbname=attendance_app" in captured.out
@@ -129,7 +132,7 @@ def test_status_on_a_pristine_target_reports_pending(settings, executor_stub, ca
     captured = capsys.readouterr()
     assert "ledger: missing" in captured.out
     assert "current version: 0" in captured.out
-    assert "pending: 1" in captured.out
+    assert "pending: 1, 2" in captured.out
     assert "status: pending" in captured.out
 
 
@@ -140,8 +143,8 @@ def test_status_json_payload(settings, executor_stub, capsys) -> None:
 
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["ledger"] == "present"
-    assert payload["current_version"] == 1
-    assert payload["applied"] == [1]
+    assert payload["current_version"] == 2
+    assert payload["applied"] == [1, 2]
     assert payload["pending"] == []
     assert payload["snapshot"] == "point-in-time"
 

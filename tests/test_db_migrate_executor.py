@@ -524,20 +524,22 @@ def test_read_state_reports_pending_on_a_pristine_target() -> None:
     assert state.ledger_present is False
     assert state.previous_version == 0
     assert state.applied == ()
-    assert state.pending == (1,)
+    assert state.pending == (1, 2)
 
 
-def test_read_state_reports_up_to_date_for_the_real_v001() -> None:
-    script = load_migrations()[0]
+def test_read_state_reports_up_to_date_for_the_shipped_set() -> None:
+    scripts = sorted(load_migrations(), key=lambda script: script.version)
     state = read_state(
         MigrationSnapshot(
-            tables=frozenset({"employee", "schema_version"}),
+            tables=frozenset(
+                {"employee", "app_user", "user_session", "schema_version"}
+            ),
             ledger_present=True,
-            applied=((script.version, script.checksum),),
+            applied=tuple((script.version, script.checksum) for script in scripts),
         )
     )
 
-    assert state.previous_version == 1
+    assert state.previous_version == 2
     assert state.pending == ()
 
 

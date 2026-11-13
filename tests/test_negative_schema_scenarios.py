@@ -48,7 +48,9 @@ from tools import negative_schema_scenarios as s7
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = PROJECT_ROOT / "tools" / "negative_schema_scenarios.py"
 
-SHIPPED_CHECKSUM = {script.version: script.checksum for script in load_migrations()}[1]
+SHIPPED_CHECKSUMS = {script.version: script.checksum for script in load_migrations()}
+SHIPPED_CHECKSUM = SHIPPED_CHECKSUMS[1]
+SHIPPED_CHECKSUM_V2 = SHIPPED_CHECKSUMS[2]
 
 APP_DSN = "postgresql://app_user:super-secret@localhost:5432/attendance"
 TEST_DSN = "postgresql://app_user:super-secret@localhost:5432/attendance_test"
@@ -107,7 +109,7 @@ def _facts(expected: s7.ExpectedMigrationFacts) -> s7.MigrationFacts:
     """The observed G2 facts a correct database would report for ``expected``."""
     return s7.MigrationFacts(
         ledger_present=expected.ledger_present,
-        applied=s7.resolve_expected_applied(expected, shipped_checksum=SHIPPED_CHECKSUM),
+        applied=s7.resolve_expected_applied(expected, shipped_checksum=SHIPPED_CHECKSUMS),
         tables=expected.tables,
     )
 
@@ -589,7 +591,7 @@ def test_unmutated_declared_state_compares_equal(scenario):
     migration = s7.compare_migration_facts(
         _facts(scenario.expected_migration_facts),
         scenario.expected_migration_facts,
-        shipped_checksum=SHIPPED_CHECKSUM,
+        shipped_checksum=SHIPPED_CHECKSUMS,
     )
     assert migration.matched is True
 
@@ -760,7 +762,7 @@ def test_g2_cross_check_matches_every_declared_gate_code(scenario):
     snapshot = MigrationSnapshot(
         tables=tuple(facts.tables),
         ledger_present=facts.ledger_present,
-        applied=s7.resolve_expected_applied(facts, shipped_checksum=SHIPPED_CHECKSUM),
+        applied=s7.resolve_expected_applied(facts, shipped_checksum=SHIPPED_CHECKSUMS),
     )
     if scenario.gate_code_path == "ledger_shape":
         # The refusal comes from S4's ledger-shape check inside the read-only
@@ -784,7 +786,7 @@ def test_g2_fact_comparison_rejects_each_wrong_history_dimension():
     expected = s7.scenario_by_id("G03").expected_migration_facts
     good = _facts(expected)
     assert s7.compare_migration_facts(
-        good, expected, shipped_checksum=SHIPPED_CHECKSUM
+        good, expected, shipped_checksum=SHIPPED_CHECKSUMS
     ).matched
 
     wrong_checksum = s7.MigrationFacts(
@@ -793,28 +795,28 @@ def test_g2_fact_comparison_rejects_each_wrong_history_dimension():
         tables=expected.tables,
     )
     assert not s7.compare_migration_facts(
-        wrong_checksum, expected, shipped_checksum=SHIPPED_CHECKSUM
+        wrong_checksum, expected, shipped_checksum=SHIPPED_CHECKSUMS
     ).matched
 
     wrong_ledger = dataclasses.replace(good, ledger_present=False)
     assert not s7.compare_migration_facts(
-        wrong_ledger, expected, shipped_checksum=SHIPPED_CHECKSUM
+        wrong_ledger, expected, shipped_checksum=SHIPPED_CHECKSUMS
     ).matched
 
     wrong_tables = dataclasses.replace(good, tables=("employee",))
     assert not s7.compare_migration_facts(
-        wrong_tables, expected, shipped_checksum=SHIPPED_CHECKSUM
+        wrong_tables, expected, shipped_checksum=SHIPPED_CHECKSUMS
     ).matched
 
 
 def test_g2_history_comparison_is_row_order_independent():
     expected = s7.scenario_by_id("G03").expected_migration_facts
-    resolved = s7.resolve_expected_applied(expected, shipped_checksum=SHIPPED_CHECKSUM)
+    resolved = s7.resolve_expected_applied(expected, shipped_checksum=SHIPPED_CHECKSUMS)
     reordered = s7.MigrationFacts(
         ledger_present=True, applied=tuple(reversed(resolved)), tables=expected.tables
     )
     assert s7.compare_migration_facts(
-        reordered, expected, shipped_checksum=SHIPPED_CHECKSUM
+        reordered, expected, shipped_checksum=SHIPPED_CHECKSUMS
     ).matched
 
 
@@ -831,7 +833,7 @@ def test_classification_names_the_expected_waypoint():
             observed,
             _facts(scenario.expected_migration_facts),
             scenario.expected_object_state,
-            shipped_checksum=SHIPPED_CHECKSUM,
+            shipped_checksum=SHIPPED_CHECKSUMS,
             declared_by="N00",
         )
         == "expected"
@@ -845,7 +847,7 @@ def test_classification_detects_S0_S1_and_unexpected():
             empty,
             s7.MigrationFacts(False, (), ()),
             s7.BASELINE_STATE,
-            shipped_checksum=SHIPPED_CHECKSUM,
+            shipped_checksum=SHIPPED_CHECKSUMS,
         )
         == "S0"
     )
@@ -856,7 +858,7 @@ def test_classification_detects_S0_S1_and_unexpected():
             ledger_only,
             s7.MigrationFacts(True, (), ("schema_version",)),
             s7.BASELINE_STATE,
-            shipped_checksum=SHIPPED_CHECKSUM,
+            shipped_checksum=SHIPPED_CHECKSUMS,
         )
         == "S1"
     )
@@ -867,7 +869,7 @@ def test_classification_detects_S0_S1_and_unexpected():
             damaged,
             s7.MigrationFacts(False, (), ()),
             s7.BASELINE_STATE,
-            shipped_checksum=SHIPPED_CHECKSUM,
+            shipped_checksum=SHIPPED_CHECKSUMS,
         )
         == "unexpected"
     )
@@ -880,7 +882,7 @@ def test_g04b_own_state_classifies_as_expected_not_S1():
             s7.declared_snapshot(scenario.expected_object_state),
             _facts(scenario.expected_migration_facts),
             scenario.expected_object_state,
-            shipped_checksum=SHIPPED_CHECKSUM,
+            shipped_checksum=SHIPPED_CHECKSUMS,
             declared_by="G04b",
         )
         == "expected"
@@ -1084,8 +1086,8 @@ def test_incomplete_declaration_fails_closed_in_every_entry_point():
     observed = s7.declared_snapshot(s7.BASELINE_STATE)
     facts = s7.MigrationFacts(
         ledger_present=True,
-        applied=((1, SHIPPED_CHECKSUM),),
-        tables=("employee", "schema_version"),
+        applied=((1, SHIPPED_CHECKSUM), (2, SHIPPED_CHECKSUM_V2)),
+        tables=("employee", "app_user", "user_session", "schema_version"),
     )
     with pytest.raises(s7.DeclaredStateIncomplete):
         s7.declared_snapshot(
@@ -1100,7 +1102,7 @@ def test_incomplete_declaration_fails_closed_in_every_entry_point():
             observed,
             facts,
             scenario.expected_object_state,
-            shipped_checksum=SHIPPED_CHECKSUM,
+            shipped_checksum=SHIPPED_CHECKSUMS,
             declared_by="N14",
         )
 
