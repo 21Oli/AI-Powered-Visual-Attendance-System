@@ -10,8 +10,8 @@ Updated after every verified step — never ahead of implementation.
 | P5.1 | Inspection, gap analysis and approved decisions | Completed (review, no code) |
 | P5.2 | Identity data model and persistence | Completed (offline) |
 | P5.3 | Authentication primitives | Completed (offline) |
-| P5.4 | Authentication API: session service, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10) | P5.4.1–P5.4.9 completed offline and accepted (committed through `e63d587`); P5.4.10 implemented offline, **awaiting owner review** (unstaged in the working tree) |
-| P5.5 | Audit journal and security-event auditing | Not started — next implementation milestone |
+| P5.4 | Authentication API: session service, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10) | Completed offline through P5.4.10 and accepted (committed through `b0583df`) |
+| P5.5 | Audit journal and security-event auditing | P5.5.1 design complete, **awaiting owner review**; implementation not started — next implementation milestone |
 | P5.6 | User administration and secure first-Admin provisioning | Not started |
 | P5.7 | Frontend authentication and session integration | Not started |
 | P5.8 | Role-aware UI and frontend security hardening | Not started |
@@ -26,10 +26,60 @@ sequence, and the scope formerly grouped as "P5.4.10+" is split into P5.5
 (role-aware UI/hardening) and P5.9 (final review). The Step records below are
 preserved unchanged.
 
+## Step 63 — Phase 5 P5.5.1: audit journal design and decision record (2026-11-14)
+
+**Planning/documentation only. No source code, test, schema, migration,
+dependency or runtime change; no Git operation.**
+
+* **Baseline**: branch `main`, HEAD
+  `b0583dffd4699e21313fa99ca019d1e3ce1fee03` (P5.4.10 + milestone
+  reconciliation, committed and accepted), clean working tree.
+* **Deliverable** — `docs/AUDIT_JOURNAL_DESIGN.md`, the authoritative P5.5
+  decision record: confirmed architecture; exact event schema and closed
+  vocabularies; canonical JSON + SHA-256 rules; global `sequence` versus
+  segment-local `segment_sequence`; genesis and cross-segment linkage;
+  writer-trust rules (full chain verification before the first write, no
+  trusted tail/checkpoints); writer poisoning on any ambiguous write/flush/
+  `fsync` failure with restart-only recovery; intent/result mutation protocol
+  with confirmed-applied / confirmed-not-applied / unknown outcomes; `503
+  AUDIT_UNAVAILABLE` versus `503 AUDIT_RESULT_UNCERTAIN`; best-effort
+  login/logout/denial auditing with sanitized surfacing and no username
+  retention; startup restricted mode for a corrupt or unverifiable journal;
+  archive-only ≥365-day retention with operator-controlled monthly rotation
+  and a separate manifest; the read-only `tools/audit_verify.py` contract
+  (exit 0/2/3/4, coverage modes); and the P5.5.2–P5.5.8 sequence.
+* **Review corrections resolved** — deleted `audit.verify` from the action
+  vocabulary (verification is read-only), moved rotation evidence into the
+  manifest (no `audit.rotate` event, no `next_segment` metadata), fixed
+  `source` to `api`/`cli`/`system`, defined `correlation_id` and nullability,
+  separated the manifest schema, bounded records and allowlisted metadata,
+  removed `AUDIT_WRITE_FAILED` as a reason code (a failed journal write cannot
+  record itself), and defined writer poisoning plus recovery.
+* **Docs** — `docs/AUDIT_JOURNAL_DESIGN.md` (new),
+  `docs/PHASE5_IMPLEMENTATION_PLAN.md` §9 (summary + P5.5 sub-milestones),
+  `ARCHITECTURE.md` D27, `CHANGELOG.md`.
+
+**Verified**
+
+* Documentation review only: schema/vocabulary consistency, crash/failure
+  states, manifest-versus-event separation and the mutation/HTTP contract were
+  cross-checked between the design record and the plan summary.
+* No test suite was run: no code changed.
+
+**Not verified / deferred**
+
+* No P5.5 implementation exists; startup verification, writer poisoning,
+  rotation and the CLI are design requirements, not claims.
+* Owner decisions remain open (see the design record §14): login-failure
+  target identity, strict-versus-restricted startup, denied-event metadata,
+  archive disposition wording, anchor-only continuation, and approval of the
+  two new error codes.
+* Changes are unstaged and uncommitted for independent review.
+
 ## Step 62 — Phase 5 P5.4.10: backend RBAC and business route protection (2026-11-14)
 
-**Status: implemented (offline), awaiting owner review — changes are unstaged
-and uncommitted. Not yet an accepted milestone.**
+**Status: accepted and committed in `b0583df` (with the milestone
+reconciliation documentation).**
 
 **Authorization only. No audit journal, no user-management API, no frontend
 change, no schema change, no Git operation.**

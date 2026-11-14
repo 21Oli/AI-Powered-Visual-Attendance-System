@@ -4,6 +4,27 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5, P5.5.1: audit journal design (documentation only)
+
+### Added
+
+* `docs/AUDIT_JOURNAL_DESIGN.md` — the authoritative P5.5.1 decision record: confirmed architecture, exact event schema and closed vocabularies, canonical JSON/SHA-256 rules, global `sequence` versus segment-local `segment_sequence`, genesis and cross-segment linkage, writer-trust and poisoning rules, crash/corruption behaviour, the intent/result mutation protocol with confirmed-applied/confirmed-not-applied/unknown outcomes, the HTTP contract (`AUDIT_UNAVAILABLE`, `AUDIT_RESULT_UNCERTAIN`), best-effort event policy, restricted-mode startup, archive-only ≥365-day retention with operator rotation and a separate manifest, the read-only verifier contract, the test matrix and P5.5.2–P5.5.8 exit criteria.
+
+### Changed
+
+* `docs/PHASE5_IMPLEMENTATION_PLAN.md` §9 — summary corrected to match the design record (full-chain verification before writing, no trusted tail/checkpoints, writer poisoning, three-way mutation outcomes, intent/result HTTP codes, no username retention on login failures, scalar metadata allowlist, bounded records, distinct manifest schema, no `audit.verify`/`audit.rotate`/`next_segment`, exit codes 0/2/3/4) and a P5.5 sub-milestone table added; P5.4.10 is now recorded as accepted in `b0583df`.
+* `DEVELOPMENT_STATUS.md` — new Step 63 for the P5.5.1 design (planning only), with the milestone table showing P5.5.1 design complete and awaiting owner review; P5.4.10 marked accepted/committed.
+* `ARCHITECTURE.md` — new decision record D27 describing the audit journal design.
+
+### Notes
+
+* Documentation only: no source, test, schema, migration, dependency or configuration change, and no Git operation.
+* No P5.5 implementation exists. Startup verification, writer poisoning, rotation and the verifier CLI are design requirements, not implemented behaviour. Phase 5 is not complete.
+
+### Verified
+
+* Cross-document review of schema, vocabulary, failure/crash states, manifest separation and the mutation/HTTP contract. No test suite was run because no code changed.
+
 ## [Unreleased] — Phase 5 milestone reconciliation (documentation only)
 
 ### Changed

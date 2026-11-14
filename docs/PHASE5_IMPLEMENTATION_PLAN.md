@@ -1,8 +1,9 @@
 # Phase 5 — Authentication, Accounts and Role-Based Access
 
-**Status: in progress — P5.4 implemented offline through sub-milestone P5.4.10
-(no live PostgreSQL run). P5.4.10 is implemented and awaiting owner review;
-P5.5 is not started. Phase 5 is not complete.**
+**Status: in progress — P5.4 completed offline through sub-milestone P5.4.10 and
+accepted (committed in `b0583df`; no live PostgreSQL run). The P5.5.1 audit
+journal design is complete and awaiting owner review; P5.5 implementation is not
+started. Phase 5 is not complete.**
 
 Phase 5 adds operator accounts, sessions and role-based access to the
 attendance system. It is delivered as small, separately reviewable steps. This
@@ -35,8 +36,8 @@ relational table), and does not introduce biometric storage of any kind.
 | P5.1 | Phase 5 inspection, gap analysis and approved decisions | Completed (review, no code) |
 | P5.2 | Identity data model and persistence: `V002__security.sql`, user/session models and repositories, offline tests | Completed (offline) |
 | P5.3 | Authentication primitives: Argon2id hashing, opaque session tokens, session lifecycle | Completed (offline) |
-| P5.4 | Authentication API: session service integration, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10, §8) | P5.4.1–P5.4.9 completed offline and accepted (committed); P5.4.10 implemented offline, **awaiting owner review** (unstaged, uncommitted) |
-| P5.5 | Audit journal and security-event auditing (§9) | Not started |
+| P5.4 | Authentication API: session service integration, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10, §8) | Completed offline through P5.4.10 and accepted (committed in `b0583df`) |
+| P5.5 | Audit journal and security-event auditing (§9, `docs/AUDIT_JOURNAL_DESIGN.md`) | P5.5.1 design complete, **awaiting owner review**; implementation not started |
 | P5.6 | User administration and secure first-Admin provisioning (§10) | Not started |
 | P5.7 | Frontend authentication and session integration (§10) | Not started |
 | P5.8 | Role-aware UI and frontend security hardening (§10) | Not started |
@@ -245,17 +246,17 @@ work factor was not benchmarked on target hardware.
 
 ## 7. Next step
 
-P5.4.10 (backend RBAC foundation and business-route protection) is implemented
-and awaiting owner review; once accepted and committed, the next implementation
-milestone is **P5.5 — audit journal and security-event auditing** (§9). P5.5 is
-not started, and no P5.5 code, schema or test exists in the tree.
+P5.4.10 (backend RBAC foundation and business-route protection) is accepted and
+committed in `b0583df`. The next implementation milestone is **P5.5 — audit
+journal and security-event auditing** (§9). Its design sub-milestone **P5.5.1 is
+complete** (`docs/AUDIT_JOURNAL_DESIGN.md`) and awaiting owner review; no P5.5
+code, schema, journal file or test exists in the tree.
 
 ## 8. P5.4 authentication API — sub-milestone status
 
-P5.4 is delivered in separately reviewed sub-milestones. Every row up to
-P5.4.9 is committed and accepted; P5.4.10 exists as unstaged, uncommitted
-working-tree changes awaiting owner review. Nothing beyond these rows exists in
-the tree.
+P5.4 is delivered in separately reviewed sub-milestones. Every row below is
+committed and accepted (P5.4.10 in `b0583df`). Nothing beyond these rows exists
+in the tree.
 
 | Sub-milestone | Scope | Status |
 | --- | --- | --- |
@@ -269,7 +270,7 @@ the tree.
 | P5.4.7 | `GET /auth/me` (session-derived identity, `no-store`, credential-free body) | Completed (offline) |
 | P5.4.8 | Authentication BFF (one allowlist/transport at `/api/v1/auth/...`, `Origin` forwarding, `Set-Cookie` playback) | Completed (offline) |
 | P5.4.9 | Process-local fixed-window login throttle (5 failures / 15 min per normalized username, 429 + `Retry-After`) | Completed (offline) |
-| P5.4.10 | Backend RBAC foundation and business-route protection (`src/authz.py`, eight permissions, four-role matrix, 401/403 guard on the seven business routes) | Implemented (offline), **awaiting owner review** (unstaged, uncommitted) |
+| P5.4.10 | Backend RBAC foundation and business-route protection (`src/authz.py`, eight permissions, four-role matrix, 401/403 guard on the seven business routes) | Completed (offline), accepted and committed (`b0583df`) |
 
 P5.4.10 is the backend authorization foundation that an earlier revision of
 this section grouped into the broader "P5.4.10+" row together with audit, user
@@ -407,8 +408,10 @@ provisioning, frontend authentication or route guards exist yet.
 ## 9. P5.5 — Audit journal and security-event auditing (not started)
 
 P5.5 is the next implementation milestone. It is **not started**: no audit
-module, journal file, schema, verifier or test exists in the tree, and this
-section is planning only.
+module, journal file, schema, verifier or test exists in the tree. This section
+summarises the approved design; the authoritative, review-corrected decision
+record is **`docs/AUDIT_JOURNAL_DESIGN.md` (P5.5.1)**, which governs whenever the
+summary and the design record differ.
 
 ### 9.1 Objective
 
@@ -430,7 +433,12 @@ introducing an audit **table**.
   canonical serialization, so an edited, deleted or reordered record breaks
   verification. The chain is **tamper-evident, not tamper-proof**: an attacker
   with write access can rewrite the whole file, which the documentation must
-  state plainly rather than overclaim.
+  state plainly rather than overclaim. `sequence` is global and never resets;
+  each segment also carries `segment_sequence` and its first record links to
+  the preceding segment's last `record_hash`, so rotation cannot fork the chain.
+  A writer must verify the **entire available chain** before accepting any
+  append, may not trust a cached tail hash, and no trusted checkpoint is
+  introduced in P5.5.
 * **Application-generated timestamps** from the existing clock seam (no
   database or filesystem default), so behaviour is deterministic under a fake
   clock.
@@ -447,34 +455,63 @@ introducing an audit **table**.
   prose.
 * **Request ID correlation** using the existing server-generated request ID, so
   an audit record can be matched to the HTTP response and structured logs.
-* **Safe metadata only**: a small, allowlisted set of non-sensitive fields
-  (e.g. endpoint, method, outcome detail code). Never request bodies.
+* **Safe metadata only**: a small, allowlisted set of scalar fields (`endpoint`
+  as a route template, `method`, `http_status`, `employee_active_after`,
+  `journal_event_id`, and P5.6's `prior_role`/`new_role`). Never raw URLs, query
+  strings, request bodies, headers or free text.
 * **Forbidden material, without exception**: passwords, password hashes,
   session tokens, cookies, token digests, biometric information, face
   embeddings, photographs, and personal data beyond the actor identifiers and
   the audited target ID.
-* **Retention**: 365 days is the approved retention policy. P5.5 documents it;
-  automated archival/purge is deferred and, when added, must never silently
-  break the chain.
-* **Verification CLI** for journal integrity: read-only, offline, reports chain
-  validity, record count, sequence range and the position of the first broken
-  link, and exits non-zero on any failure.
+* **Retention**: audit records are retained for **at least 365 days**. The
+  initial implementation is **archive-only** — there is no automatic deletion
+  and no deletion schedule, and any future deletion requires a separate owner
+  decision. Rotation is operator-controlled (target cadence monthly) and is
+  implemented in P5.5.7 while the application is stopped or the writer is
+  exclusively locked. A sealed segment is immutable; each new active segment
+  links to the preceding segment's final hash, so rotation never resets the
+  chain. The manifest is a separate append-only, independently chained index and
+  never pretends that removed records were verified.
+* **Verification CLI** `tools/audit_verify.py`: read-only and offline (it never
+  repairs, rotates or rewrites). It verifies canonical hashes, schemas,
+  vocabulary, global and segment sequence continuity, previous-hash links across
+  segment boundaries, and manifest/segment agreement, and it reports whether
+  coverage is full-chain, segment/manifest continuity, or anchor-only. Exit
+  codes: `0` verified, `2` integrity failure, `3` invalid arguments, `4`
+  archive/manifest inconsistency.
 
 ### 9.3 Approved failure policy
 
-* **Mutations fail closed.** A protected business mutation or a P5.6 user/role
-  change must not report success unless its required audit record was written.
-  Where the state change is already durable and cannot be rolled back (the
-  attendance journal append), a failed audit write is surfaced as a sanitized
-  `503` with outcome `uncertain` — never as success, and never silently
-  dropped.
-* **User and role changes must never succeed unaudited** (P5.6 consumes this
-  rule).
-* **Read and login-attempt auditing is best-effort.** A failed write does not
-  block the response, but the failure must be **explicitly surfaced** (stable
-  structured log entry and documented behaviour), never swallowed.
-* **No sensitive material in any failure path**: audit errors, sanitized 503
-  bodies and logs stay credential-free.
+* **Mutations fail closed through an intent/result protocol.** Before an
+  employee create/update/deactivate or an attendance checkout runs, a durable
+  **intent** record (`outcome=uncertain`, `reason_code=AWAITING_RESULT`) must be
+  written; if it cannot be written, the mutation is not executed and the API
+  answers `503 AUDIT_UNAVAILABLE`. After the business operation a correlated
+  **result** record is written. If that fails after the operation may have
+  applied, the API answers `503 AUDIT_RESULT_UNCERTAIN`: the operation may have
+  applied and its audit result is unknown. No automatic retry and no
+  compensating mutation.
+* **Three outcome states, never conflated.** A result record is `success` only
+  for a confirmed-applied operation, `error` only when evidence proves the
+  operation did not take effect (validation, business refusal, unique-constraint
+  rejection, connection never opened), and `uncertain` when the final state
+  cannot be established (commit failure, connection loss after a statement, or
+  any interruption). A database exception is never assumed to mean rollback, and
+  an intent record is never treated as success.
+* **Login, logout and permission-denial auditing is best-effort.** A failed
+  write does not change the existing response; it is surfaced as a sanitized
+  structured warning carrying the action, request ID and error class only. No
+  audit-failure event is written to the journal that just failed, no global
+  login-write throttling is added, and the approved login throttle policy is
+  unchanged.
+* **Login failures retain no username**: `target_type="account"` with a null
+  `target_id`.
+* **Bounded records**: ≤ 8192 bytes per record, ≤ 16 allowlisted scalar metadata
+  keys and ≤ 1024 bytes of metadata, `target_id` ≤ 256 chars; route templates
+  only, never raw URLs, query strings or request bodies.
+* **No sensitive material in any failure path**: passwords, hashes, tokens,
+  cookies, digests, DSNs, biometric data, request bodies and unnecessary
+  personal information never enter a record, a log line or an error response.
 
 ### 9.4 Boundaries — P5.5 must not
 
@@ -503,35 +540,64 @@ introducing an audit **table**.
   sequence numbers and a chain that still verifies; the single-writer/locking
   assumption is stated explicitly, and any multi-process limitation is
   documented and tested as a limitation rather than claimed as safe.
+* **Writer trust and poisoning** — an existing journal is fully verified before
+  the first write (never just its tail hash); a failed verification refuses all
+  appends; any ambiguous write/flush/fsync failure poisons the writer instance,
+  which then refuses every later append until a fresh full verification; a
+  torn/malformed tail is never repaired.
 * **Crash recovery** — empty journal, missing directory, truncated final line,
-  torn/partial write, and a journal containing a valid prefix plus garbage:
-  reads and verification must fail closed or ignore only an incomplete trailing
-  record, never treat it as success.
+  torn/partial write, a valid prefix plus garbage, and writer-restart after
+  poisoning: verification must fail closed and never treat damage as success.
 * **Hash-chain verification** — detecting a modified field, a deleted record, a
   reordered pair and a forged digest; CLI exit codes and output.
-* **Audit-failure** — an injected write failure makes a mutation fail closed
-  with a sanitized 503; a best-effort read/login audit failure leaves the
-  response unchanged but is surfaced; no failure path leaks credentials.
+* **Audit-failure** — an injected intent-write failure prevents the mutation
+  and returns `503 AUDIT_UNAVAILABLE`; an injected result-write failure after a
+  possibly applied mutation returns `503 AUDIT_RESULT_UNCERTAIN`; a best-effort
+  login/logout/denial audit failure leaves the response unchanged but is
+  surfaced; no failure path leaks credentials.
+* **Mutation outcomes** — confirmed-applied, confirmed-not-applied and unknown
+  cases each emit the documented result record; a commit-failure simulation is
+  recorded as `uncertain`, never as `error`-means-rolled-back.
 * All tests use fake clocks and temporary directories; no real sleeps, no
   PostgreSQL and no biometric data.
 
 ### 9.6 Acceptance criteria
 
 1. The journal exists at the documented path, is append-only JSONL, versioned
-   and hash-chained, with a verification CLI that passes on a healthy journal
-   and exits non-zero for every tampering case above.
-2. Every protected mutation emits exactly one record before success, and a
-   failed write fails closed; user/role changes (P5.6) inherit that rule.
-3. Read and login-attempt auditing is best-effort with failures explicitly
-   surfaced.
+   and hash-chained with a global sequence and segment-local numbering, and the
+   read-only CLI passes on a healthy journal and exits non-zero for every
+   tampering, torn-tail, sequence or manifest defect above.
+2. Every protected mutation writes a durable intent record **before** executing
+   and a correlated result record afterwards; no unaudited success is possible,
+   and a failed result record yields `503 AUDIT_RESULT_UNCERTAIN` rather than a
+   success. User/role changes (P5.6) inherit the same rule.
+3. Login, logout and permission-denial auditing is best-effort with failures
+   explicitly surfaced, without altering their HTTP responses.
 4. Records carry actor, actor role, action, target, outcome, reason code,
    request ID and allowlisted metadata, and never any forbidden material —
    proven by tests.
 5. Concurrency, crash-recovery and failure-policy tests pass deterministically.
-6. Documentation states the 365-day retention policy, the tamper-evident (not
-   tamper-proof) property and the offline verification limits.
+6. Documentation states the at-least-365-day, archive-only retention policy (no
+   automatic deletion), the tamper-evident (not tamper-proof) property, the
+   three verification coverage modes and the offline limits.
 7. No change to employee/attendance semantics, no migration, no biometric
    storage, no user-administration endpoint and no frontend change.
+
+### 9.7 P5.5 sub-milestones
+
+The authoritative per-milestone scope, exclusions and exit criteria are in
+`docs/AUDIT_JOURNAL_DESIGN.md` §13; the sequence is fixed.
+
+| # | Scope | Prerequisites | Exclusions | Verification / exit |
+| --- | --- | --- | --- | --- |
+| P5.5.1 | Design and decision record (§9; `docs/AUDIT_JOURNAL_DESIGN.md`) | P5.4.10 accepted | Code | Owner review; no open contradiction |
+| P5.5.2 | Audit event schema and hash-chain primitives (canonical JSON, SHA-256, vocabularies, allowlists, genesis) | P5.5.1 | I/O, writer, HTTP | Unit matrix green; no filesystem access |
+| P5.5.3 | Durable append-only writer: full verification before first write, process + OS lock, fsync, poisoning, typed errors; **no rotation** | P5.5.2 | Rotation, manifest writes, routes | Never appends to unverified journal; ambiguous failures poison |
+| P5.5.4 | Audit service, actor/request context, intent/result helpers, best-effort wrapper, safe logging | P5.5.3 | Route changes | Actor/request-ID propagation; no secret in output |
+| P5.5.5 | Mandatory mutation and best-effort event integration, `AUDIT_UNAVAILABLE`/`AUDIT_RESULT_UNCERTAIN`, restricted mode | P5.5.4 | User admin, frontend, new endpoints | No unaudited success; auth/authz behaviour unchanged |
+| P5.5.6 | Read-only verification CLI with coverage modes and exit codes 0/2/3/4 | P5.5.3 | Repair, rotation | Tamper matrix green; journal bytes unchanged |
+| P5.5.7 | Retention, archive and operator-controlled monthly rotation; manifest; crash recovery; runbook | P5.5.6 | Automatic deletion or schedule | Rotation preserves chain; crash states detected, never silent |
+| P5.5.8 | Security regression, fault injection, exclusion sweep, docs and acceptance | P5.5.1–P5.5.7 | P5.6 work | Full matrix + review; owner acceptance |
 
 ## 10. P5.6–P5.9 — subsequent milestones (not started)
 

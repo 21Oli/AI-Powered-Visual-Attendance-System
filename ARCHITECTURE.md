@@ -1159,3 +1159,65 @@ the journal schema version (still 1), or the decision authority.
   every response carries the server-generated `X-Request-ID`, inbound request
   IDs are ignored, and no password, hash, dummy hash, token, digest or cookie
   is logged.
+
+### D27 — Audit journal: separate chained JSONL, fail-closed mutations, archive-only retention (Phase 5, P5.5.1 — design, not implemented)
+
+* **Store.** A separate append-only JSON Lines journal at
+  `data/audit/audit.jsonl` (never the attendance journal, never PostgreSQL, no
+  external logging service, no biometric data). One record per line, UTF-8,
+  `\n` terminated, written `write` → `flush` → `os.fsync` before it counts as
+  durable. Design record: `docs/AUDIT_JOURNAL_DESIGN.md`.
+* **Schema.** Versioned records with global `sequence`, `segment_id`,
+  `segment_sequence`, `audit_id`, application-generated UTC `timestamp`,
+  actor (`actor_user_id`/`actor_role`, null for pre-authentication events),
+  closed `action`/`outcome`/`reason_code` vocabularies, `target_type`/
+  `target_id`, `correlation_id` (result → its intent), `request_id`, `source`
+  (`api`/`cli`/`system`), allowlisted scalar `metadata`, `previous_hash` and
+  `record_hash`. Records are bounded (≤ 8 KiB, ≤ 1 KiB metadata) and never carry
+  passwords, hashes, tokens, cookies, digests, DSNs, request bodies, biometric
+  data or unnecessary personal data; login failures retain no username.
+* **Chain.** `record_hash = sha256(canonical JSON body)` with sorted keys,
+  compact separators, UTF-8 and fixed-width UTC timestamps; `previous_hash`
+  links each record to its predecessor. The first-ever record uses 64 zeroes;
+  the first record of every later segment links to the previous segment's last
+  `record_hash`, so rotation never resets the chain. `sequence` is global and
+  contiguous; `segment_sequence` is segment-local. The property is
+  tamper-evident, not tamper-proof.
+* **Writer trust and durability.** A writer fully verifies the entire available
+  chain (active journal, manifest and declared segments) before accepting any
+  append — never just the tail hash, and with no trusted checkpoints. Appends
+  are serialized by a process-local lock plus an OS advisory lock. Any
+  ambiguous write/flush/`fsync` failure poisons the instance, which then refuses
+  every append; recovery requires a restart and a fresh full verification. Torn
+  or malformed records are never repaired or truncated.
+* **Mutations fail closed.** Employee create/update/deactivate and attendance
+  checkout write a durable intent record (`outcome=uncertain`,
+  `reason_code=AWAITING_RESULT`) before executing and a correlated result record
+  afterwards. Intent failure → no mutation, `503 AUDIT_UNAVAILABLE`. Result
+  failure after a possibly applied operation → `503 AUDIT_RESULT_UNCERTAIN`
+  (never success, no retry, no compensation). Outcomes are distinguished as
+  confirmed-applied, confirmed-not-applied and unknown; a database exception is
+  not assumed to be a rollback, and an intent record is never evidence of
+  success.
+* **Best-effort events.** Login success/failure, logout and permission denial
+  are attempted without changing the HTTP response; failures are surfaced as
+  sanitized structured warnings (action, request ID, error class) and are never
+  recorded as an `AUDIT_WRITE_FAILED` event in the journal that just failed. No
+  new throttling is introduced.
+* **Startup and corruption.** A missing journal may be initialized only when the
+  audit directory holds no journal, manifest or archive. Any corrupt, torn or
+  unverifiable journal puts the application in restricted mode: audited
+  mutations return `503 AUDIT_UNAVAILABLE`, reads and the existing authentication
+  routes keep working, and a critical structured log records the failure class.
+  No silent replacement or repair. (A strict refuse-to-start option is an owner
+  decision.)
+* **Retention and rotation.** Retain at least 365 days, archive-only: no
+  automatic deletion and no deletion schedule. Rotation is operator-controlled
+  (monthly target), performed with the application stopped or the writer
+  exclusively locked, implemented in P5.5.7. A sealed segment is immutable; the
+  separate append-only manifest (own SHA-256 chain) records sealed segments and
+  retention dispositions, and the read-only `tools/audit_verify.py` reports
+  full-chain, segment/manifest or anchor-only coverage with exit codes 0/2/3/4.
+  Manifest anchors never claim that removed records were verified.
+* **Not implemented.** P5.5.1 is design only: no audit module, journal,
+  manifest, verifier or test exists in the tree.
