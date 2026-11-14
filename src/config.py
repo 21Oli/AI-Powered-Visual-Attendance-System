@@ -36,9 +36,12 @@ import re
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
-from typing import Final, Literal
+from types import MappingProxyType
+from typing import Final, Literal, Mapping
 
 from dotenv import load_dotenv
+
+from src.origin import OriginSyntaxError, normalize_origin
 
 __all__ = [
     "APP_NAME",
@@ -68,6 +71,7 @@ __all__ = [
     "SessionPolicyConfig",
     "SESSION_POLICY",
     "SECURE_COOKIE_ENVIRONMENTS",
+    "TRUSTED_ORIGINS",
     "SessionCookieConfig",
     "SESSION_COOKIE",
     "LoginThrottleConfig",
@@ -937,6 +941,46 @@ def _validate_api_host_value(host: str) -> str:
     return host
 
 
+def _validate_trusted_origins(origins: tuple[str, ...]) -> None:
+    """Refuse an injected allowlist that is not exact, canonical origins.
+
+    A wildcard, a URL with a path, a duplicate or a malformed value is a
+    configuration error at construction — never a permissive fallback at
+    request time.
+    """
+    if not isinstance(origins, tuple):
+        raise ConfigError(
+            f"trusted_origins must be a tuple of origins, got {type(origins).__name__}"
+        )
+    seen: set[str] = set()
+    for entry in origins:
+        try:
+            canonical = normalize_origin(entry)
+        except OriginSyntaxError as exc:
+            raise ConfigError(f"Invalid trusted origin {entry!r}: {exc}") from None
+        if canonical in seen:
+            raise ConfigError(
+                f"Duplicate trusted origin {entry!r} after canonicalisation"
+            )
+        seen.add(canonical)
+
+
+def _resolve_env_trusted_origins() -> tuple[str, ...] | None:
+    """Resolve ``ATTENDANCE_TRUSTED_ORIGINS`` (comma-separated origins).
+
+    Unset means "use the per-environment default" (:data:`TRUSTED_ORIGINS`);
+    an explicitly empty value means "no trusted origin" and therefore leaves
+    login unavailable (fail closed). Every entry must be one exact origin —
+    surrounding whitespace is trimmed at this configuration boundary, while
+    malformed entries raise :class:`ConfigError` at load time instead of being
+    silently ignored at request time.
+    """
+    raw = os.getenv("ATTENDANCE_TRUSTED_ORIGINS")
+    if raw is None:
+        return None
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
 # ---------------------------------------------------------------------------
 # Phase 5 authentication API constants (owner-approved, P5.4.2)
 #
@@ -963,6 +1007,28 @@ def _validate_api_host_value(host: str) -> str:
 #: downgrade. This mapping is a constant, not a configurable switch.
 SECURE_COOKIE_ENVIRONMENTS: Final[frozenset[str]] = frozenset(
     {"staging", "production"}
+)
+
+#: Exact login ``Origin`` allowlist defaults, per environment (P5.4.5).
+#:
+#: Only exact, canonical origins match — no wildcards, no suffixes, no
+#: inference from request headers. Development names the local dashboard;
+#: testing is injected by the tests through ``AppSettings.login_trusted_origins``
+#: (``https://attendance.test.invalid``); staging and production default to
+#: **empty** (login unavailable, fail closed), and deployments supply their
+#: exact dashboard origin through ``ATTENDANCE_TRUSTED_ORIGINS`` (or the
+#: ``AppSettings.login_trusted_origins`` field).
+#:
+#: There is no wildcard entry and no switch that disables Origin validation:
+#: configuration can only ever narrow or name exact origins, and every entry
+#: is validated when settings are constructed.
+TRUSTED_ORIGINS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
+    {
+        "development": ("http://localhost:3000",),
+        "testing": (),
+        "staging": (),
+        "production": (),
+    }
 )
 
 #: RFC 6265 cookie-name token characters (no separators, spaces or controls).
@@ -1197,6 +1263,16 @@ class AppSettings:
     api_host: str = "127.0.0.1"
     #: Development API bind port. Validated to a strict ``[1, 65535]`` range.
     api_port: int = 8000
+    #: Exact login ``Origin`` allowlist for this instance. ``None`` selects the
+    #: per-environment default (:data:`TRUSTED_ORIGINS`): development names
+    #: ``http://localhost:3000``, and testing/staging/production default to an
+    #: empty tuple (login unavailable until configured). Deployments supply
+    #: their exact dashboard origins through ``ATTENDANCE_TRUSTED_ORIGINS``;
+    #: tests inject the reserved test origin here. Either way every entry is
+    #: validated here and a malformed or duplicate value raises
+    #: :class:`ConfigError` — never a silent ignore. An empty tuple is a real
+    #: answer (fail closed), not a missing value.
+    login_trusted_origins: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         # Same rule as every other configuration object here: an invalid
@@ -1205,6 +1281,20 @@ class AppSettings:
         # constant-level rule (like CameraConfig index/frame bounds).
         _validate_api_port_value(self.api_port)
         _validate_api_host_value(self.api_host)
+        if self.app_env not in _VALID_ENVS:
+            raise ConfigError(
+                f"Unknown application environment {self.app_env!r}: expected "
+                f"one of {', '.join(_VALID_ENVS)}"
+            )
+        resolved_origins = (
+            TRUSTED_ORIGINS[self.app_env]
+            if self.login_trusted_origins is None
+            else self.login_trusted_origins
+        )
+        _validate_trusted_origins(resolved_origins)
+        # Resolve the ``None`` fallback once, so every reader observes the
+        # same validated tuple (an empty tuple stays empty — fail closed).
+        object.__setattr__(self, "login_trusted_origins", resolved_origins)
 
     @property
     def session_cookie_secure(self) -> bool:
@@ -1273,6 +1363,7 @@ def load_settings() -> AppSettings:
         ),
         api_host=_resolve_env_api_host(),
         api_port=_resolve_env_api_port(),
+        login_trusted_origins=_resolve_env_trusted_origins(),
     )
 
 

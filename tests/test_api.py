@@ -123,7 +123,7 @@ def test_route_inventory_is_exactly_the_approved_eight() -> None:
         (f"{API_PREFIX}{path}", method) for path, method in APPROVED_ROUTES
     )
     assert sorted(inventory) == expected
-    assert len(expected) == 8
+    assert len(expected) == 9, "eight business routes plus P5.4.5 login"
 
 
 def test_documentation_urls_are_disabled() -> None:
@@ -302,6 +302,9 @@ def test_endpoints_are_implemented_and_never_report_not_implemented(
             "DATABASE_UNAVAILABLE",
             "REQUEST_INVALID",
             "ATTENDANCE_UNAVAILABLE",
+            # P5.4.5: login rejects a request that carries no trusted Origin
+            # before it ever touches the database.
+            "ORIGIN_NOT_ALLOWED",
         }
 
 

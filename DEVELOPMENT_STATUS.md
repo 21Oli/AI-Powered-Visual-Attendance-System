@@ -3,6 +3,82 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 57 — Phase 5 P5.4.5: login API (2026-11-14)
+
+**One endpoint plus its prerequisites. No logout, `/me`, throttling, RBAC,
+audit, frontend login page, BFF cookie integration or business-route
+protection; no Git operation.**
+
+* **Baseline**: branch `main`, HEAD
+  `812bcf3366caa94b1de3e12b816da33f85d2e99b` (P5.4.4.1), clean working tree.
+* **Endpoint** — `POST /api/v1/auth/login` (`src/api_login.py`): body
+  `{username, password}` (`extra="forbid"`, 1-64 / 1-1024), 200 response
+  `{"user": {user_id, username, role, is_active}}`. No token, digest, hash or
+  session record in any body.
+* **Verification** — `UserRepository.find_by_username` (key derived by
+  `username_key_for`), then one real Argon2id verification via the existing
+  `PasswordService`; passwords are never trimmed or normalised.
+* **Dummy hash** — `DUMMY_PASSWORD_HASH`, one precomputed Argon2id hash
+  (m=19456/t=2/p=1) of a discarded random value, is used for unknown accounts
+  so the path performs real work and cannot be distinguished from a wrong
+  password. It is never regenerated per request and never exposed.
+* **Rehash** — `needs_rehash` → `hash_password` →
+  `UserRepository.update_password_hash` (new method: parameterised
+  `UPDATE ... SET password_hash, updated_at ... RETURNING user_id`, app-clock
+  timestamp, `UserNotFound` when missing) **before** issuance, so a failed
+  rehash yields the sanitized 503 with no session. Wrong passwords and
+  inactive accounts never rehash; inactive accounts have their real hash
+  verified before the identical 401.
+* **Session/cookie** — `SessionService.issue_session` (8 h idle / 12 h
+  absolute, digest-only persistence) then `set_session_cookie`
+  (`va_session`, `/api/v1`, HttpOnly, Lax, 43200 s, no Domain, Secure in
+  staging/production). Issuance failure stays a sanitized 503 with no cookie.
+* **Origin validation** — `TRUSTED_ORIGINS`: development
+  `http://localhost:3000`; staging/production empty by default (fails closed)
+  and supplied by the deployment through `ATTENDANCE_TRUSTED_ORIGINS`;
+  testing injects `https://attendance.test.invalid` through the single setting
+  `AppSettings.login_trusted_origins`. Malformed, wildcard, path-bearing or
+  duplicate entries raise `ConfigError` at load/construction. `src/origin.py`
+  parses one strict origin (refusing a trailing `?`/`#` and IPv6 zone ids) and
+  login requires exactly one matching `Origin` header;
+  missing/empty/`null`/malformed/duplicate/untrusted → `403 ORIGIN_NOT_ALLOWED`.
+  `Host` and `X-Forwarded-*` are never used.
+* **Proxy** — the Next.js allowlist gains exactly `POST /api/v1/auth/login`
+  and forwards the browser's `Origin` unchanged for that route only (never
+  synthesised, no other client headers). The proxy still drops the backend
+  `Set-Cookie`, so browser session establishment is deferred to the BFF
+  milestone.
+* **Composition** — `build_login_service` validates the DSN before importing
+  the repository layer (missing/blank → sanitized `DatabaseUnavailableError`,
+  never a silent unconfigured connection) and builds **one** user repository
+  shared by the lookup and the session service.
+* **Tests** — `tests/test_api_login.py` (63), `tests/test_origin.py` (62),
+  `tests/test_user_repository.py` (+5), `tests/test_config.py` (+19),
+  `frontend/tests/proxy.test.ts` (+6); `tests/test_api.py` inventory
+  updated to nine routes.
+* **Docs** — `ARCHITECTURE.md` D26, `CHANGELOG.md`,
+  `docs/PHASE5_IMPLEMENTATION_PLAN.md` §8.
+
+**Verified**
+
+* Login + Origin focused: **125 passed**.
+* Repository + configuration: **191 passed**.
+* Full backend suite: **2827 passed, 32 skipped**, exit 0 (the 32 skips are the
+  pre-existing opt-in PostgreSQL tier).
+* Frontend `npm test`: **31 files / 463 tests passed**, exit 0;
+  `npm run typecheck`: exit 0; `npm run lint`: exit 0; `npm run build`: exit 0.
+* `git diff --check` clean.
+
+**Not verified / deferred**
+
+* No browser end-to-end login: the proxy drops `Set-Cookie`, and no login page
+  exists. No live PostgreSQL, TLS or deployment validation.
+* Staging/production login is unavailable until the deployment supplies its
+  exact dashboard origins through `ATTENDANCE_TRUSTED_ORIGINS` (unset or blank
+  stays fail-closed; no URL is invented).
+* No logout, `/me`, throttling, RBAC, audit logging, session renewal or
+  protection of the eight business routes.
+
 ## Step 56 — Phase 5 P5.4.4.1: authentication principal hardening (2026-11-13)
 
 **Narrow hardening patch from the P5.4.4 independent review. No endpoint, route

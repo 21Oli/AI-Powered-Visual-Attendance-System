@@ -13,12 +13,20 @@ const fetchMock = vi.fn<typeof fetch>();
 function call(
   method: "GET" | "POST" | "PATCH",
   path: string,
-  options: { body?: string; query?: string } = {},
+  options: {
+    body?: string;
+    query?: string;
+    headers?: Record<string, string>;
+  } = {},
 ) {
   const url = `http://localhost:3000/api/backend/${path}${
     options.query === undefined ? "" : `?${options.query}`
   }`;
-  const request = new Request(url, { method, body: options.body });
+  const request = new Request(url, {
+    method,
+    body: options.body,
+    headers: options.headers,
+  });
   const segments = path.split("/");
   return handlers[method](request, {
     params: Promise.resolve({ path: segments }),
@@ -366,5 +374,96 @@ describe("proxy configuration", () => {
 
     expect(text).not.toContain(BACKEND);
     expect(text).not.toContain("stack");
+  });
+});
+
+describe("proxy login route (P5.4.5)", () => {
+  const ORIGIN = "https://attendance.test.invalid";
+  const payload = JSON.stringify({ username: "ada", password: "secret-value" });
+
+  it("allows only POST /api/v1/auth/login and forwards its JSON body", async () => {
+    await call("POST", "api/v1/auth/login", {
+      body: payload,
+      headers: { origin: ORIGIN },
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] ?? [];
+    expect(String(url)).toBe(`${BACKEND}/api/v1/auth/login`);
+    expect((init as RequestInit).body).toBe(payload);
+    expect((init as RequestInit).headers).toMatchObject({
+      "content-type": "application/json",
+    });
+
+    const refused = await call("GET", "api/v1/auth/login");
+    expect(refused.status).toBe(405);
+  });
+
+  it("forwards the browser Origin unchanged for login only", async () => {
+    await call("POST", "api/v1/auth/login", {
+      body: payload,
+      headers: { origin: ORIGIN },
+    });
+
+    const [, init] = fetchMock.mock.calls[0] ?? [];
+    expect((init as RequestInit).headers).toMatchObject({ origin: ORIGIN });
+  });
+
+  it("never synthesizes an Origin when the browser sent none", async () => {
+    await call("POST", "api/v1/auth/login", { body: payload });
+
+    const [, init] = fetchMock.mock.calls[0] ?? [];
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers.origin).toBeUndefined();
+  });
+
+  it("does not forward Origin for the business routes", async () => {
+    await call("POST", "api/v1/employees", {
+      body: JSON.stringify({ employee_id: "E1", full_name: "A Name" }),
+      headers: { origin: ORIGIN },
+    });
+
+    const [, init] = fetchMock.mock.calls[0] ?? [];
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers.origin).toBeUndefined();
+  });
+
+  it("never forwards arbitrary client headers", async () => {
+    await call("POST", "api/v1/auth/login", {
+      body: payload,
+      headers: {
+        origin: ORIGIN,
+        authorization: "Bearer client-token",
+        cookie: "va_session=client-value",
+        "x-forwarded-host": "attendance.test.invalid",
+        "x-forwarded-proto": "https",
+      },
+    });
+
+    const [, init] = fetchMock.mock.calls[0] ?? [];
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(Object.keys(headers).sort()).toEqual(["accept", "content-type", "origin"]);
+    expect(JSON.stringify(headers)).not.toContain("client-token");
+    expect(JSON.stringify(headers)).not.toContain("client-value");
+  });
+
+  it("drops the backend Set-Cookie (BFF cookie integration is later)", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ user: { user_id: "u1" } }), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "set-cookie": "va_session=token-value; HttpOnly; Path=/api/v1",
+        },
+      }),
+    );
+
+    const response = await call("POST", "api/v1/auth/login", {
+      body: payload,
+      headers: { origin: ORIGIN },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("set-cookie")).toBeNull();
+    expect(await response.text()).not.toContain("token-value");
   });
 });

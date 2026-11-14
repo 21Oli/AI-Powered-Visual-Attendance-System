@@ -4,6 +4,39 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5, P5.4.5: login API, password rehash and trusted-origin validation
+
+### Added
+
+* `src/api_login.py` — `POST /api/v1/auth/login`: `LoginService` (lookup → one real Argon2id verification → refusal/rehash/issuance), `LoginRequest` (`extra="forbid"`, 1-64 char username, 1-1024 char password), `LoginResponse`/`LoginUser` (identity only), `LoginResult` (token excluded from `repr`), `DUMMY_PASSWORD_HASH` (one precomputed Argon2id hash of a discarded random value), `OriginNotAllowed`, the Origin guard and `build_login_service` (availability check before importing the repository/psycopg, no connection at construction).
+* `src/origin.py` — strict RFC 6454 origin parser (`normalize_origin`) and exact allowlist matching (`origin_is_allowed`): `http`/`https` only, no userinfo, no path/query/fragment, valid host/port, canonical lowercasing, default port dropped; empty allowlist matches nothing.
+* `src/config.py` — `TRUSTED_ORIGINS` (immutable per-environment defaults: development `http://localhost:3000`; testing/staging/production empty), the `ATTENDANCE_TRUSTED_ORIGINS` environment variable (comma-separated exact origins, parsed once by `load_settings`), and the single validated setting `AppSettings.login_trusted_origins` (canonicalised, duplicate-rejecting, malformed-rejecting; `None` selects the per-environment default and is resolved at construction). No wildcard and no switch that disables Origin validation.
+* `src/user_repository.py` — `update_password_hash(user_id, password_hash)`: parameterised `UPDATE app_user SET password_hash = %s, updated_at = %s WHERE user_id = %s RETURNING user_id`, application-clock `updated_at`, `UserNotFound` for a missing row, driver errors propagated unchanged.
+* `src/api.py` — registers the login route and the `handle_origin_not_allowed` handler (403 `ORIGIN_NOT_ALLOWED`), adds the `login_service` offline-test seam, and extends the approved inventory from eight to nine routes.
+* `tests/test_api_login.py` (63 tests) and `tests/test_origin.py` (62 cases) — success, exact response body, cookie policy, lifetimes, indistinguishable 401s, dummy-hash parametrisation and reuse, rehash behaviour and failure, session failure, Origin accept/reject matrix (including trailing `?`/`#` and IPv6 zone identifiers), forwarded-header bypass, fail-closed staging/production, configured deployment origins, validation, request IDs, logging hygiene, and `build_login_service` failing closed on a missing/blank DSN without opening a connection or building a duplicate repository.
+* `tests/test_user_repository.py` (+5 tests), `tests/test_config.py` (+19 cases) — the new repository method and the trusted-origin configuration, including `ATTENDANCE_TRUSTED_ORIGINS` load-time validation and the blank/unset fail-closed behaviour.
+* `frontend/src/lib/server/proxy.ts`, `frontend/src/app/api/backend/[...path]/route.ts` — the allowlist gains exactly `POST /api/v1/auth/login`, which forwards the browser's `Origin` unchanged and carries a JSON body; no other route forwards `Origin`, and no other client header is passed through. `frontend/tests/proxy.test.ts` (+6 tests) pins that behaviour and documents that `Set-Cookie` is dropped.
+
+### Changed
+
+* Login is the first authenticated surface, but **no business route is protected** and no authentication middleware was added; the eight Phase 3 endpoints and the anonymous `/health` are unchanged.
+* Corrective pass on the milestone: staging/production can now be given their exact origins through `ATTENDANCE_TRUSTED_ORIGINS` (previously there was no deployment path at all), the allowlist setting is one name (`login_trusted_origins`) across configuration, the guard, tests and docs, and an unknown `app_env` is refused at construction with `ConfigError` rather than a bare `KeyError`.
+* `build_login_service` now constructs **one** user repository shared by the credential lookup and the session service instead of building a second one through `build_session_service`; the DSN check still happens before any repository or driver import.
+* `src/origin.py` refuses a trailing `?`/`#` (which parsed as an empty query/fragment) and IPv6 zone identifiers; the login guard canonicalises configured entries directly, so an invalid entry raises instead of being silently dropped.
+
+### Verified
+
+* Focused: `tests/test_api_login.py` + `tests/test_origin.py` → **125 passed**; `tests/test_user_repository.py` + `tests/test_config.py` → **191 passed**; `tests/test_api.py` inventory passing.
+* Full backend suite: **2827 passed, 32 skipped**, exit 0 (the 32 skips are the pre-existing opt-in PostgreSQL tier).
+* Frontend: `npm test` → **31 files, 463 tests passed**, exit 0; `npm run typecheck` → exit 0; `npm run lint` → exit 0; `npm run build` → exit 0.
+
+### Notes
+
+* The same-origin proxy still rebuilds responses without `Set-Cookie`, so a browser cannot yet hold the session cookie: login is API-level only until the later BFF cookie milestone. No login page was added.
+* No logout, `/me`, login throttling, RBAC, audit logging, first-admin provisioning, session renewal or business-route protection.
+* Staging and production login fails closed by default; deployments must supply their exact dashboard origins through `ATTENDANCE_TRUSTED_ORIGINS` (no URL is invented, and an unset or blank value leaves login unavailable).
+* Verified offline only: no live PostgreSQL, browser, TLS or deployment validation.
+
 ## [Unreleased] — Phase 5, P5.4.4.1: principal hardening and auth edge-case tests
 
 ### Changed

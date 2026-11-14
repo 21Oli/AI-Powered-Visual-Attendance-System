@@ -236,7 +236,8 @@ completed rows exists in the tree.
 | P5.4.3 | Request ID and correlation infrastructure (server-generated UUID, `X-Request-ID`, context access, log correlation) | Completed (offline) |
 | P5.4.4 | Session-cookie utilities and cookie-only authentication dependency (`set_session_cookie`/`clear_session_cookie`, server-side 401 resolution, 503 preserved) | Completed (offline) |
 | P5.4.4.1 | Principal hardening: credential-free immutable `AuthenticatedPrincipal`, serialization tests, authentication edge-case tests | Completed (offline) |
-| P5.4.5+ | `/auth/login`, `/auth/logout`, `/auth/me`, route protection, login throttling (P5.4.9), integration tests and security review | Not started |
+| P5.4.5 | `POST /auth/login` (password verification, dummy hash, rehash, session issuance, trusted-origin validation, proxy Origin forwarding) | Completed (offline) |
+| P5.4.6+ | `/auth/logout`, `/auth/me`, route protection, BFF cookie integration, login throttling (P5.4.9), integration tests and security review | Not started |
 
 P5.4.2 adds configuration only (`src/config.py`, `SESSION_COOKIE`,
 `SECURE_COOKIE_ENVIRONMENTS`, `LOGIN_THROTTLE`, `AppSettings.session_cookie_secure`).
@@ -271,3 +272,23 @@ therefore no `password_hash` or `session_token_hash`) is retained; `repr()` and
 tests for an empty `va_session` cookie, the absence of `Set-Cookie` on every
 authentication refusal, and a non-authentication service fault (`ClockError`)
 remaining a sanitized 500 rather than a 401.
+
+P5.4.5 adds `POST /api/v1/auth/login` (`src/api_login.py`): username lookup via
+`find_by_username`, one real Argon2id verification, `DUMMY_PASSWORD_HASH` for
+unknown accounts, `needs_rehash` → `update_password_hash` before issuance,
+`issue_session` plus the approved `va_session` cookie, and a credential-free 200
+body. Login requires exactly one `Origin` matching the exact allowlist:
+`TRUSTED_ORIGINS` defaults to development `http://localhost:3000` and an empty
+(fail-closed) tuple in testing/staging/production; deployments supply their
+exact origins through `ATTENDANCE_TRUSTED_ORIGINS`, tests inject
+`https://attendance.test.invalid` through `AppSettings.login_trusted_origins`,
+and every entry is validated at construction. `src/origin.py` parses strictly
+(refusing userinfo, paths, query/fragment — including a trailing `?` or `#` —
+invalid ports and IPv6 zone identifiers) and `403 ORIGIN_NOT_ALLOWED` is
+sanitized. `build_login_service` fails closed on a missing/blank DSN before
+importing the repository layer and shares one user repository between the
+lookup and the session service. The
+Next.js proxy allowlists the login route alone and forwards its `Origin`, but
+still drops `Set-Cookie`, so browser session establishment waits for the BFF
+milestone. Logout, `/me`, throttling, RBAC, audit logging and protection of the
+eight business routes remain unimplemented.

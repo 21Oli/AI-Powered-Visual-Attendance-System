@@ -271,3 +271,66 @@ def test_module_import_is_driver_free_in_a_fresh_process() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "OK"
+
+
+# ---------------------------------------------------------------------------
+# update_password_hash (P5.4.5 rehash persistence)
+# ---------------------------------------------------------------------------
+
+_NEW_HASH = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA"
+
+
+def test_update_password_hash_sets_only_hash_and_updated_at() -> None:
+    from src.clock import utc_now
+
+    server, repository = build(rows=[user_row()])
+    before = utc_now()
+    assert repository.update_password_hash("u_0001", _NEW_HASH) is None
+    after = utc_now()
+
+    assert "UPDATE app_user SET password_hash = %s, updated_at = %s WHERE user_id = %s" in server.last_sql
+    assert "RETURNING user_id" in server.last_sql
+    assert "role" not in server.last_sql
+    assert "is_active" not in server.last_sql
+    assert "username" not in server.last_sql
+
+    password_hash, updated_at, user_id = server.last_params
+    assert password_hash == _NEW_HASH
+    assert user_id == "u_0001"
+    assert updated_at.tzinfo is not None
+    assert before <= updated_at <= after
+    assert server.connections[0].committed is True
+    assert server.connections[0].closed is True
+
+
+def test_update_password_hash_never_interpolates_the_hash_into_sql() -> None:
+    server, repository = build(rows=[user_row()])
+    repository.update_password_hash("u_0001", _NEW_HASH)
+    assert _NEW_HASH not in server.last_sql
+    assert "argon2" not in server.last_sql
+    assert server.last_sql.count("%s") == 3
+
+
+def test_update_password_hash_missing_user_is_a_typed_error() -> None:
+    server, repository = build(rows=[])
+    with pytest.raises(UserNotFound):
+        repository.update_password_hash("u_missing", _NEW_HASH)
+
+
+def test_update_password_hash_propagates_driver_failures_unchanged() -> None:
+    server, repository = build(rows=[user_row()])
+    server.error = FakeDriverError("42P01")
+    with pytest.raises(FakeDriverError) as excinfo:
+        repository.update_password_hash("u_0001", _NEW_HASH)
+    # The repository propagates the driver error unchanged (the API layer is
+    # what sanitizes it); no typed mapping swallows it.
+    assert isinstance(excinfo.value, FakeDriverError)
+    assert server.connections[0].closed is True
+
+
+def test_update_password_hash_rejects_an_empty_hash_before_any_query() -> None:
+    server, repository = build(rows=[user_row()])
+    for bad in ("", "   ", None, 123):
+        with pytest.raises(UserValidationError):
+            repository.update_password_hash("u_0001", bad)  # type: ignore[arg-type]
+    assert server.calls == []

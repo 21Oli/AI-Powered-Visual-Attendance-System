@@ -696,3 +696,158 @@ def test_no_client_controlled_or_security_disable_switch_exists() -> None:
         for name in public_names
         for fragment in forbidden_fragments
     )
+
+
+# ---------------------------------------------------------------------------
+# Trusted login origins (P5.4.5)
+# ---------------------------------------------------------------------------
+
+
+def test_trusted_origins_are_exact_per_environment() -> None:
+    from src.config import TRUSTED_ORIGINS
+
+    assert TRUSTED_ORIGINS["development"] == ("http://localhost:3000",)
+    assert TRUSTED_ORIGINS["testing"] == ()
+    assert TRUSTED_ORIGINS["staging"] == ()
+    assert TRUSTED_ORIGINS["production"] == ()
+    assert "*" not in str(TRUSTED_ORIGINS)
+
+
+def test_default_settings_select_the_environment_allowlist() -> None:
+    from src.config import AppSettings
+
+    assert AppSettings().login_trusted_origins == ("http://localhost:3000",)
+    for environment in ("testing", "staging", "production"):
+        assert AppSettings(app_env=environment).login_trusted_origins == ()  # type: ignore[arg-type]
+
+
+def test_injected_allowlist_is_used_verbatim() -> None:
+    from src.config import AppSettings
+
+    settings = AppSettings(
+        app_env="testing",
+        login_trusted_origins=("https://attendance.test.invalid",),
+    )
+    assert settings.login_trusted_origins == ("https://attendance.test.invalid",)
+    assert AppSettings(app_env="staging").login_trusted_origins == ()
+
+
+def test_allowlist_accepts_canonical_equivalent_spellings() -> None:
+    from src.config import AppSettings
+
+    settings = AppSettings(
+        app_env="testing",
+        login_trusted_origins=("HTTPS://Attendance.Test.Invalid:443/",),
+    )
+    assert settings.login_trusted_origins == ("HTTPS://Attendance.Test.Invalid:443/",)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "*",
+        "https://attendance.test.invalid/login",
+        "https://attendance.test.invalid?x=1",
+        "https://user:pass@attendance.test.invalid",
+        "ftp://attendance.test.invalid",
+        "not-an-origin",
+        "",
+    ],
+)
+def test_invalid_injected_origins_are_refused_at_construction(bad: str) -> None:
+    from src.config import AppSettings, ConfigError
+
+    with pytest.raises(ConfigError):
+        AppSettings(app_env="testing", login_trusted_origins=(bad,))
+
+
+def test_duplicate_injected_origins_are_refused() -> None:
+    from src.config import AppSettings, ConfigError
+
+    with pytest.raises(ConfigError):
+        AppSettings(
+            app_env="testing",
+            login_trusted_origins=(
+                "https://attendance.test.invalid",
+                "https://ATTENDANCE.test.invalid:443",
+            ),
+        )
+
+
+def test_trusted_origins_must_be_a_tuple() -> None:
+    from src.config import AppSettings, ConfigError
+
+    with pytest.raises(ConfigError):
+        AppSettings(
+            app_env="testing",
+            login_trusted_origins=["https://attendance.test.invalid"],  # type: ignore[arg-type]
+        )
+
+
+def test_environment_supplies_staging_and_production_origins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deployments name their exact origin: no invented URL, no wildcard."""
+    from src.config import load_settings
+
+    monkeypatch.setenv("APP_ENV", "staging")
+    monkeypatch.setenv(
+        "ATTENDANCE_TRUSTED_ORIGINS", "https://dash.staging.example.com"
+    )
+
+    settings = load_settings()
+
+    assert settings.app_env == "staging"
+    assert settings.login_trusted_origins == ("https://dash.staging.example.com",)
+    assert "*" not in str(settings.login_trusted_origins)
+
+
+def test_environment_origin_list_is_split_and_trimmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.config import load_settings
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "ATTENDANCE_TRUSTED_ORIGINS",
+        " https://dash.example.com , https://admin.example.com:8443 ",
+    )
+
+    assert load_settings().login_trusted_origins == (
+        "https://dash.example.com",
+        "https://admin.example.com:8443",
+    )
+
+
+def test_malformed_environment_origin_is_refused_at_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.config import ConfigError, load_settings
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("ATTENDANCE_TRUSTED_ORIGINS", "*")
+
+    with pytest.raises(ConfigError):
+        load_settings()
+
+
+def test_blank_environment_origin_list_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.config import load_settings
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("ATTENDANCE_TRUSTED_ORIGINS", "   ")
+
+    assert load_settings().login_trusted_origins == ()
+
+
+def test_unset_environment_origin_list_keeps_the_fail_closed_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.config import load_settings
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("ATTENDANCE_TRUSTED_ORIGINS", raising=False)
+
+    assert load_settings().login_trusted_origins == ()

@@ -49,14 +49,25 @@ interface RouteRule {
   /** `:employee_id` marks the one variable segment. */
   readonly pattern: readonly string[];
   readonly allowsEmployeeQuery: boolean;
+  /** Overrides the default body rule (login is a `POST` with a body). */
+  readonly acceptsBody?: boolean;
+  /** Only login forwards the browser's `Origin` (P5.4.5). */
+  readonly forwardsOrigin?: boolean;
 }
 
 /**
- * The approved allowlist: exactly the eight method/path pairs the backend
- * publishes. Nothing else is reachable through the proxy.
+ * The approved allowlist: the eight backend business routes plus the P5.4.5
+ * login route. Nothing else is reachable through the proxy.
  */
 const ROUTE_RULES: readonly RouteRule[] = [
   { method: "GET", pattern: ["api", "v1", "health"], allowsEmployeeQuery: false },
+  {
+    method: "POST",
+    pattern: ["api", "v1", "auth", "login"],
+    allowsEmployeeQuery: false,
+    acceptsBody: true,
+    forwardsOrigin: true,
+  },
   { method: "POST", pattern: ["api", "v1", "employees"], allowsEmployeeQuery: false },
   {
     method: "GET",
@@ -96,8 +107,10 @@ export interface MatchedRoute {
   readonly segments: readonly string[];
   readonly employeeId: string | null;
   readonly allowsEmployeeQuery: boolean;
-  /** Only POST /employees and PATCH /employees/{id} contract a request body. */
+  /** Only POST /employees, PATCH /employees/{id} and login carry a body. */
   readonly acceptsBody: boolean;
+  /** Only login forwards the browser's `Origin` header unchanged. */
+  readonly forwardsOrigin: boolean;
 }
 
 function matchesPattern(
@@ -136,8 +149,10 @@ export function matchProxyRoute(
       employeeId,
       allowsEmployeeQuery: rule.allowsEmployeeQuery,
       acceptsBody:
-        (rule.method === "POST" && rule.pattern.length === 3) ||
-        (rule.method === "PATCH" && rule.pattern.length === 4),
+        rule.acceptsBody ??
+        ((rule.method === "POST" && rule.pattern.length === 3) ||
+          (rule.method === "PATCH" && rule.pattern.length === 4)),
+      forwardsOrigin: rule.forwardsOrigin === true,
     };
   }
   return null;

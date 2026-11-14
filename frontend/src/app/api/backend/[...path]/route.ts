@@ -91,6 +91,15 @@ async function handle(
   if (body !== undefined) {
     headers["content-type"] = "application/json";
   }
+  if (matched.forwardsOrigin) {
+    // Login only: forward the browser's Origin exactly as received. It is
+    // never synthesized — an absent Origin stays absent so the backend
+    // rejects the request — and no other client header is passed through.
+    const origin = request.headers.get("origin");
+    if (origin !== null) {
+      headers.origin = origin;
+    }
+  }
 
   let upstream: Response;
   try {
@@ -139,6 +148,9 @@ async function handle(
     );
   }
 
+  // The response is rebuilt from the body alone: the backend's `Set-Cookie`
+  // is intentionally not forwarded yet. Browser session integration is a
+  // later milestone (P5.4.7), so this proxy stays cookie-free by design.
   return new Response(text, {
     status: upstream.status,
     headers: {

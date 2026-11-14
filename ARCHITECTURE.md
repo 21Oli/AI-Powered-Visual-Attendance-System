@@ -971,3 +971,78 @@ the journal schema version (still 1), or the decision authority.
   inventory is still the approved eight unauthenticated business endpoints.
   No cookie is issued or refreshed by the dependency, and there is no CSRF,
   throttling, RBAC, audit logging or proxy change (later milestones).
+
+### D26 — Login, password rehash and exact trusted-origin validation (Phase 5, P5.4.5)
+
+* **Endpoint.** `POST /api/v1/auth/login` (`src/api_login.py`) accepts exactly
+  `{username, password}` (`extra="forbid"`, username 1-64 chars, password
+  1-1024 chars) and returns `200 {"user": {user_id, username, role,
+  is_active}}`. Identity comes from the validated `app_user` row; the body never
+  contains a token, digest, hash or session record.
+* **Verification order** (`LoginService.authenticate`). Lookup through
+  `UserRepository.find_by_username` (which derives the key with
+  `username_key_for`, so the service never normalises the username itself); one
+  real Argon2id verification in every case; then rejection, rehash, or session
+  issuance, in that order. Passwords are never trimmed, normalised or logged.
+* **Dummy hash.** An unknown account is verified against
+  `api_login.DUMMY_PASSWORD_HASH`, a precomputed Argon2id hash (approved
+  m=19456/t=2/p=1, 16-byte salt, 32-byte hash) of a random value discarded at
+  generation. It is a constant, so no per-request hashing occurs; its plaintext
+  is not stored and the value is never returned or logged.
+* **Indistinguishable failures.** Unknown username, wrong password and inactive
+  account all raise the existing `AuthenticationRequired` → one sanitized
+  `401 AUTHENTICATION_REQUIRED`. An inactive account's *real* stored hash is
+  verified before refusal, so timing and status reveal nothing. A malformed
+  username (too short, control characters) also takes the dummy path and the
+  same 401, never a 500.
+* **Rehash.** After a successful verification, `PasswordService.needs_rehash`
+  triggers `hash_password` and `UserRepository.update_password_hash(user_id,
+  password_hash)`, which is `UPDATE app_user SET password_hash = %s, updated_at
+  = %s WHERE user_id = %s RETURNING user_id` with `updated_at` from
+  `src.clock.utc_now`; only those two columns change and a missing row raises
+  `UserNotFound`. Persistence happens **before** session issuance, so a failed
+  rehash (e.g. a 503) cannot produce a session; incorrect passwords and
+  inactive accounts never rehash.
+* **Session and cookie.** `SessionService.issue_session` keeps the approved
+  8-hour idle / 12-hour absolute lifetimes and persists only the SHA-256 token
+  digest; `set_session_cookie` emits the approved `va_session` cookie
+  (`/api/v1`, HttpOnly, Lax, 43200 s, no Domain, Secure in staging/production).
+  The raw token exists only as that header value. If issuance fails, the
+  response is the existing sanitized 503 with no cookie.
+* **Trusted origins.** `TRUSTED_ORIGINS` in `src/config.py` is an immutable
+  per-environment mapping of exact defaults: development
+  `http://localhost:3000`; testing, staging and production **empty** (login
+  unavailable, fail closed). A deployment names its exact dashboard origins
+  through `ATTENDANCE_TRUSTED_ORIGINS` (comma-separated); tests inject
+  `https://attendance.test.invalid` through the single setting
+  `AppSettings.login_trusted_origins`, the same name the login guard reads.
+  Every entry — injected or environment-supplied — is canonicalised and
+  validated at construction: a wildcard, URL with a path/query, malformed
+  value, duplicate or non-tuple raises `ConfigError` instead of being ignored,
+  and an unknown `app_env` is refused the same way. There is no wildcard entry
+  and no switch that widens or disables Origin validation.
+* **Origin validation.** `src/origin.py` parses one strict RFC 6454 origin
+  (`http`/`https`, no userinfo, no path/query/fragment, valid host and port,
+  canonical lowercasing, default port dropped). A `?` or `#` is refused
+  wherever it appears — including a trailing one, which `urlsplit` would
+  otherwise report as an empty query/fragment — and scoped IPv6 literals
+  (`fe80::1%eth0`) are refused. Login requires **exactly one** `Origin` header
+  that equals an allowlist entry; missing, empty, `null`, malformed,
+  duplicated, comma-separated and untrusted values all raise
+  `OriginNotAllowed` → sanitized `403 ORIGIN_NOT_ALLOWED`. `Host`, `X-Forwarded-Host`,
+  `X-Forwarded-Proto` and similar headers are never consulted. An empty
+  empty allowlist fails closed, so staging/production login is unavailable
+  until their exact origins are configured.
+* **Proxy.** The same-origin Next.js proxy allowlists exactly
+  `POST /api/v1/auth/login` and forwards the browser's `Origin` unchanged for
+  that route only; an absent Origin is never synthesised, and no other client
+  header (cookies, authorization, forwarded host/proto) is passed through.
+  The proxy still rebuilds responses from the body, so **the backend's
+  `Set-Cookie` is dropped** — browser session establishment is the later BFF
+  milestone, and until then login is API-level only.
+* **Error mapping.** Login failures keep the existing conventions: 401
+  `AUTHENTICATION_REQUIRED`, 403 `ORIGIN_NOT_ALLOWED`, 422 `REQUEST_INVALID`,
+  503 `DATABASE_UNAVAILABLE`, 500 `INTERNAL_ERROR` for anything unexpected;
+  every response carries the server-generated `X-Request-ID`, inbound request
+  IDs are ignored, and no password, hash, dummy hash, token, digest or cookie
+  is logged.

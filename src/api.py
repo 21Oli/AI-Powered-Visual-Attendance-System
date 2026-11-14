@@ -40,10 +40,12 @@ Design rules (unchanged from the foundation step)
   middleware is installed: the P5.4.3 request-ID middleware
   (:mod:`src.api_request_context`), which only assigns a server-generated UUID
   and echoes it as ``X-Request-ID``. No CORS, authentication or authorization
-  middleware exists. P5.4.4 adds reusable session-cookie utilities
+  middleware exists. P5.4.4 added reusable session-cookie utilities
   (:mod:`src.api_cookies`) and a cookie-only authentication dependency
-  (:mod:`src.api_auth`); **no route uses them yet**, so the served route
-  inventory is still exactly the approved eight endpoints. Loopback-only
+  (:mod:`src.api_auth`); P5.4.5 adds ``POST /api/v1/auth/login``
+  (:mod:`src.api_login`), guarded by exact same-origin validation. The
+  dependency still guards nothing, so the eight business endpoints remain
+  unauthenticated; the served inventory is those eight plus login. Loopback-only
   binding is a development safety measure, explicitly not a production
   security boundary. Documentation URLs stay disabled.
 * **No automatic retries.** A failed persisted append is reported as
@@ -54,7 +56,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Literal
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -67,6 +69,15 @@ from src.api_auth import (
     AUTHENTICATION_REQUIRED_CODE,
     AUTHENTICATION_REQUIRED_MESSAGE,
     AuthenticationRequired,
+)
+from src.api_login import (
+    ORIGIN_NOT_ALLOWED_CODE,
+    ORIGIN_NOT_ALLOWED_MESSAGE,
+    LOGIN_PATH,
+    LoginService,
+    OriginNotAllowed,
+    build_login_service,
+    register_login_route,
 )
 from src.api_request_context import (
     REQUEST_ID_HEADER,
@@ -111,13 +122,17 @@ PERSISTENCE_REJECTED_CODE: str = "PERSISTENCE_REJECTED"
 
 
 # ---------------------------------------------------------------------------
-# Approved route inventory (exactly these eight; never more)
+# Approved route inventory (exactly these nine; never more)
+#:
+#: P5.4.5 adds the login endpoint; the eight Phase 3 business routes stay
+#: unchanged and unauthenticated.
 # ---------------------------------------------------------------------------
 
 ApprovedRoute = tuple[str, str]  # (path without prefix, HTTP method)
 
 APPROVED_ROUTES: tuple[ApprovedRoute, ...] = (
     ("/health", "GET"),
+    ("/auth/login", "POST"),
     ("/employees", "POST"),
     ("/employees", "GET"),
     ("/employees/{employee_id}", "GET"),
@@ -276,6 +291,21 @@ def handle_database_config_error(
     )
 
 
+def handle_origin_not_allowed(
+    request: Request, exc: OriginNotAllowed
+) -> JSONResponse:
+    """Login was called without exactly one trusted ``Origin``.
+
+    A sanitized 403: the client is told only that the origin is unacceptable,
+    never which header it sent or whether an allowlist is configured.
+    """
+    _logger.warning(
+        "rejected request: untrusted origin request_id=%s",
+        request_id_for(request) or "unassigned",
+    )
+    return _error_json(403, ORIGIN_NOT_ALLOWED_CODE, ORIGIN_NOT_ALLOWED_MESSAGE)
+
+
 def handle_authentication_required(
     request: Request, exc: AuthenticationRequired
 ) -> JSONResponse:
@@ -362,6 +392,28 @@ def _resolve_services(
     return employee, attendance
 
 
+def _resolve_login_service(
+    settings: AppSettings, login_service: LoginService | None
+) -> Callable[[], LoginService]:
+    """Return a getter that builds the login service on first use (P5.4.5).
+
+    Same contract as ``_resolve_services``: the production composition (and
+    therefore psycopg) is imported inside the first login request, never during
+    ``create_app``. Offline tests inject their own service.
+    """
+
+    cache: dict[str, LoginService] = {}
+
+    def login() -> LoginService:
+        if login_service is not None:
+            return login_service
+        if "login" not in cache:
+            cache["login"] = build_login_service(settings)
+        return cache["login"]
+
+    return login
+
+
 # ---------------------------------------------------------------------------
 # Application factory
 # ---------------------------------------------------------------------------
@@ -372,6 +424,7 @@ def create_app(
     *,
     employee_service: object | None = None,
     attendance_service: object | None = None,
+    login_service: LoginService | None = None,
 ) -> FastAPI:
     """Create the Phase 3 API application (no server, no connections).
 
@@ -381,8 +434,8 @@ def create_app(
         Optional acknowledged settings. Used only to derive the attendance
         journal's data directory for the lazily built default services; the
         app itself never reads a DSN or binds a socket.
-    employee_service / attendance_service:
-        Offline-test seams. Production passes neither.
+    employee_service / attendance_service / login_service:
+        Offline-test seams. Production passes none of them.
     """
     from src.config import SETTINGS as _default_settings
 
@@ -390,11 +443,12 @@ def create_app(
     get_employee, get_attendance = _resolve_services(
         resolved_settings, employee_service, attendance_service
     )
+    get_login = _resolve_login_service(resolved_settings, login_service)
 
     app = FastAPI(
         title="Visual Attendance System API (Phase 3, development)",
         # Doc URLs disabled: the served route inventory must be exactly
-        # the approved eight endpoints (see module docstring).
+        # the approved endpoints (eight business routes + login).
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
@@ -412,6 +466,15 @@ def create_app(
         liveness claim about this process only — not a database readiness
         claim (``GET /api/v1/employees`` is the honest database probe)."""
         return HealthResponse()
+
+    # -- authentication (P5.4.5) ----------------------------------------
+
+    register_login_route(
+        app,
+        path=LOGIN_PATH,
+        get_login_service=get_login,
+        settings=resolved_settings,
+    )
 
     # -- employees ------------------------------------------------------
 
@@ -624,6 +687,7 @@ def create_app(
     app.add_exception_handler(DatabaseUnavailableError, handle_database_unavailable)
     app.add_exception_handler(MalformedDsnError, handle_database_config_error)
     app.add_exception_handler(AuthenticationRequired, handle_authentication_required)
+    app.add_exception_handler(OriginNotAllowed, handle_origin_not_allowed)
     app.add_exception_handler(Exception, handle_unexpected_error)
     return app
 

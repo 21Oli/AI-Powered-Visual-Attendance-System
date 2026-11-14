@@ -38,6 +38,7 @@ from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import Final
 
+from src.clock import utc_now
 from src.config import USER_PAGINATION
 from src.user import Role, User, username_key_for, UserValidationError
 
@@ -92,6 +93,13 @@ _UPDATE_ROLE_SQL: Final[str] = (
 _UPDATE_ACTIVE_SQL: Final[str] = (
     "UPDATE app_user SET is_active = %s, updated_at = %s WHERE user_id = %s "
     f"RETURNING {_SELECT_COLUMNS}"
+)
+
+#: Rehash persistence (P5.4.5): only the hash and ``updated_at`` change. Only
+#: the identifier is returned — the caller does not need the row back.
+_UPDATE_PASSWORD_HASH_SQL: Final[str] = (
+    "UPDATE app_user SET password_hash = %s, updated_at = %s WHERE user_id = %s "
+    "RETURNING user_id"
 )
 
 #: PostgreSQL unique-constraint violation SQLSTATE (duck-typed off the driver
@@ -321,6 +329,30 @@ class UserRepository:
                 "no user was updated because the requested user does not exist"
             )
         return _row_to_user(row)
+
+    def update_password_hash(self, user_id: str, password_hash: str) -> None:
+        """Replace one user's stored password hash (P5.4.5 rehash persistence).
+
+        Only ``password_hash`` and ``updated_at`` are written; username, role,
+        active status and the identifier are untouched. The encoding is the
+        P5.3 Argon2id string and is persisted verbatim (the repository never
+        re-hashes or truncates credential material). ``updated_at`` comes from
+        the application clock (:func:`src.clock.utc_now`), consistent with the
+        rest of this layer. Missing user → :class:`UserNotFound`.
+        """
+        if not isinstance(password_hash, str) or not password_hash.strip():
+            raise UserValidationError(
+                "password_hash must be a non-empty string"
+            )
+        user, updated = _validated_update_args(user_id, utc_now())
+        row = self._run(
+            _UPDATE_PASSWORD_HASH_SQL, (password_hash, updated, user)
+        ).fetchone()  # type: ignore[attr-defined]
+        if row is None:
+            raise UserNotFound(
+                "no user was updated because the requested user does not exist"
+            )
+        return None
 
 
 def _validated_update_args(
