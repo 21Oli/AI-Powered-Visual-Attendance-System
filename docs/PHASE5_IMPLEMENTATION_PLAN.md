@@ -237,7 +237,11 @@ completed rows exists in the tree.
 | P5.4.4 | Session-cookie utilities and cookie-only authentication dependency (`set_session_cookie`/`clear_session_cookie`, server-side 401 resolution, 503 preserved) | Completed (offline) |
 | P5.4.4.1 | Principal hardening: credential-free immutable `AuthenticatedPrincipal`, serialization tests, authentication edge-case tests | Completed (offline) |
 | P5.4.5 | `POST /auth/login` (password verification, dummy hash, rehash, session issuance, trusted-origin validation, proxy Origin forwarding) | Completed (offline) |
-| P5.4.6+ | `/auth/logout`, `/auth/me`, route protection, BFF cookie integration, login throttling (P5.4.9), integration tests and security review | Not started |
+| P5.4.6 | `POST /auth/logout` (cookie-only token, idempotent 204, cookie clearing) | Completed (offline) |
+| P5.4.7 | `GET /auth/me` (session-derived identity, `no-store`, credential-free body) | Completed (offline) |
+| P5.4.8 | Authentication BFF (one allowlist/transport at `/api/v1/auth/...`, `Origin` forwarding, `Set-Cookie` playback) | Completed (offline) |
+| P5.4.9 | Process-local fixed-window login throttle (5 failures / 15 min per normalized username, 429 + `Retry-After`) | Completed (offline) |
+| P5.4.10+ | Route protection, RBAC enforcement, audit logging, frontend auth UI, integration tests and security review | Not started |
 
 P5.4.2 adds configuration only (`src/config.py`, `SESSION_COOKIE`,
 `SECURE_COOKIE_ENVIRONMENTS`, `LOGIN_THROTTLE`, `AppSettings.session_cookie_secure`).
@@ -321,3 +325,22 @@ and bodies are preserved, and a 204 stays bodyless. The typed client gains
 `login`, `fetchCurrentUser` and `logout` with `credentials: "same-origin"` and
 no token handling in JavaScript. Login/logout UI, auth context, protected
 routes and RBAC UI remain unimplemented.
+
+P5.4.9 adds `src/login_throttle.py`: a fixed-window limiter keyed by the
+**normalized username** (`throttle_key_for` delegates to the same
+`src.user.username_key_for` the repository uses, and unkeyable input shares one
+isolated bucket so it can never block a real account). The first five failed
+attempts per 15-minute window are processed normally; from the fifth failure
+on, `LoginService.authenticate` raises `LoginRateLimited` **before** any lookup
+or Argon2id verification and the API answers `429 LOGIN_RATE_LIMITED` with a
+generic message and a whole-second `Retry-After`. A successful sign-in clears
+the key, an expired window starts clean (no permanent lockout), and database or
+internal failures abort their reservation instead of counting as a guess. The
+component uses `time.monotonic` through an injectable zero-argument clock, a
+`threading.Lock` plus a pre-verification slot reservation so concurrent
+requests cannot exceed five attempts, and purges expired entries under a key
+cap. The application creates exactly one instance and injects it into the
+single login service. Counters are **process-local**: multiple application
+processes have independent counters, and distributed rate limiting
+(Redis/shared storage), IP throttling, CAPTCHA, MFA and account lockout remain
+unimplemented.

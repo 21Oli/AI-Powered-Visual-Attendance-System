@@ -47,9 +47,11 @@ Design rules (unchanged from the foundation step)
   (:mod:`src.api_logout`), both guarded by exact same-origin validation;
   P5.4.7 adds the read-only, cookie-authenticated
   ``GET /api/v1/auth/me`` (:mod:`src.api_me`), which needs no Origin check
-  because it changes nothing. The dependency still guards nothing else, so the
-  eight business endpoints remain unauthenticated; the served inventory is
-  those eight plus login, logout and me.
+  because it changes nothing, and P5.4.9 adds a process-local fixed-window
+  limiter on login (:mod:`src.login_throttle`, 429 + ``Retry-After``). The
+  dependency still guards nothing else, so the eight business endpoints remain
+  unauthenticated; the served inventory is those eight plus login, logout and
+  me.
   Loopback-only
   binding is a development safety measure, explicitly not a production
   security boundary. Documentation URLs stay disabled.
@@ -94,6 +96,12 @@ from src.api_request_context import (
 )
 from src.config import AppSettings, ConfigError, load_settings
 from src.db import DatabaseUnavailableError, MalformedDsnError
+from src.login_throttle import (
+    LOGIN_RATE_LIMITED_CODE,
+    LOGIN_RATE_LIMITED_MESSAGE,
+    LoginRateLimited,
+    LoginThrottle,
+)
 from src.logging_setup import get_logger
 from src.session_service import SessionService
 
@@ -336,6 +344,26 @@ def handle_authentication_required(
     )
 
 
+def handle_login_rate_limited(
+    request: Request, exc: LoginRateLimited
+) -> JSONResponse:
+    """Too many failed attempts for this username: sanitized 429.
+
+    The body never names the username, the account, the attempt count or the
+    window start, and the only extra header is the whole-second ``Retry-After``
+    the client needs to wait. Logging stays request-ID only.
+    """
+    _logger.warning(
+        "rejected request: login rate limited request_id=%s",
+        request_id_for(request) or "unassigned",
+    )
+    response = _error_json(
+        429, LOGIN_RATE_LIMITED_CODE, LOGIN_RATE_LIMITED_MESSAGE
+    )
+    response.headers["retry-after"] = str(exc.retry_after_seconds)
+    return response
+
+
 def handle_unexpected_error(request: Request, exc: BaseException) -> JSONResponse:
     """Last-resort 500: the client sees only a generic message; trusted
     diagnostics are logged server-side and never returned.
@@ -405,22 +433,31 @@ def _resolve_services(
 
 
 def _resolve_login_service(
-    settings: AppSettings, login_service: LoginService | None
+    settings: AppSettings,
+    login_service: LoginService | None,
+    throttle: LoginThrottle | None,
 ) -> Callable[[], LoginService]:
     """Return a getter that builds the login service on first use (P5.4.5).
 
     Same contract as ``_resolve_services``: the production composition (and
     therefore psycopg) is imported inside the first login request, never during
     ``create_app``. Offline tests inject their own service.
+
+    P5.4.9: exactly **one** :class:`LoginThrottle` belongs to the application
+    instance and is injected into the login service, so every request shares
+    the same counters instead of building a fresh limiter per request.
     """
 
+    resolved_throttle = throttle if throttle is not None else LoginThrottle()
     cache: dict[str, LoginService] = {}
 
     def login() -> LoginService:
         if login_service is not None:
             return login_service
         if "login" not in cache:
-            cache["login"] = build_login_service(settings)
+            cache["login"] = build_login_service(
+                settings, throttle=resolved_throttle
+            )
         return cache["login"]
 
     return login
@@ -461,6 +498,7 @@ def create_app(
     attendance_service: object | None = None,
     login_service: LoginService | None = None,
     session_service: SessionService | None = None,
+    login_throttle: LoginThrottle | None = None,
 ) -> FastAPI:
     """Create the Phase 3 API application (no server, no connections).
 
@@ -470,8 +508,10 @@ def create_app(
         Optional acknowledged settings. Used only to derive the attendance
         journal's data directory for the lazily built default services; the
         app itself never reads a DSN or binds a socket.
-    employee_service / attendance_service / login_service / session_service:
-        Offline-test seams. Production passes none of them.
+    employee_service / attendance_service / login_service / session_service /
+    login_throttle:
+        Offline-test seams. Production passes none of them; the application
+        then owns one shared :class:`LoginThrottle` (P5.4.9).
     """
     from src.config import SETTINGS as _default_settings
 
@@ -479,7 +519,9 @@ def create_app(
     get_employee, get_attendance = _resolve_services(
         resolved_settings, employee_service, attendance_service
     )
-    get_login = _resolve_login_service(resolved_settings, login_service)
+    get_login = _resolve_login_service(
+        resolved_settings, login_service, login_throttle
+    )
     get_sessions = _resolve_session_service(resolved_settings, session_service)
 
     app = FastAPI(
@@ -742,6 +784,7 @@ def create_app(
     app.add_exception_handler(MalformedDsnError, handle_database_config_error)
     app.add_exception_handler(AuthenticationRequired, handle_authentication_required)
     app.add_exception_handler(OriginNotAllowed, handle_origin_not_allowed)
+    app.add_exception_handler(LoginRateLimited, handle_login_rate_limited)
     app.add_exception_handler(Exception, handle_unexpected_error)
     return app
 

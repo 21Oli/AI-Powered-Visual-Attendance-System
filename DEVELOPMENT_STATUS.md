@@ -3,6 +3,85 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 61 — Phase 5 P5.4.9: login rate limiting (2026-11-14)
+
+**Backend security only. No new route, no schema change, no frontend change, no
+Git operation.**
+
+* **Baseline**: branch `main`, HEAD
+  `761d8d8b0bf41c280c85fa7327a1c75fbf8977ad` (P5.4.8, committed and accepted),
+  clean working tree (`git status --short` and `git diff --stat` empty).
+* **Component** — `src/login_throttle.py` implements a fixed-window counter:
+  five failed attempts per normalized username per 15-minute window
+  (`LOGIN_THROTTLE`), the first five processed normally, the sixth refused; a
+  successful sign-in deletes the key, an expired window starts clean, and no
+  state outlives its window (no permanent lockout).
+* **Keying** — `throttle_key_for` delegates to `src.user.username_key_for`, the
+  same function the repository uses, so `"  Ada "`, `"ADA"` and `"ada"` share
+  one counter and different users never interact. Input that cannot form a key
+  (`"ab"`, control characters) shares one isolated bucket, so nonexistent and
+  malformed usernames are limited identically without ever blocking a real
+  account.
+* **Clock and concurrency** — elapsed time comes from `time.monotonic` through
+  an injectable zero-argument clock (tests use a fake; nothing sleeps). One
+  `threading.Lock` covers check/record/reset, and `begin_attempt` reserves the
+  slot before verification, so `failures + in_flight` never exceeds five: 20
+  simultaneous attempts still yield exactly five verifications.
+* **Reservation identity** — `begin_attempt` returns a `Reservation` (key +
+  the window entry's generation) and `LoginService` finalises with that handle.
+  `abort_attempt` releases exactly its own `in_flight` slot, preserves already
+  counted failures and deletes an entry left with no failures and no
+  reservations. A stale handle (expired window, cap eviction, concurrent
+  successful reset) is a no-op for the newer entry, so an old attempt can never
+  release another request's reservation; a stale *failure* is still counted in
+  the current window. `record_success`/`record_failure`/`abort_attempt` also
+  accept a bare username for legacy callers, which resolves the current entry
+  but gives up the staleness guarantee (no production path uses it).
+* **Memory** — expired entries are purged on every mutation and tracked keys
+  are capped (oldest windows evicted first), so the map cannot grow without
+  bound; eviction can only forgive a limiter and never block a new user.
+* **Login integration** — `LoginService` consults the limiter before any lookup
+  or Argon2id verification and raises `LoginRateLimited`, so a blocked request
+  performs no verification and issues no session. Only `AuthenticationRequired`
+  is counted; `DatabaseUnavailableError` and unexpected faults abort the
+  reservation and keep their sanitized 503/500 without consuming an attempt.
+  The dummy-hash path for unknown usernames, `needs_rehash`, session issuance
+  and the generic 401 are unchanged.
+* **HTTP** — a blocked request is `429 LOGIN_RATE_LIMITED` with the fixed
+  message `Too many failed sign-in attempts. Try again later.` and a
+  whole-second `Retry-After`; the body names no username, account, attempt
+  count or window start, and logging stays request-ID only. Trusted-Origin
+  validation still runs first (403 before any limiter decision).
+* **Lifecycle** — `_resolve_login_service` builds exactly one `LoginThrottle`
+  per application and injects it into the single cached `LoginService`
+  (`create_app` gains a `login_throttle` seam for tests); there is no new
+  module-level mutable state and no per-request limiter.
+* **Tests** — `tests/test_login_throttle.py` (45) plus 17 new tests in
+  `tests/test_api_login.py` (including 25 consecutive database failures that
+  never produce a 429).
+* **Docs** — `ARCHITECTURE.md` (login throttling), `CHANGELOG.md`,
+  `docs/PHASE5_IMPLEMENTATION_PLAN.md` §8.
+
+**Verified**
+
+* Focused: `tests/test_login_throttle.py` + `tests/test_api_login.py` →
+  **125 passed**, exit 0.
+* Full backend suite: **2962 passed, 32 skipped**, exit 0 (the 32 skips are the
+  pre-existing opt-in PostgreSQL tier).
+* No Python linter or type checker is configured in this repository, so none
+  was run (`pyproject.toml`/`setup.cfg`/`.flake8`/`ruff.toml` are absent); new
+  modules import cleanly under the suite's default warnings.
+
+**Not verified / deferred**
+
+* No live PostgreSQL, browser, camera, deployment or multi-process validation.
+  Counters are process-local by design: separate worker processes keep
+  separate counters, and distributed rate limiting is not implemented.
+* No IP throttling, CAPTCHA, MFA, account lockout, 429 UI or frontend change;
+  no session lifetime, cookie, hashing or role policy change.
+* `git diff --check` clean; changes are unstaged and uncommitted for
+  independent review (no Git mutation of any kind was performed).
+
 ## Step 60 — Phase 5 P5.4.8: authentication BFF proxy integration (2026-11-14)
 
 **Proxy boundary only. No login page, logout control, auth context, protected

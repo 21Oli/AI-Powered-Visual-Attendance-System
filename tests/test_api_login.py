@@ -31,6 +31,11 @@ from src.api_login import (
 from src.api_request_context import REQUEST_ID_HEADER
 from src.config import SESSION_COOKIE, AppSettings, PasswordHashingConfig
 from src.db import DatabaseUnavailableError
+from src.login_throttle import (
+    LOGIN_RATE_LIMITED_CODE,
+    LOGIN_RATE_LIMITED_MESSAGE,
+    LoginThrottle,
+)
 from src.password import PasswordService
 from src.session_service import SessionService
 from src.session_token import session_token_digest
@@ -142,6 +147,7 @@ def build(
     *,
     users: list[User] | None = None,
     clock: MutableClock | None = None,
+    throttle: LoginThrottle | None = None,
 ) -> tuple[LoginService, FakeUserRepository, FakeSessionRepository, MutableClock]:
     user_repository = FakeUserRepository(users or [make_user()])
     session_repository = FakeSessionRepository()
@@ -155,6 +161,7 @@ def build(
         users=user_repository,  # type: ignore[arg-type]
         passwords=_PASSWORD_SERVICE,
         sessions=sessions,
+        throttle=throttle,
     )
     return service, user_repository, session_repository, test_clock
 
@@ -915,3 +922,283 @@ def test_login_is_not_available_without_configuration() -> None:
 
     assert not hasattr(login_module, "_logger")
     assert CLEAR_COOKIE_EXPIRES == "Thu, 01 Jan 1970 00:00:00 GMT"
+
+
+# ---------------------------------------------------------------------------
+# I. Rate limiting (P5.4.9)
+# ---------------------------------------------------------------------------
+
+
+class MutableMonotonic:
+    """Deterministic monotonic clock for the limiter (no sleeping in tests)."""
+
+    def __init__(self, now: float = 1_000.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _limited_build():
+    monotonic = MutableMonotonic()
+    throttle = LoginThrottle(clock=monotonic)
+    service, users, sessions, clock = build(throttle=throttle)
+    return service, users, sessions, clock, monotonic, throttle
+
+
+def _fail_five(app, *, username: str = "ada") -> None:
+    for index in range(5):
+        response = login(app, username=username, password=f"wrong password {index}")
+        _assert_generic_refusal(response)
+
+
+def _assert_rate_limited(response: dict) -> None:
+    assert response["status"] == 429
+    assert response["payload"] == {
+        "error": {
+            "code": LOGIN_RATE_LIMITED_CODE,
+            "message": LOGIN_RATE_LIMITED_MESSAGE,
+        }
+    }
+    assert _header_values(response, "set-cookie") == []
+    assert _request_id(response)
+
+
+def test_five_failures_are_processed_and_the_sixth_is_rate_limited() -> None:
+    service, _, sessions, _, _, _ = _limited_build()
+    app = _app(service)
+
+    _fail_five(app)
+    response = login(app, password="another wrong password")
+
+    _assert_rate_limited(response)
+    assert _header_values(response, "retry-after") == ["900"]
+    assert sessions.rows == {}
+
+
+def test_rate_limited_response_is_generic_and_hides_the_username() -> None:
+    service, _, _, _, _, _ = _limited_build()
+    app = _app(service)
+    _fail_five(app)
+
+    response = login(app, password="wrong again")
+    text = response["body"].decode("utf-8")
+
+    assert "ada" not in text
+    assert "user-1" not in text
+    assert "argon2" not in text.lower()
+    assert response["payload"]["error"] == {
+        "code": LOGIN_RATE_LIMITED_CODE,
+        "message": LOGIN_RATE_LIMITED_MESSAGE,
+    }
+
+
+def test_rate_limited_attempt_does_not_verify_the_password() -> None:
+    service, _, _, _, _, _ = _limited_build()
+    calls: list[str] = []
+    original = service._passwords
+
+    class Recording(PasswordService):
+        def verify_password(self, password: str, password_hash: str) -> bool:
+            calls.append(password)
+            return original.verify_password(password, password_hash)
+
+    service._passwords = Recording()  # type: ignore[attr-defined]
+    app = _app(service)
+
+    _fail_five(app)
+    assert len(calls) == 5, "each of the first five runs a real verification"
+
+    calls.clear()
+    response = login(app, password=_PASSWORD, username="ada")
+
+    _assert_rate_limited(response)
+    assert calls == [], "a blocked attempt performs no Argon2id work"
+
+
+def test_rate_limited_attempt_creates_no_session_even_with_the_right_password() -> None:
+    service, _, sessions, _, _, _ = _limited_build()
+    app = _app(service)
+    _fail_five(app)
+
+    response = login(app, password=_PASSWORD)
+
+    _assert_rate_limited(response)
+    assert sessions.rows == {}
+
+
+def test_successful_login_resets_the_counter() -> None:
+    service, _, sessions, _, _, _ = _limited_build()
+    app = _app(service)
+
+    for index in range(4):
+        _assert_generic_refusal(
+            login(app, password=f"wrong password {index}")
+        )
+    assert login(app, password=_PASSWORD)["status"] == 200
+    assert len(sessions.rows) == 1
+
+    # The reset is real: four more failures are still ordinary 401s.
+    for index in range(4):
+        response = login(app, password=f"wrong again {index}")
+        assert response["status"] == 401
+
+
+def test_unknown_usernames_are_limited_by_the_same_policy() -> None:
+    service, _, sessions, _, _, _ = _limited_build()
+    app = _app(service)
+
+    _fail_five(app, username="missing-person")
+    response = login(app, username="missing-person", password=_PASSWORD)
+
+    _assert_rate_limited(response)
+    assert sessions.rows == {}
+
+
+def test_spelling_variants_of_one_username_share_one_counter() -> None:
+    """The limiter keys on the login normalization, not the raw input."""
+    service, _, _, _, _, _ = _limited_build()
+    app = _app(service)
+
+    for index in range(3):
+        assert login(app, password=f"wrong {index}")["status"] == 401
+    for index in range(2):
+        assert login(app, username="  ADA ", password=f"wrong {index}")[
+            "status"
+        ] == 401
+
+    _assert_rate_limited(login(app, username="Ada", password="wrong once more"))
+
+
+def test_failures_for_one_username_do_not_affect_another() -> None:
+    service, users, _, _, _, _ = _limited_build()
+    users.users["user-2"] = make_user(user_id="user-2", username="grace")
+    app = _app(service)
+
+    _fail_five(app)
+    assert login(app, password="wrong for grace", username="grace")["status"] == 401
+    assert login(app, password=_PASSWORD, username="grace")["status"] == 200
+
+
+def test_database_failure_does_not_consume_an_attempt() -> None:
+    service, users, _, _, _, _ = _limited_build()
+    users.find_failure = DatabaseUnavailableError("storage gone")
+    app = _app(service)
+
+    for _ in range(10):
+        assert login(app, password="wrong password")["status"] == 503
+
+    users.find_failure = None
+    for index in range(5):
+        response = login(app, password=f"wrong password {index}")
+        assert response["status"] == 401, "the outage consumed no attempts"
+
+
+def test_repeated_database_failures_never_lead_to_a_429() -> None:
+    """Every aborted reservation is released (P5.4.9 correction)."""
+    service, users, _, _, _, _ = _limited_build()
+    users.find_failure = DatabaseUnavailableError("storage gone")
+    app = _app(service)
+
+    for _ in range(25):
+        assert login(app, password="wrong password")["status"] == 503
+
+    users.find_failure = None
+    for index in range(5):
+        assert login(app, password=f"wrong password {index}")["status"] == 401
+    _assert_rate_limited(login(app, password="wrong password 5"))
+
+
+def test_database_failure_is_not_reported_as_rate_limited() -> None:
+    service, users, _, _, _, _ = _limited_build()
+    app = _app(service)
+    _fail_five(app)
+
+    users.find_failure = DatabaseUnavailableError("storage gone")
+    response = login(app, password="wrong password")
+
+    assert response["status"] == 429, "the limiter decides before any lookup"
+    assert response["payload"]["error"]["code"] == LOGIN_RATE_LIMITED_CODE
+
+
+def test_window_expiry_restores_normal_login() -> None:
+    service, _, _, _, monotonic, _ = _limited_build()
+    app = _app(service)
+    _fail_five(app)
+    _assert_rate_limited(login(app, password="wrong password"))
+
+    monotonic.advance(900)
+
+    response = login(app, password="wrong password")
+    assert response["status"] == 401, "a new window starts after fifteen minutes"
+
+
+def test_retry_after_counts_down() -> None:
+    service, _, _, _, monotonic, _ = _limited_build()
+    app = _app(service)
+    _fail_five(app)
+
+    monotonic.advance(60)
+    response = login(app, password="wrong password")
+
+    _assert_rate_limited(response)
+    assert _header_values(response, "retry-after") == ["840"]
+
+
+def test_origin_rejection_precedes_the_rate_limit() -> None:
+    service, _, _, _, _, _ = _limited_build()
+    app = _app(service)
+    _fail_five(app)
+
+    response = login(app, password=_PASSWORD, origin="https://evil.test")
+
+    _assert_origin_refusal(response)
+
+
+def test_rate_limited_response_keeps_the_request_id_and_no_credentials() -> None:
+    service, _, _, _, _, _ = _limited_build()
+    app = _app(service)
+    _fail_five(app)
+
+    response = login(app, password=_PASSWORD)
+    text = response["body"].decode("utf-8")
+
+    _assert_rate_limited(response)
+    for secret in (_PASSWORD, _HASH, "$argon2id", "va_session"):
+        assert secret not in text
+
+
+def test_rate_limit_state_is_shared_across_requests_and_not_per_request() -> None:
+    service, _, _, _, _, throttle = _limited_build()
+    app = _app(service)
+
+    for _ in range(5):
+        login(app, password="wrong password")
+
+    assert throttle.tracked_keys == 1
+    assert login(app, password="wrong password")["status"] == 429
+
+
+def test_rate_limited_request_is_logged_without_the_username(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[tuple[str, tuple[object, ...]]] = []
+    monkeypatch.setattr(
+        api_module._logger,
+        "warning",
+        lambda message, *args: captured.append((message, args)),
+    )
+    service, _, _, _, _, _ = _limited_build()
+    app = _app(service)
+    _fail_five(app)
+
+    login(app, password="wrong password")
+
+    rendered = "".join(f"{message}{args}" for message, args in captured)
+    assert captured
+    assert "ada" not in rendered
+    assert "password" not in rendered.lower()
+    assert "va_session" not in rendered

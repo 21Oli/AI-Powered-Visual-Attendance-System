@@ -1058,6 +1058,37 @@ the journal schema version (still 1), or the decision authority.
   reach JavaScript, React state, `localStorage`, `sessionStorage` or
   IndexedDB. A failed or unreachable backend is never reported as a successful
   sign-out.
+* **Login throttling (P5.4.9).** `src/login_throttle.py` is a **fixed-window**
+  counter keyed by the normalized username (the same
+  `src.user.username_key_for` the repository uses; a value that cannot form a
+  key, e.g. `"ab"`, shares one isolated bucket that can never block a real
+  account). Five failed attempts per 15-minute window are processed normally;
+  from the fifth failure on, `LoginService.authenticate` raises
+  `LoginRateLimited` **before** any lookup or password verification, no session
+  is issued, and the API returns `429 LOGIN_RATE_LIMITED` with the fixed
+  message `"Too many failed sign-in attempts. Try again later."` and a
+  whole-second `Retry-After`. The body names no username, account, attempt
+  count or window start. A successful sign-in deletes the key, an expired
+  window starts clean (no permanent lockout), different usernames never affect
+  each other, and nonexistent/malformed usernames are limited identically so
+  the limiter cannot be used for account enumeration. Only a genuine
+  credential failure is counted: `DatabaseUnavailableError` and unexpected
+  faults abort their reservation, keeping the existing sanitized 503/500 and
+  consuming no attempts. Time comes from `time.monotonic` through an injectable
+  clock (tests use a fake; nothing sleeps), a `threading.Lock` plus a
+  pre-verification slot reservation keeps `failures + in_flight` at or below
+  five under concurrency, and expired entries are purged under a key cap so
+  memory is bounded. Each attempt holds a `Reservation` (key + the window
+  entry's generation), so finalising a stale attempt — an expired window, a key
+  evicted by the cap, or a key reset by a concurrent successful sign-in — is a
+  no-op for the newer entry and can never release another request's slot. An
+  aborted reservation always decrements its own `in_flight`, keeps the failures
+  already counted, and removes an entry left with no failures and no
+  reservations; a stale failure is still counted in the current window. The application builds exactly one throttle in
+  `_resolve_login_service` and injects it into the single cached login service;
+  counters are **process-local**, so separate worker processes keep separate
+  counters. Distributed rate limiting, IP throttling, CAPTCHA, MFA and account
+  lockout are deliberately absent.
 * **Logout (P5.4.6).** `POST /api/v1/auth/logout` (`src/api_logout.py`) reads
   the raw token **only** from the configured `va_session` cookie (no query or
   body token exists), calls the existing

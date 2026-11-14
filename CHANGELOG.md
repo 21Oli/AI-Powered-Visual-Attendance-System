@@ -4,6 +4,31 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5, P5.4.9: login rate limiting
+
+### Added
+
+* `src/login_throttle.py` — process-local **fixed-window** login throttle. Five failed attempts per normalized username per 15-minute window (the approved `LOGIN_THROTTLE` values) are processed normally; from the fifth failure on the key is blocked. Keys come from `throttle_key_for`, which delegates to `src.user.username_key_for` (one normalization policy), and a value that cannot form a key (e.g. `"ab"`) shares one isolated bucket that can never block a real account. A successful sign-in deletes the key, an expired window starts clean, there is no permanent lockout, and `retry_after` returns whole seconds for `Retry-After`.
+* `src/login_throttle.py` — concurrency and memory safety: time comes from `time.monotonic` via an injectable zero-argument clock (tests inject a fake, nothing sleeps); a `threading.Lock` guards check/record/reset, and `begin_attempt` *reserves* a slot before verification so `failures + in_flight` can never exceed five; expired entries are purged on every mutation and the tracked keys are capped, evicting the oldest windows first.
+* `src/api_login.py` — `LoginService` takes the application's `LoginThrottle` (a private policy-limited instance if omitted), consults it **before** any lookup or Argon2id verification, counts only `AuthenticationRequired`, aborts its reservation for database/internal failures (so an outage is never a 429 and consumes no attempt), and resets the key after a successful issuance. Dummy-hash verification, rehash ordering and session issuance are unchanged.
+* `src/api.py` — `429 LOGIN_RATE_LIMITED` handler with the fixed message `"Too many failed sign-in attempts. Try again later."` and a whole-second `Retry-After`; `_resolve_login_service` builds exactly one throttle per application and injects it into the single cached login service (`create_app` gains a `login_throttle` test seam). Trusted-Origin rejection still runs first, and logging stays request-ID only.
+* `tests/test_login_throttle.py` (45) and 17 new `tests/test_api_login.py` tests — allowed/recorded/blocked flow, countdown, window expiry and exact boundaries, reset, per-username isolation, normalization parity with `username_key_for`, invalid-username bucket, 20-thread concurrency, reservation lifecycle and abortion, purge and key cap, configuration/clock validation, plus HTTP integration: 429 on the sixth attempt, no verification and no session while blocked, reset after success, unknown usernames, database failures not counted, `Retry-After` present and counting down, Origin still 403, request ID preserved, and no username/credential leakage in body or log.
+
+### Fixed
+
+* `src/login_throttle.py` — reservation finalisation is now bound to the window that issued it. `begin_attempt` returns a `Reservation` handle (key + entry generation), `LoginService` passes that handle back, and `abort_attempt`/`record_failure`/`record_success` accept it. A stale handle — from a window that expired, a key evicted by the cap, or a key reset by a concurrent successful sign-in — can no longer decrement a newer entry's `in_flight`, so finalising an old attempt cannot release another request's reservation. Releasing an aborted reservation still decrements `in_flight`, preserves the failures already counted, and removes an entry left with no failures and no reservations; a stale *failure* is still counted in the current window without touching its live reservations. Covered by new unit tests (single abort, four failures + abort, 250 repeated aborts, independent simultaneous aborts, one request not releasing another's slot, stale handle vs. a new window, stale failure, cap eviction, abort after reset) and an integration test where 25 database failures never produce a 429.
+
+### Notes
+
+* Counters are **process-local**: multiple application processes have independent counters. Distributed rate limiting (Redis or shared storage), IP throttling, CAPTCHA, MFA, account lockout and any database table or migration remain unimplemented, and no session/cookie/hash/role policy changed.
+* Verified offline only: no live PostgreSQL, browser, camera, deployment or multi-process validation was performed.
+
+### Verified
+
+* Focused: `tests/test_login_throttle.py` + `tests/test_api_login.py` → **125 passed**, exit 0.
+* Full backend suite: **2962 passed, 32 skipped** (pre-existing opt-in PostgreSQL tier), exit 0.
+* No Python linter/type checker is configured in this repository; `git diff --check` clean.
+
 ## [Unreleased] — Phase 5, P5.4.8: authentication BFF proxy integration
 
 ### Added

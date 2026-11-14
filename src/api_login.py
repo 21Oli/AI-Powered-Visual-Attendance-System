@@ -57,6 +57,7 @@ from starlette.responses import Response
 from src.api_auth import AuthenticatedPrincipal, AuthenticationRequired
 from src.api_cookies import set_session_cookie
 from src.config import PASSWORD_HASHING, AppSettings
+from src.login_throttle import LoginThrottle
 from src.origin import OriginSyntaxError, normalize_origin, origin_is_allowed
 from src.password import PasswordService
 from src.session_service import AuthenticatedSession, SessionService
@@ -160,6 +161,11 @@ class LoginService:
     users, passwords, sessions:
         Existing P5.2/P5.3/P5.3 implementations. Nothing here re-implements
         verification, hashing or session storage.
+    throttle:
+        The application's shared :class:`src.login_throttle.LoginThrottle`
+        (P5.4.9). The application injects one instance; when omitted a private
+        instance with the approved policy is used, so a directly constructed
+        service (tests, tooling) is never unlimited.
     """
 
     def __init__(
@@ -168,15 +174,24 @@ class LoginService:
         users: UserRepository,
         passwords: PasswordService,
         sessions: SessionService,
+        throttle: LoginThrottle | None = None,
     ) -> None:
         self._users = users
         self._passwords = passwords
         self._sessions = sessions
+        self._throttle = LoginThrottle() if throttle is None else throttle
 
     def authenticate(self, username: str, password: str) -> LoginResult:
         """Return the identity and token, or raise the generic refusal.
 
-        Order guarantees the public response is identical for every failure:
+        The failed-attempt limiter is consulted **before** any lookup or
+        password verification, so a blocked key costs no Argon2id work and can
+        never create a session. Only a genuine credential failure is counted;
+        a database or internal failure aborts the reservation instead, so an
+        outage neither consumes attempts nor becomes a 429.
+
+        Inside that guard the order is unchanged and still guarantees an
+        identical public response for every failure:
 
         1. ``find_by_username`` (normalization is the repository's contract),
            falling back to :data:`DUMMY_PASSWORD_HASH` for an unknown account;
@@ -187,6 +202,22 @@ class LoginService:
         4. ``issue_session`` — the only place a token exists;
         5. the credential-free principal projection.
         """
+        reservation = self._throttle.begin_attempt(username)
+        try:
+            result = self._authenticate(username, password)
+        except AuthenticationRequired:
+            self._throttle.record_failure(reservation)
+            raise
+        except BaseException:
+            # Infrastructure/clock/programming failure: not a guessed password,
+            # so the reservation is released rather than counted.
+            self._throttle.abort_attempt(reservation)
+            raise
+        self._throttle.record_success(reservation)
+        return result
+
+    def _authenticate(self, username: str, password: str) -> LoginResult:
+        """Verify one credential pair and issue a session (see authenticate)."""
         try:
             user = self._users.find_by_username(username)
         except UserValidationError:
@@ -281,12 +312,18 @@ def register_login_route(
         return response
 
 
-def build_login_service(settings: AppSettings) -> LoginService:
+def build_login_service(
+    settings: AppSettings,
+    *,
+    throttle: LoginThrottle | None = None,
+) -> LoginService:
     """Build the production login service lazily (no connection, no hashing).
 
     Mirrors ``build_session_service``: the DSN availability check happens
     before the repository modules (and psycopg) are imported, and constructing
-    the service opens nothing and hashes nothing.
+    the service opens nothing and hashes nothing. ``throttle`` is the
+    application's shared limiter; when omitted a private one is created, which
+    is correct for a one-off service but not for the API (which injects).
     """
     from src.db import DatabaseUnavailableError
 
@@ -311,4 +348,5 @@ def build_login_service(settings: AppSettings) -> LoginService:
         users=users,
         passwords=PasswordService(),
         sessions=SessionService(users=users, sessions=open_session_repository()),
+        throttle=throttle,
     )
