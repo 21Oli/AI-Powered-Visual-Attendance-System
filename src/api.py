@@ -43,9 +43,11 @@ Design rules (unchanged from the foundation step)
   middleware exists. P5.4.4 added reusable session-cookie utilities
   (:mod:`src.api_cookies`) and a cookie-only authentication dependency
   (:mod:`src.api_auth`); P5.4.5 adds ``POST /api/v1/auth/login``
-  (:mod:`src.api_login`), guarded by exact same-origin validation. The
+  (:mod:`src.api_login`) and P5.4.6 ``POST /api/v1/auth/logout``
+  (:mod:`src.api_logout`), both guarded by exact same-origin validation. The
   dependency still guards nothing, so the eight business endpoints remain
-  unauthenticated; the served inventory is those eight plus login. Loopback-only
+  unauthenticated; the served inventory is those eight plus login and logout.
+  Loopback-only
   binding is a development safety measure, explicitly not a production
   security boundary. Documentation URLs stay disabled.
 * **No automatic retries.** A failed persisted append is reported as
@@ -69,6 +71,7 @@ from src.api_auth import (
     AUTHENTICATION_REQUIRED_CODE,
     AUTHENTICATION_REQUIRED_MESSAGE,
     AuthenticationRequired,
+    build_session_service,
 )
 from src.api_login import (
     ORIGIN_NOT_ALLOWED_CODE,
@@ -79,6 +82,7 @@ from src.api_login import (
     build_login_service,
     register_login_route,
 )
+from src.api_logout import LOGOUT_PATH, register_logout_route
 from src.api_request_context import (
     REQUEST_ID_HEADER,
     RequestIDMiddleware,
@@ -87,6 +91,7 @@ from src.api_request_context import (
 from src.config import AppSettings, ConfigError, load_settings
 from src.db import DatabaseUnavailableError, MalformedDsnError
 from src.logging_setup import get_logger
+from src.session_service import SessionService
 
 __all__ = [
     "API_PREFIX",
@@ -122,10 +127,10 @@ PERSISTENCE_REJECTED_CODE: str = "PERSISTENCE_REJECTED"
 
 
 # ---------------------------------------------------------------------------
-# Approved route inventory (exactly these nine; never more)
+# Approved route inventory (exactly these ten; never more)
 #:
-#: P5.4.5 adds the login endpoint; the eight Phase 3 business routes stay
-#: unchanged and unauthenticated.
+#: P5.4.5 adds the login endpoint and P5.4.6 the logout endpoint; the eight
+#: Phase 3 business routes stay unchanged and unauthenticated.
 # ---------------------------------------------------------------------------
 
 ApprovedRoute = tuple[str, str]  # (path without prefix, HTTP method)
@@ -133,6 +138,7 @@ ApprovedRoute = tuple[str, str]  # (path without prefix, HTTP method)
 APPROVED_ROUTES: tuple[ApprovedRoute, ...] = (
     ("/health", "GET"),
     ("/auth/login", "POST"),
+    ("/auth/logout", "POST"),
     ("/employees", "POST"),
     ("/employees", "GET"),
     ("/employees/{employee_id}", "GET"),
@@ -414,6 +420,29 @@ def _resolve_login_service(
     return login
 
 
+def _resolve_session_service(
+    settings: AppSettings, session_service: SessionService | None
+) -> Callable[[], SessionService]:
+    """Return a getter that builds the session service on first use (P5.4.6).
+
+    Logout needs only the P5.3 revocation primitive, so it composes the
+    existing :func:`build_session_service` (availability check before the
+    repository modules are imported) instead of the login composition. Offline
+    tests inject their own service.
+    """
+
+    cache: dict[str, SessionService] = {}
+
+    def sessions() -> SessionService:
+        if session_service is not None:
+            return session_service
+        if "sessions" not in cache:
+            cache["sessions"] = build_session_service(settings)
+        return cache["sessions"]
+
+    return sessions
+
+
 # ---------------------------------------------------------------------------
 # Application factory
 # ---------------------------------------------------------------------------
@@ -425,6 +454,7 @@ def create_app(
     employee_service: object | None = None,
     attendance_service: object | None = None,
     login_service: LoginService | None = None,
+    session_service: SessionService | None = None,
 ) -> FastAPI:
     """Create the Phase 3 API application (no server, no connections).
 
@@ -434,7 +464,7 @@ def create_app(
         Optional acknowledged settings. Used only to derive the attendance
         journal's data directory for the lazily built default services; the
         app itself never reads a DSN or binds a socket.
-    employee_service / attendance_service / login_service:
+    employee_service / attendance_service / login_service / session_service:
         Offline-test seams. Production passes none of them.
     """
     from src.config import SETTINGS as _default_settings
@@ -444,11 +474,12 @@ def create_app(
         resolved_settings, employee_service, attendance_service
     )
     get_login = _resolve_login_service(resolved_settings, login_service)
+    get_sessions = _resolve_session_service(resolved_settings, session_service)
 
     app = FastAPI(
         title="Visual Attendance System API (Phase 3, development)",
         # Doc URLs disabled: the served route inventory must be exactly
-        # the approved endpoints (eight business routes + login).
+        # the approved endpoints (eight business routes + login + logout).
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
@@ -473,6 +504,15 @@ def create_app(
         app,
         path=LOGIN_PATH,
         get_login_service=get_login,
+        settings=resolved_settings,
+    )
+
+    # -- logout (P5.4.6) -------------------------------------------------
+
+    register_logout_route(
+        app,
+        path=LOGOUT_PATH,
+        get_session_service=get_sessions,
         settings=resolved_settings,
     )
 

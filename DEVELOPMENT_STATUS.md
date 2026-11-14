@@ -3,6 +3,63 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 58 — Phase 5 P5.4.6: logout API (2026-11-14)
+
+**One endpoint. No `/me`, RBAC, business-route protection, throttling, audit,
+frontend logout UI or BFF cookie integration; no Git operation.**
+
+* **Baseline**: branch `main`, HEAD
+  `0079318c232012fac8dddbfc0a568cb954b295f2` (P5.4.5, committed and accepted),
+  clean working tree.
+* **Endpoint** — `POST /api/v1/auth/logout` (`src/api_logout.py`):
+  `204 No Content`, empty body, registered exactly once; the approved inventory
+  is now ten routes (eight business routes + login + logout).
+* **Revocation** — the raw token is read only from the `va_session` cookie and
+  handed to the existing `SessionService.revoke_session`, which validates the
+  token structurally, digests it and revokes that single row. No
+  `revoke_all_for_user`, no second revocation path, no schema or migration
+  change, and no token/digest in any body, header or log line.
+* **Idempotency** — absent or empty cookie, malformed token (refused before any
+  lookup), unknown token (`SessionNotFound`), already-revoked session (first
+  revocation instant preserved by the repository's `COALESCE`) and expired
+  session all return the same `204` with the same cookie clearing, so the
+  response never reveals whether a real session existed.
+* **Cookie clearing** — `clear_session_cookie` only: `va_session`, path
+  `/api/v1`, HttpOnly, `SameSite=Lax`, `Secure` per
+  `SECURE_COOKIE_ENVIRONMENTS`, no `Domain`, `Max-Age=0`, epoch `Expires`.
+* **Origin** — the existing `require_trusted_origin_dependency` guards logout
+  exactly as it guards login; a missing, duplicate, `null`, malformed or
+  untrusted Origin is a sanitized `403 ORIGIN_NOT_ALLOWED` with **no**
+  revocation and **no** cookie clearing. `Host`/`X-Forwarded-*` are still never
+  consulted.
+* **Failure policy** — only expected invalid-session outcomes are treated as
+  already-signed-out. `DatabaseUnavailableError` stays the sanitized 503 and an
+  unexpected failure the sanitized 500, and neither sends the deletion cookie:
+  revocation was not confirmed, so the client retains its cookie and can
+  retry.
+* **Tests** — `tests/test_api_logout.py` (38), plus the `tests/test_api.py`
+  inventory update (ten routes, `ORIGIN_NOT_ALLOWED` already accepted for the
+  no-Origin probe).
+* **Docs** — `ARCHITECTURE.md` D26, `CHANGELOG.md`,
+  `docs/PHASE5_IMPLEMENTATION_PLAN.md` §8.
+
+**Verified**
+
+* Focused (logout + API + login + auth + cookies): **170 passed**.
+* Full backend suite: **2866 passed, 32 skipped**, exit 0 (the 32 skips are the
+  pre-existing opt-in PostgreSQL tier).
+* No frontend file changed, so the frontend suite/typecheck/lint/build were not
+  re-run; the proxy and UI are untouched.
+* `git diff --check` clean.
+
+**Not verified / deferred**
+
+* No browser end-to-end sign-out: the proxy still drops `Set-Cookie`, so no
+  frontend logout UI or complete BFF cookie integration exists.
+* No live PostgreSQL, TLS or deployment validation.
+* No `/me`, throttling, RBAC, audit logging or protection of the eight business
+  routes.
+
 ## Step 57 — Phase 5 P5.4.5: login API (2026-11-14)
 
 **One endpoint plus its prerequisites. No logout, `/me`, throttling, RBAC,

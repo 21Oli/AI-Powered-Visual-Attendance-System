@@ -4,6 +4,29 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5, P5.4.6: logout API
+
+### Added
+
+* `src/api_logout.py` — `POST /api/v1/auth/logout`: `perform_logout` reads the raw token only from the `va_session` cookie, revokes exactly that session through the existing `SessionService.revoke_session` (`revoke_all_for_user` is never called), and returns `204 No Content` with the approved deletion cookie from `clear_session_cookie` (name/path/HttpOnly/SameSite/Secure policy unchanged, no `Domain`, `Max-Age=0`, epoch `Expires`). `register_logout_route` reuses `require_trusted_origin_dependency`, so the route registered exactly once is guarded by the same exact-Origin rule as login.
+* `tests/test_api_logout.py` (38 tests) — valid-session revocation of the presented session only, cookie attributes (name, path, HttpOnly, Lax, Secure policy, no Domain, epoch expiry), no-body 204, idempotent success for absent/empty/malformed/unknown/already-revoked/expired sessions, repeated logout, the full Origin reject matrix with no revocation and no cookie on 403, sanitized 503 and 500 with the cookie retained, query/body tokens ignored, registration count, request-ID correlation and logging hygiene.
+
+### Changed
+
+* `src/api.py` — registers the logout route and extends the approved inventory from nine to ten routes (`POST /auth/logout`); a `session_service` offline-test seam and a lazy `_resolve_session_service` (existing `build_session_service`) were added. No business route is protected and no authentication middleware was added.
+
+### Verified
+
+* Focused (`tests/test_api_logout.py` + `tests/test_api.py` + login/auth/cookie suites): **170 passed**.
+* Full backend suite: **2866 passed, 32 skipped**, exit 0 (the 32 skips are the pre-existing opt-in PostgreSQL tier).
+* `git diff --check` clean. No frontend file changed, so the frontend suite, typecheck, lint and build were not re-run.
+
+### Notes
+
+* A database or unexpected failure during revocation returns the sanitized 503/500 **without** the deletion cookie: the server cannot confirm revocation, so the client keeps its cookie and may retry rather than being told it is signed out.
+* No `/me`, RBAC, business-route protection, throttling, audit logging, frontend login/logout UI or BFF cookie integration. The proxy still drops `Set-Cookie`, so browser session handling remains API-level only.
+* Verified offline only: no live PostgreSQL, browser, TLS or deployment validation.
+
 ## [Unreleased] — Phase 5, P5.4.5: login API, password rehash and trusted-origin validation
 
 ### Added

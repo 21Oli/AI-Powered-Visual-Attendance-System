@@ -1031,8 +1031,8 @@ the journal schema version (still 1), or the decision authority.
   duplicated, comma-separated and untrusted values all raise
   `OriginNotAllowed` → sanitized `403 ORIGIN_NOT_ALLOWED`. `Host`, `X-Forwarded-Host`,
   `X-Forwarded-Proto` and similar headers are never consulted. An empty
-  empty allowlist fails closed, so staging/production login is unavailable
-  until their exact origins are configured.
+  allowlist fails closed, so staging/production login and logout are
+  unavailable until their exact origins are configured.
 * **Proxy.** The same-origin Next.js proxy allowlists exactly
   `POST /api/v1/auth/login` and forwards the browser's `Origin` unchanged for
   that route only; an absent Origin is never synthesised, and no other client
@@ -1040,9 +1040,26 @@ the journal schema version (still 1), or the decision authority.
   The proxy still rebuilds responses from the body, so **the backend's
   `Set-Cookie` is dropped** — browser session establishment is the later BFF
   milestone, and until then login is API-level only.
-* **Error mapping.** Login failures keep the existing conventions: 401
-  `AUTHENTICATION_REQUIRED`, 403 `ORIGIN_NOT_ALLOWED`, 422 `REQUEST_INVALID`,
-  503 `DATABASE_UNAVAILABLE`, 500 `INTERNAL_ERROR` for anything unexpected;
+* **Logout (P5.4.6).** `POST /api/v1/auth/logout` (`src/api_logout.py`) reads
+  the raw token **only** from the configured `va_session` cookie (no query or
+  body token exists), calls the existing
+  `SessionService.revoke_session` — never `revoke_all_for_user` — and answers
+  `204 No Content` with the approved deletion cookie from
+  `clear_session_cookie` (same name/path/HttpOnly/SameSite/Secure policy, no
+  `Domain`, `Max-Age=0`, epoch `Expires`). It is idempotent and never reveals
+  session existence: absent/empty cookie, malformed token (rejected
+  structurally before any lookup), unknown token (`SessionNotFound`),
+  already-revoked and expired sessions all produce the same `204` and the same
+  cookie clearing. The existing trusted-Origin dependency guards it, so a
+  rejected Origin returns the sanitized 403 **before** any revocation and sets
+  no cookie. Only *expected invalid-session* outcomes are treated as
+  already-signed-out: a database failure stays the sanitized 503 and an
+  unexpected failure the sanitized 500, and in both cases the deletion cookie
+  is deliberately **not** sent so the caller keeps it and can retry.
+* **Error mapping.** Login and logout failures keep the existing conventions:
+  401 `AUTHENTICATION_REQUIRED`, 403 `ORIGIN_NOT_ALLOWED`, 422
+  `REQUEST_INVALID`, 503 `DATABASE_UNAVAILABLE`, 500 `INTERNAL_ERROR` for
+  anything unexpected;
   every response carries the server-generated `X-Request-ID`, inbound request
   IDs are ignored, and no password, hash, dummy hash, token, digest or cookie
   is logged.

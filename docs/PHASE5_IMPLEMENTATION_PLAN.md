@@ -290,5 +290,16 @@ importing the repository layer and shares one user repository between the
 lookup and the session service. The
 Next.js proxy allowlists the login route alone and forwards its `Origin`, but
 still drops `Set-Cookie`, so browser session establishment waits for the BFF
-milestone. Logout, `/me`, throttling, RBAC, audit logging and protection of the
-eight business routes remain unimplemented.
+milestone.
+
+P5.4.6 adds `POST /api/v1/auth/logout` (`src/api_logout.py`): the token is read
+only from the `va_session` cookie, exactly that session is revoked through the
+existing `SessionService.revoke_session`, and the response is `204 No Content`
+with `clear_session_cookie`'s approved deletion attributes. Absent, empty,
+malformed, unknown, already-revoked and expired sessions are all idempotent
+successes with the same cookie clearing and no hint about session existence;
+the existing trusted-Origin guard blocks cross-site logout before any
+revocation, a database failure stays the sanitized 503 (cookie deliberately
+retained so the client can retry) and an unexpected failure the sanitized 500.
+`/me`, throttling, RBAC, audit logging, frontend login/logout UI and protection
+of the eight business routes remain unimplemented.
