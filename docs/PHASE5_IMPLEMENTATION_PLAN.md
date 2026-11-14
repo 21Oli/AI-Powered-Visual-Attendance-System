@@ -1,6 +1,8 @@
 # Phase 5 — Authentication, Accounts and Role-Based Access
 
-**Status: in progress — P5.3 implemented offline (no live PostgreSQL run).**
+**Status: in progress — P5.4 implemented offline through sub-milestone P5.4.10
+(no live PostgreSQL run). P5.4.10 is implemented and awaiting owner review;
+P5.5 is not started. Phase 5 is not complete.**
 
 Phase 5 adds operator accounts, sessions and role-based access to the
 attendance system. It is delivered as small, separately reviewable steps. This
@@ -14,12 +16,17 @@ Phase 5 covers:
 * the identity schema (users and sessions) and its persistence layer;
 * password hashing and credential verification;
 * session issuance, validation, refresh and revocation;
-* login/logout endpoints and an authentication dependency;
+* login/logout endpoints, `/auth/me` and an authentication dependency;
+* the same-origin BFF transport and process-local login throttling;
 * role-based authorization for the existing attendance and employee APIs;
-* the frontend sign-in flow.
+* an append-only audit journal for security events (P5.5, not started);
+* user administration with secure first-Admin provisioning (P5.6, not started);
+* the frontend sign-in flow and role-aware UI (P5.7–P5.8, not started);
+* the final Phase 5 security review and acceptance (P5.9, not started).
 
 It does **not** change employee or attendance-journal semantics, does not add an
-audit table, and does not introduce biometric storage of any kind.
+audit **table** (P5.5's journal is a separate append-only JSONL file, not a
+relational table), and does not introduce biometric storage of any kind.
 
 ## 2. Milestones
 
@@ -27,21 +34,38 @@ audit table, and does not introduce biometric storage of any kind.
 | --- | --- | --- |
 | P5.1 | Phase 5 inspection, gap analysis and approved decisions | Completed (review, no code) |
 | P5.2 | Identity data model and persistence: `V002__security.sql`, user/session models and repositories, offline tests | Completed (offline) |
-| **P5.3** | **Authentication primitives: Argon2id hashing, opaque session tokens, session lifecycle** | **Completed (offline)** |
-| P5.4 | Session issuance, validation and revocation service | Not started |
-| P5.5 | Login/logout endpoints and the authentication dependency | Not started |
-| P5.6 | Role-based authorization for existing endpoints | Not started |
-| P5.7 | Frontend sign-in, session handling and Phase 5 acceptance | Not started |
+| P5.3 | Authentication primitives: Argon2id hashing, opaque session tokens, session lifecycle | Completed (offline) |
+| P5.4 | Authentication API: session service integration, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10, §8) | P5.4.1–P5.4.9 completed offline and accepted (committed); P5.4.10 implemented offline, **awaiting owner review** (unstaged, uncommitted) |
+| P5.5 | Audit journal and security-event auditing (§9) | Not started |
+| P5.6 | User administration and secure first-Admin provisioning (§10) | Not started |
+| P5.7 | Frontend authentication and session integration (§10) | Not started |
+| P5.8 | Role-aware UI and frontend security hardening (§10) | Not started |
+| P5.9 | Final security regression, integration review and Phase 5 acceptance (§10) | Not started |
 
 Each milestone is gated on owner review of the previous one. No milestone
 starts early, and no milestone may require a live database or secrets without a
 separately authorized run.
 
+**Numbering reconciliation (2026-11-14).** This table previously described P5.4
+as the session service, P5.5 as the login/logout endpoints and dependency, P5.6
+as role-based authorization and P5.7 as the frontend plus acceptance, while §8
+listed RBAC, audit, user management, frontend authentication and the security
+review together under "P5.4.10+". The implementation did not follow that
+split: P5.4 delivered the session service, login, logout, `/auth/me`, the BFF
+transport, throttling **and** the backend authorization foundation, reviewed as
+sub-milestones P5.4.1–P5.4.10 in §8. The rows above are the reconciled
+top-level structure and the sections below it preserve the historical records
+unchanged. **There is no P5.4.11**: P5.4.10 closes the P5.4 sub-milestone
+sequence, and the work once grouped under "P5.4.10+" is now split into P5.5
+(audit), P5.6 (user administration), P5.7 (frontend authentication), P5.8
+(role-aware UI and hardening) and P5.9 (final security review).
+
 ## 3. Approved decisions carried into Phase 5
 
 * **Roles**: exactly `Admin`, `HR Manager`, `Operator`, `Auditor`, enforced by a
   database `CHECK` and mirrored by a Python enum. No role hierarchy or
-  inheritance; permissions are decided per endpoint in P5.6.
+  inheritance; permissions are decided per endpoint in the P5.4.10
+  authorization policy (`src/authz.py`, §8).
 * **Username identity**: a username is displayed as entered but compared
   case-insensitively through a stored `username_key`. Normalisation is
   NFKC → trim → collapse internal whitespace; the key is the casefold of the
@@ -221,13 +245,17 @@ work factor was not benchmarked on target hardware.
 
 ## 7. Next step
 
-P5.4 (session issuance/validation service integration — cookie and request
-plumbing), gated on owner approval of P5.3.
+P5.4.10 (backend RBAC foundation and business-route protection) is implemented
+and awaiting owner review; once accepted and committed, the next implementation
+milestone is **P5.5 — audit journal and security-event auditing** (§9). P5.5 is
+not started, and no P5.5 code, schema or test exists in the tree.
 
 ## 8. P5.4 authentication API — sub-milestone status
 
-P5.4 is delivered in separately reviewed sub-milestones. Nothing beyond the
-completed rows exists in the tree.
+P5.4 is delivered in separately reviewed sub-milestones. Every row up to
+P5.4.9 is committed and accepted; P5.4.10 exists as unstaged, uncommitted
+working-tree changes awaiting owner review. Nothing beyond these rows exists in
+the tree.
 
 | Sub-milestone | Scope | Status |
 | --- | --- | --- |
@@ -241,7 +269,13 @@ completed rows exists in the tree.
 | P5.4.7 | `GET /auth/me` (session-derived identity, `no-store`, credential-free body) | Completed (offline) |
 | P5.4.8 | Authentication BFF (one allowlist/transport at `/api/v1/auth/...`, `Origin` forwarding, `Set-Cookie` playback) | Completed (offline) |
 | P5.4.9 | Process-local fixed-window login throttle (5 failures / 15 min per normalized username, 429 + `Retry-After`) | Completed (offline) |
-| P5.4.10+ | Route protection, RBAC enforcement, audit logging, frontend auth UI, integration tests and security review | Not started |
+| P5.4.10 | Backend RBAC foundation and business-route protection (`src/authz.py`, eight permissions, four-role matrix, 401/403 guard on the seven business routes) | Implemented (offline), **awaiting owner review** (unstaged, uncommitted) |
+
+P5.4.10 is the backend authorization foundation that an earlier revision of
+this section grouped into the broader "P5.4.10+" row together with audit, user
+administration, frontend authentication and the final security review. That row
+is retired rather than renumbered: there is no P5.4.11. The remaining scope is
+defined as P5.5–P5.9 in §9–§10, and it is not started.
 
 P5.4.2 adds configuration only (`src/config.py`, `SESSION_COOKIE`,
 `SECURE_COOKIE_ENVIRONMENTS`, `LOGIN_THROTTLE`, `AppSettings.session_cookie_secure`).
@@ -344,3 +378,189 @@ single login service. Counters are **process-local**: multiple application
 processes have independent counters, and distributed rate limiting
 (Redis/shared storage), IP throttling, CAPTCHA, MFA and account lockout remain
 unimplemented.
+
+P5.4.10 adds `src/authz.py`, the single authorization policy, and applies it to
+the seven existing business routes. Eight permissions are defined
+(`employees:read`, `employees:create`, `employees:update`,
+`employees:deactivate`, `attendance:read`, `attendance:checkout`, `audit:read`,
+`users:manage`) with one immutable four-role table: Admin holds all eight, HR
+Manager holds the two employee reads/writes it needs plus attendance
+read/checkout, Operator holds employee read plus attendance read/checkout, and
+Auditor holds employee read, attendance read and `audit:read`. Identity comes
+only from the validated session principal through the existing P5.4.4
+dependency — never from a body, query parameter or header — and the decision is
+fail-closed for unknown roles, unknown permissions and inactive principals.
+Each business route declares exactly one permission through a single `guard()`
+factory (`POST /employees` → `employees:create`, `GET /employees` and
+`GET /employees/{id}` → `employees:read`, `PATCH /employees/{id}` →
+`employees:update`, `POST /employees/{id}/deactivate` →
+`employees:deactivate`, `GET /attendance` → `attendance:read`,
+`POST /attendance/{id}/checkout` → `attendance:checkout`). Unauthenticated
+requests keep the generic `401 AUTHENTICATION_REQUIRED`; a principal without
+the permission gets the sanitized `403 PERMISSION_DENIED` and the endpoint's
+business logic never runs; storage failures stay `503` and unexpected faults
+`500`. `GET /health` remains anonymous and login/logout/`me` are unchanged and
+outside business RBAC. `audit:read` and `users:manage` are policy definitions
+only: no audit journal, audit hash chain, user-management API, first-Admin
+provisioning, frontend authentication or route guards exist yet.
+
+## 9. P5.5 — Audit journal and security-event auditing (not started)
+
+P5.5 is the next implementation milestone. It is **not started**: no audit
+module, journal file, schema, verifier or test exists in the tree, and this
+section is planning only.
+
+### 9.1 Objective
+
+Give Phase 5 a durable, tamper-evident record of security-relevant events —
+authentication outcomes, authorization denials and (once P5.6 lands) user and
+role changes — without touching employee or attendance semantics and without
+introducing an audit **table**.
+
+### 9.2 Approved architecture (already decided, not re-opened)
+
+* **Separate, append-only JSONL audit journal** at `data/audit/audit.jsonl`,
+  independent of the attendance journal and of PostgreSQL. It is never written
+  through the attendance store, never interleaved with attendance records and
+  never exposed as an API collection in P5.5.
+* **Versioned record schema.** Every record carries `schema_version` so a
+  reader can refuse or migrate an unknown format instead of guessing.
+* **Hash-chain integrity.** Each record embeds the digest of the previous
+  record (a defined genesis value starts the chain) and its own digest over a
+  canonical serialization, so an edited, deleted or reordered record breaks
+  verification. The chain is **tamper-evident, not tamper-proof**: an attacker
+  with write access can rewrite the whole file, which the documentation must
+  state plainly rather than overclaim.
+* **Application-generated timestamps** from the existing clock seam (no
+  database or filesystem default), so behaviour is deterministic under a fake
+  clock.
+* **Actor identity derived from `AuthenticatedPrincipal`** (never from the
+  request body, query or a header): `actor_user_id` and `actor_role`. Events
+  that precede authentication (e.g. a failed login) use an explicit system
+  actor with no user identity.
+* **Action, target type and target identifier** for every record, drawn from a
+  closed set of action names and target types.
+* **Outcome**: exactly one of `success`, `denied`, `error`, `uncertain`.
+  `uncertain` exists for the case where the state change may have happened but
+  could not be confirmed — it must never be replaced by `success`.
+* **Structured reason code** from a closed enum, so consumers never parse
+  prose.
+* **Request ID correlation** using the existing server-generated request ID, so
+  an audit record can be matched to the HTTP response and structured logs.
+* **Safe metadata only**: a small, allowlisted set of non-sensitive fields
+  (e.g. endpoint, method, outcome detail code). Never request bodies.
+* **Forbidden material, without exception**: passwords, password hashes,
+  session tokens, cookies, token digests, biometric information, face
+  embeddings, photographs, and personal data beyond the actor identifiers and
+  the audited target ID.
+* **Retention**: 365 days is the approved retention policy. P5.5 documents it;
+  automated archival/purge is deferred and, when added, must never silently
+  break the chain.
+* **Verification CLI** for journal integrity: read-only, offline, reports chain
+  validity, record count, sequence range and the position of the first broken
+  link, and exits non-zero on any failure.
+
+### 9.3 Approved failure policy
+
+* **Mutations fail closed.** A protected business mutation or a P5.6 user/role
+  change must not report success unless its required audit record was written.
+  Where the state change is already durable and cannot be rolled back (the
+  attendance journal append), a failed audit write is surfaced as a sanitized
+  `503` with outcome `uncertain` — never as success, and never silently
+  dropped.
+* **User and role changes must never succeed unaudited** (P5.6 consumes this
+  rule).
+* **Read and login-attempt auditing is best-effort.** A failed write does not
+  block the response, but the failure must be **explicitly surfaced** (stable
+  structured log entry and documented behaviour), never swallowed.
+* **No sensitive material in any failure path**: audit errors, sanitized 503
+  bodies and logs stay credential-free.
+
+### 9.4 Boundaries — P5.5 must not
+
+* change employee or attendance-journal semantics;
+* add an attendance or embedding table, or move biometric data into
+  PostgreSQL;
+* implement user-administration endpoints (P5.6);
+* implement frontend authentication UI (P5.7);
+* introduce distributed rate limiting, CAPTCHA, MFA or account lockout;
+* change the approved session-cookie or password-hashing policy;
+* execute migrations or connect to a live database without separate owner
+  authorization.
+
+### 9.5 Required test plan
+
+* **Unit** — canonical serialization and digest stability, genesis handling,
+  schema/version validation, closed action/reason/outcome sets, actor
+  projection from `AuthenticatedPrincipal`, metadata allowlist and redaction
+  (asserting credential and biometric keys are rejected), sequence
+  monotonicity, injected clock.
+* **Integration** — one record per protected endpoint outcome (success, denied,
+  error), 401/403 paths, login success/failure, logout, `/me` (if audited),
+  request-ID correlation, and an end-to-end scan proving no credential, token,
+  cookie, hash or biometric value appears in any record.
+* **Concurrency** — parallel writers produce contiguous, duplicate-free
+  sequence numbers and a chain that still verifies; the single-writer/locking
+  assumption is stated explicitly, and any multi-process limitation is
+  documented and tested as a limitation rather than claimed as safe.
+* **Crash recovery** — empty journal, missing directory, truncated final line,
+  torn/partial write, and a journal containing a valid prefix plus garbage:
+  reads and verification must fail closed or ignore only an incomplete trailing
+  record, never treat it as success.
+* **Hash-chain verification** — detecting a modified field, a deleted record, a
+  reordered pair and a forged digest; CLI exit codes and output.
+* **Audit-failure** — an injected write failure makes a mutation fail closed
+  with a sanitized 503; a best-effort read/login audit failure leaves the
+  response unchanged but is surfaced; no failure path leaks credentials.
+* All tests use fake clocks and temporary directories; no real sleeps, no
+  PostgreSQL and no biometric data.
+
+### 9.6 Acceptance criteria
+
+1. The journal exists at the documented path, is append-only JSONL, versioned
+   and hash-chained, with a verification CLI that passes on a healthy journal
+   and exits non-zero for every tampering case above.
+2. Every protected mutation emits exactly one record before success, and a
+   failed write fails closed; user/role changes (P5.6) inherit that rule.
+3. Read and login-attempt auditing is best-effort with failures explicitly
+   surfaced.
+4. Records carry actor, actor role, action, target, outcome, reason code,
+   request ID and allowlisted metadata, and never any forbidden material —
+   proven by tests.
+5. Concurrency, crash-recovery and failure-policy tests pass deterministically.
+6. Documentation states the 365-day retention policy, the tamper-evident (not
+   tamper-proof) property and the offline verification limits.
+7. No change to employee/attendance semantics, no migration, no biometric
+   storage, no user-administration endpoint and no frontend change.
+
+## 10. P5.6–P5.9 — subsequent milestones (not started)
+
+None of these is started, and none may be pulled forward without a separate
+owner instruction.
+
+**P5.6 — User administration and secure first-Admin provisioning.** Admin-only
+user management (`users:manage`): create, list, change role and deactivate
+users, with a documented one-time first-Admin provisioning path that has no
+default credentials and is itself audited. Last-active-Admin protection, no
+self-role change and no self-deactivation. Audit integration is required (P5.5
+failure policy applies), and no audit table is added.
+
+**P5.7 — Frontend authentication and session integration.** Login and logout
+UI, session retrieval through the existing `/auth/me`, same-origin BFF usage,
+cookie-based session handling (HttpOnly, never readable by JavaScript),
+authentication-required states and redirects. No token storage in JavaScript
+and no role-aware UI yet.
+
+**P5.8 — Role-aware UI and frontend security hardening.** Permission-aware
+navigation and actions that reflect the P5.4.10 policy while the backend stays
+the sole authorization authority, session-expiry handling, correct 401 versus
+403 behaviour in the client, security headers and frontend hardening. An audit
+read view for the Auditor role only if and when a P5.5 API design is approved
+(`audit:read` currently guards no endpoint).
+
+**P5.9 — Final security regression and Phase 5 acceptance.** Full authorization
+matrix regression, authentication and session-lifecycle regression, audit
+integrity and failure-policy tests, user-management security tests, frontend
+integration regression, documentation and known-limitations review, and the
+final owner acceptance. Phase 5 is **not** complete before this milestone is
+accepted.

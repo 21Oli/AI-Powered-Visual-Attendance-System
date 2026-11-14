@@ -4,6 +4,42 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5 milestone reconciliation (documentation only)
+
+### Changed
+
+* `docs/PHASE5_IMPLEMENTATION_PLAN.md` — reconciled the Phase 5 top-level milestones into one consistent roadmap (P5.1 decisions, P5.2 identity/persistence, P5.3 authentication primitives, P5.4 authentication API, P5.5 audit, P5.6 user administration, P5.7 frontend authentication, P5.8 role-aware UI/hardening, P5.9 final review). The older §2 description (P5.4 = session service, P5.5 = login/logout, P5.6 = RBAC, P5.7 = frontend/acceptance) is superseded, while the P5.4.1–P5.4.10 history in §8 and every earlier implementation record remain intact. Added the P5.5 audit-journal scope, approved failure policy, boundaries, test plan and acceptance criteria, plus the P5.6–P5.9 boundaries. No P5.4.11 is created.
+* `DEVELOPMENT_STATUS.md` — added the reconciled milestone status table, marked P5.4.10 as implemented but **awaiting owner review** (not accepted, still uncommitted), identified P5.5 as the next implementation milestone, and kept Phase 5 explicitly incomplete. Step 62 now carries the same review status.
+
+### Notes
+
+* Documentation only: no application source, test, schema, dependency or configuration change, and no Git operation.
+* P5.5 (audit journal) is **not implemented**; the section added to the implementation plan is planning text only. P5.6–P5.9 remain future work and Phase 5 is not complete.
+
+## [Unreleased] — Phase 5, P5.4.10: backend RBAC and business route protection
+
+### Added
+
+* `src/authz.py` — the single authorization policy: `Permission` (exactly `employees:read`, `employees:create`, `employees:update`, `employees:deactivate`, `attendance:read`, `attendance:checkout`, `audit:read`, `users:manage`), the immutable `ROLE_PERMISSIONS` table (`MappingProxyType` of `frozenset`s) for the four approved roles, a pure `has_permission`/`enforce_permission` decision, and `permission_dependency(permission, get_principal)` — a FastAPI dependency factory that wraps the existing P5.4.4 session dependency and returns the validated `AuthenticatedPrincipal`. No inheritance, no wildcard, no default grant; unknown/non-`Role` roles, unknown permissions and `is_active=False` principals are denied.
+* `src/api.py` — every business route (`POST/GET /employees`, `GET/PATCH /employees/{id}`, `POST /employees/{id}/deactivate`, `GET /attendance`, `POST /attendance/{id}/checkout`) now carries one `guard(<permission>)` dependency built from a single identity resolver; `GET /health` stays anonymous and login/logout/me keep their own contracts. New sanitized handler `handle_permission_denied` → `403 PERMISSION_DENIED` with the existing `X-Request-ID`. `create_app` gained the `principal_resolver` offline-test seam (identity source only; the permission checks still run).
+* `tests/test_authz.py` (80) and `tests/test_api_rbac.py` (49) — the complete role × permission matrix with negative cases, unknown roles/permissions, immutability, dependency construction refusals, per-endpoint anonymous/authorized/denied integration, inactive principals, session outcomes (invalid/revoked/expired/inactive → 401, storage failure → 503, unexpected → sanitized 500), body/query/header elevation attempts, and the health/auth-route regressions.
+
+### Changed
+
+* Business responses for an anonymous caller are now the existing generic `401 AUTHENTICATION_REQUIRED` **before** any business call (previously the unauthenticated routes reached their services). `tests/test_api.py::test_unconfigured_database_is_reported_as_unavailable_not_success` asserts the new ordering while the 503 mapping stays covered by the existing handler contracts and the new RBAC suite.
+* `tests/test_api_endpoints.py` injects a test Admin principal through the documented seam so the Phase 3 business-logic assertions keep exercising the authorized path unchanged.
+
+### Notes
+
+* Authorization uses only the validated server-side session principal; request bodies, query parameters and arbitrary headers cannot supply a role, permission or identity.
+* No audit logging, no user-management API, no first-Admin provisioning, no frontend authentication or route guards, and no session/cookie/hash/throttle change. `audit:read` and `users:manage` are defined policy only — no endpoint consumes them in this milestone.
+
+### Verified
+
+* Focused: `tests/test_authz.py` + `tests/test_api_rbac.py` → **129 passed**, exit 0, no skips.
+* Full backend suite: **3091 passed, 32 skipped** (pre-existing opt-in PostgreSQL tier), exit 0.
+* `git diff --check` clean. Offline only: no PostgreSQL, browser, camera, deployment or multi-process validation.
+
 ## [Unreleased] — Phase 5, P5.4.9: login rate limiting
 
 ### Added

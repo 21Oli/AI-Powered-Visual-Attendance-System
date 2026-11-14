@@ -25,12 +25,25 @@ from pathlib import Path
 import pytest
 
 from src.api import API_PREFIX, APPROVED_ROUTES, create_app
+from src.api_auth import AuthenticatedPrincipal
 from src.api_service import AttendanceQueryService, EmployeeQueryService
 from src.attendance import AttendanceEvent, EventType
 from src.attendance_store import AttendanceEventStore
 from src.config import AppSettings
 from src.employee import Employee
 from src.employee_repository import EmployeeAlreadyExists, EmployeeNotFound
+from src.user import Role
+
+#: Offline business-logic tests have no session cookie; the app's documented
+#: test seam resolves this Admin principal instead. The RBAC guard still runs,
+#: so these tests exercise the *authorized* path only (P5.4.10 semantics are
+#: covered by tests/test_api_rbac.py).
+_TEST_PRINCIPAL = AuthenticatedPrincipal(
+    user_id="test-admin",
+    username="test-admin",
+    role=Role.ADMIN,
+    is_active=True,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +163,7 @@ def api(tmp_path: Path):
         settings,
         employee_service=EmployeeQueryService(repository),
         attendance_service=AttendanceQueryService(store),
+        principal_resolver=lambda request: _TEST_PRINCIPAL,
     )
     with _serve(app) as base:
         yield base, repository, store

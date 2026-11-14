@@ -1,4 +1,5 @@
-"""Phase 3 Step 40 — the eight-endpoint API (loopback-only, unauthenticated).
+"""Phase 3 Step 40 — the eight-endpoint API (loopback-only; business routes
+are session-authenticated and RBAC-guarded since P5.4.10).
 
 Implements the approved ``/api/v1`` route inventory. Every route is a thin
 adapter: it validates the request shape, calls one method on the injected
@@ -48,10 +49,14 @@ Design rules (unchanged from the foundation step)
   P5.4.7 adds the read-only, cookie-authenticated
   ``GET /api/v1/auth/me`` (:mod:`src.api_me`), which needs no Origin check
   because it changes nothing, and P5.4.9 adds a process-local fixed-window
-  limiter on login (:mod:`src.login_throttle`, 429 + ``Retry-After``). The
-  dependency still guards nothing else, so the eight business endpoints remain
-  unauthenticated; the served inventory is those eight plus login, logout and
-  me.
+  limiter on login (:mod:`src.login_throttle`, 429 + ``Retry-After``).
+  P5.4.10 puts every business route behind the centralized RBAC guard
+  (:mod:`src.authz`): one explicit permission per endpoint, the identity only
+  from the validated ``va_session`` session, ``401`` when unauthenticated and
+  sanitized ``403 PERMISSION_DENIED`` when the role lacks the permission.
+  ``GET /api/v1/health`` stays anonymous, and login/logout/``me`` keep their
+  own contracts — they never carry a business permission. The served inventory
+  is the eight business routes plus login, logout and me.
   Loopback-only
   binding is a development safety measure, explicitly not a production
   security boundary. Documentation URLs stay disabled.
@@ -75,6 +80,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from src.api_auth import (
     AUTHENTICATION_REQUIRED_CODE,
     AUTHENTICATION_REQUIRED_MESSAGE,
+    AuthenticatedPrincipal,
     AuthenticationRequired,
     build_session_service,
 )
@@ -88,11 +94,18 @@ from src.api_login import (
     register_login_route,
 )
 from src.api_logout import LOGOUT_PATH, register_logout_route
-from src.api_me import ME_PATH, register_me_route
+from src.api_me import ME_PATH, current_principal_dependency, register_me_route
 from src.api_request_context import (
     REQUEST_ID_HEADER,
     RequestIDMiddleware,
     request_id_for,
+)
+from src.authz import (
+    PERMISSION_DENIED_CODE,
+    PERMISSION_DENIED_MESSAGE,
+    Permission,
+    PermissionDenied,
+    permission_dependency,
 )
 from src.config import AppSettings, ConfigError, load_settings
 from src.db import DatabaseUnavailableError, MalformedDsnError
@@ -141,9 +154,10 @@ PERSISTENCE_REJECTED_CODE: str = "PERSISTENCE_REJECTED"
 # ---------------------------------------------------------------------------
 # Approved route inventory (exactly these eleven; never more)
 #:
-#: P5.4.5 adds the login endpoint, P5.4.6 the logout endpoint and P5.4.7 the
-#: current-user endpoint; the eight Phase 3 business routes stay unchanged and
-#: unauthenticated.
+#: P5.4.5 adds the login endpoint, P5.4.6 the logout endpoint, P5.4.7 the
+#: current-user endpoint and P5.4.10 puts the eight business routes behind the
+#: centralized RBAC guard (health stays anonymous, authentication routes keep
+#: their own contract).
 # ---------------------------------------------------------------------------
 
 ApprovedRoute = tuple[str, str]  # (path without prefix, HTTP method)
@@ -344,6 +358,24 @@ def handle_authentication_required(
     )
 
 
+def handle_permission_denied(
+    request: Request, exc: PermissionDenied
+) -> JSONResponse:
+    """The authenticated principal lacks the endpoint's permission: sanitized 403.
+
+    The body never names the role, the permission, the username or the account,
+    and the only extra header is the existing request ID. Authentication
+    failures are handled earlier and stay the existing generic 401.
+    """
+    _logger.warning(
+        "rejected request: permission denied request_id=%s",
+        request_id_for(request) or "unassigned",
+    )
+    return _error_json(
+        403, PERMISSION_DENIED_CODE, PERMISSION_DENIED_MESSAGE
+    )
+
+
 def handle_login_rate_limited(
     request: Request, exc: LoginRateLimited
 ) -> JSONResponse:
@@ -499,6 +531,7 @@ def create_app(
     login_service: LoginService | None = None,
     session_service: SessionService | None = None,
     login_throttle: LoginThrottle | None = None,
+    principal_resolver: Callable[[Request], AuthenticatedPrincipal] | None = None,
 ) -> FastAPI:
     """Create the Phase 3 API application (no server, no connections).
 
@@ -509,9 +542,15 @@ def create_app(
         journal's data directory for the lazily built default services; the
         app itself never reads a DSN or binds a socket.
     employee_service / attendance_service / login_service / session_service /
-    login_throttle:
+    login_throttle / principal_resolver:
         Offline-test seams. Production passes none of them; the application
-        then owns one shared :class:`LoginThrottle` (P5.4.9).
+        then owns one shared :class:`LoginThrottle` (P5.4.9) and resolves
+        business-route identity from the ``va_session`` cookie.
+
+        ``principal_resolver`` replaces *only* the identity source for the
+        business routes (used by offline endpoint tests that have no session
+        cookie); the permission checks still run unchanged, so it can never
+        grant a permission a principal does not have.
     """
     from src.config import SETTINGS as _default_settings
 
@@ -523,6 +562,20 @@ def create_app(
         resolved_settings, login_service, login_throttle
     )
     get_sessions = _resolve_session_service(resolved_settings, session_service)
+
+    # P5.4.10: one identity resolver for the business routes, and one guard
+    # factory over it. Production resolves the principal from the validated
+    # ``va_session`` cookie; offline endpoint tests may inject an equivalent
+    # resolver (the permission checks below still run unchanged).
+    resolve_principal = (
+        principal_resolver
+        if principal_resolver is not None
+        else current_principal_dependency(get_sessions)
+    )
+
+    def guard(permission: Permission):
+        """The single RBAC dependency used by every protected business route."""
+        return Depends(permission_dependency(permission, resolve_principal))
 
     app = FastAPI(
         title="Visual Attendance System API (Phase 3, development)",
@@ -574,7 +627,11 @@ def create_app(
 
     # -- employees ------------------------------------------------------
 
-    @app.post(f"{API_PREFIX}/employees", status_code=201)
+    @app.post(
+        f"{API_PREFIX}/employees",
+        status_code=201,
+        dependencies=[guard(Permission.EMPLOYEES_CREATE)],
+    )
     def create_employee(payload: EmployeeCreateRequest) -> JSONResponse:
         """Create one employee; duplicate ID → 409, invalid input → 422."""
         from src.employee import Employee, EmployeeValidationError
@@ -603,7 +660,10 @@ def create_app(
             )
         return JSONResponse(status_code=201, content=employee_payload(created))
 
-    @app.get(f"{API_PREFIX}/employees")
+    @app.get(
+        f"{API_PREFIX}/employees",
+        dependencies=[guard(Permission.EMPLOYEES_READ)],
+    )
     def list_employees(
         after: str | None = None, limit: int | None = None
     ) -> JSONResponse:
@@ -638,7 +698,10 @@ def create_app(
             },
         )
 
-    @app.get(f"{API_PREFIX}/employees/{{employee_id}}")
+    @app.get(
+        f"{API_PREFIX}/employees/{{employee_id}}",
+        dependencies=[guard(Permission.EMPLOYEES_READ)],
+    )
     def retrieve_employee(employee_id: str) -> JSONResponse:
         """Retrieve one employee; missing → 404."""
         from src.employee_repository import EmployeeNotFound
@@ -654,7 +717,10 @@ def create_app(
             )
         return JSONResponse(status_code=200, content=employee_payload(employee))
 
-    @app.patch(f"{API_PREFIX}/employees/{{employee_id}}")
+    @app.patch(
+        f"{API_PREFIX}/employees/{{employee_id}}",
+        dependencies=[guard(Permission.EMPLOYEES_UPDATE)],
+    )
     def update_employee(
         employee_id: str, payload: EmployeeUpdateRequest
     ) -> JSONResponse:
@@ -679,7 +745,10 @@ def create_app(
             )
         return JSONResponse(status_code=200, content=employee_payload(employee))
 
-    @app.post(f"{API_PREFIX}/employees/{{employee_id}}/deactivate")
+    @app.post(
+        f"{API_PREFIX}/employees/{{employee_id}}/deactivate",
+        dependencies=[guard(Permission.EMPLOYEES_DEACTIVATE)],
+    )
     def deactivate_employee(employee_id: str) -> JSONResponse:
         """Set ``is_active = FALSE``; missing → 404. Idempotent by nature
         (deactivating an inactive employee returns the same row)."""
@@ -698,7 +767,10 @@ def create_app(
 
     # -- attendance -----------------------------------------------------
 
-    @app.get(f"{API_PREFIX}/attendance")
+    @app.get(
+        f"{API_PREFIX}/attendance",
+        dependencies=[guard(Permission.ATTENDANCE_READ)],
+    )
     def list_attendance() -> JSONResponse:
         """The validated journal in append order (no attendance pagination
         exists by contract). A corrupt journal → 503, never an empty list."""
@@ -723,7 +795,11 @@ def create_app(
             },
         )
 
-    @app.post(f"{API_PREFIX}/attendance/{{employee_id}}/checkout", status_code=201)
+    @app.post(
+        f"{API_PREFIX}/attendance/{{employee_id}}/checkout",
+        status_code=201,
+        dependencies=[guard(Permission.ATTENDANCE_CHECKOUT)],
+    )
     def checkout(
         employee_id: str, body: CheckoutRequest | None = None
     ) -> JSONResponse:
@@ -785,6 +861,7 @@ def create_app(
     app.add_exception_handler(AuthenticationRequired, handle_authentication_required)
     app.add_exception_handler(OriginNotAllowed, handle_origin_not_allowed)
     app.add_exception_handler(LoginRateLimited, handle_login_rate_limited)
+    app.add_exception_handler(PermissionDenied, handle_permission_denied)
     app.add_exception_handler(Exception, handle_unexpected_error)
     return app
 

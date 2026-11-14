@@ -3,6 +3,90 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Current Phase 5 milestone status (reconciled 2026-11-14)
+
+| Milestone | Scope | Status |
+| --- | --- | --- |
+| P5.1 | Inspection, gap analysis and approved decisions | Completed (review, no code) |
+| P5.2 | Identity data model and persistence | Completed (offline) |
+| P5.3 | Authentication primitives | Completed (offline) |
+| P5.4 | Authentication API: session service, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10) | P5.4.1–P5.4.9 completed offline and accepted (committed through `e63d587`); P5.4.10 implemented offline, **awaiting owner review** (unstaged in the working tree) |
+| P5.5 | Audit journal and security-event auditing | Not started — next implementation milestone |
+| P5.6 | User administration and secure first-Admin provisioning | Not started |
+| P5.7 | Frontend authentication and session integration | Not started |
+| P5.8 | Role-aware UI and frontend security hardening | Not started |
+| P5.9 | Final security regression, integration review and Phase 5 acceptance | Not started |
+
+**Phase 5 is not complete.** The numbering above reconciles two earlier
+inconsistent descriptions (P5.4 as session service / P5.5 login / P5.6 RBAC in
+`docs/PHASE5_IMPLEMENTATION_PLAN.md` §2 versus the P5.4.1–P5.4.10 sub-milestone
+list in §8). There is no P5.4.11: P5.4.10 closes the P5.4 sub-milestone
+sequence, and the scope formerly grouped as "P5.4.10+" is split into P5.5
+(audit), P5.6 (user administration), P5.7 (frontend authentication), P5.8
+(role-aware UI/hardening) and P5.9 (final review). The Step records below are
+preserved unchanged.
+
+## Step 62 — Phase 5 P5.4.10: backend RBAC and business route protection (2026-11-14)
+
+**Status: implemented (offline), awaiting owner review — changes are unstaged
+and uncommitted. Not yet an accepted milestone.**
+
+**Authorization only. No audit journal, no user-management API, no frontend
+change, no schema change, no Git operation.**
+
+* **Baseline**: branch `main`, HEAD
+  `e63d587038b3a9b376720e21277958de7c33f5b0` (P5.4.9, committed by the owner),
+  clean working tree (no staged, unstaged or untracked files).
+* **Policy** — `src/authz.py` defines eight permissions and one immutable
+  role table (`MappingProxyType` of `frozenset`s): Admin all eight; HR Manager
+  `employees:read/create/update`, `attendance:read/checkout`; Operator
+  `employees:read`, `attendance:read/checkout`; Auditor `employees:read`,
+  `attendance:read`, `audit:read`. No inheritance, wildcard, hierarchy or
+  default grant; `audit:read`/`users:manage` are policy only (no endpoint
+  consumes them).
+* **Guard** — `permission_dependency(permission, get_principal)` wraps the
+  existing P5.4.4 session dependency (via `current_principal_dependency`), so
+  cookie parsing, token validation and session lookup are not duplicated and
+  no token/`User`/`UserSession` enters the policy. Unknown or non-`Role` values
+  (including the string `"Admin"`), unknown permissions and
+  `is_active=False` principals are denied; a non-`Permission` refuses route
+  construction.
+* **Route mapping** — one `guard()` per business route: `POST /employees` →
+  `employees:create`; `GET /employees` and `GET /employees/{id}` →
+  `employees:read`; `PATCH /employees/{id}` → `employees:update`;
+  `POST /employees/{id}/deactivate` → `employees:deactivate`;
+  `GET /attendance` → `attendance:read`;
+  `POST /attendance/{id}/checkout` → `attendance:checkout`.
+* **HTTP** — anonymous → existing generic `401 AUTHENTICATION_REQUIRED`;
+  authenticated without permission → sanitized `403 PERMISSION_DENIED` (fixed
+  message, no role/permission/username/account) with `X-Request-ID` and no
+  cookie; storage failure → existing `503`; unexpected fault → sanitized `500`.
+  `GET /health` stays anonymous; login/logout/`me` keep their contracts.
+* **Tests** — `tests/test_authz.py` (80) and `tests/test_api_rbac.py` (49).
+* **Docs** — `ARCHITECTURE.md`, `CHANGELOG.md`,
+  `docs/PHASE5_IMPLEMENTATION_PLAN.md` §8.
+
+**Verified**
+
+* Focused: `tests/test_authz.py` + `tests/test_api_rbac.py` → **129 passed**,
+  exit 0, no skips.
+* Regression set (RBAC, endpoints, API foundation, auth, me, login, logout,
+  throttle, startup gate, request context) → **428 passed**, exit 0, no skips.
+* Full backend suite: **3091 passed, 32 skipped**, exit 0 (the 32 skips are the
+  pre-existing opt-in PostgreSQL tier).
+* No Python linter or type checker is configured in this repository, so none
+  was run; `git diff --check` exit 0.
+
+**Not verified / deferred**
+
+* No live PostgreSQL, browser, camera, deployment or multi-process validation.
+  Authorization is exercised offline through real ASGI requests and a real
+  `SessionService` over in-memory repositories.
+* No audit logging/audit journal, first-Admin provisioning, user-management
+  API, frontend authentication, route guards, MFA or distributed/IP rate
+  limiting; session, cookie, hashing and throttle policy unchanged.
+* Changes are unstaged and uncommitted for independent review.
+
 ## Step 61 — Phase 5 P5.4.9: login rate limiting (2026-11-14)
 
 **Backend security only. No new route, no schema change, no frontend change, no

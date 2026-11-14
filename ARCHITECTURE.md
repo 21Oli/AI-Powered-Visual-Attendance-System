@@ -1089,6 +1089,40 @@ the journal schema version (still 1), or the decision authority.
   counters are **process-local**, so separate worker processes keep separate
   counters. Distributed rate limiting, IP throttling, CAPTCHA, MFA and account
   lockout are deliberately absent.
+* **Business-route authorization (P5.4.10).** `src/authz.py` is the single
+  authorization policy. It defines eight permissions
+  (`employees:read`, `employees:create`, `employees:update`,
+  `employees:deactivate`, `attendance:read`, `attendance:checkout`,
+  `audit:read`, `users:manage`) and one immutable role table
+  (`ROLE_PERMISSIONS`, a `MappingProxyType` of `frozenset`s) for exactly the
+  four approved roles: Admin holds all eight; HR Manager holds `employees:read`,
+  `employees:create`, `employees:update`, `attendance:read`,
+  `attendance:checkout`; Operator holds `employees:read`, `attendance:read`,
+  `attendance:checkout`; Auditor holds `employees:read`, `attendance:read`,
+  `audit:read`. There is no hierarchy, inheritance, wildcard or default grant.
+  Identity comes **only** from the validated server-side principal
+  (`permission_dependency` wraps the existing `current_principal_dependency` →
+  `make_session_dependency`), so no body field, query parameter or header can
+  supply a role, user ID or permission. Unknown or non-`Role` values (e.g. the
+  string `"Admin"`) and `is_active=False` principals are denied; a malformed
+  permission refuses route construction instead of silently protecting
+  nothing. The seven business routes each declare exactly one permission —
+  `POST /employees` → `employees:create`, `GET /employees` and
+  `GET /employees/{id}` → `employees:read`, `PATCH /employees/{id}` →
+  `employees:update`, `POST /employees/{id}/deactivate` →
+  `employees:deactivate`, `GET /attendance` → `attendance:read`,
+  `POST /attendance/{id}/checkout` → `attendance:checkout` — through one
+  `guard()` factory over one identity resolver, so no business route can be
+  added without choosing a permission. `GET /health` stays anonymous; login,
+  logout and `/me` keep their existing contracts and never require a business
+  permission. An unauthenticated request is the existing sanitized
+  `401 AUTHENTICATION_REQUIRED`; an authenticated principal without the
+  permission is the sanitized `403 PERMISSION_DENIED` (fixed message, no role,
+  permission, username or account, plus the existing `X-Request-ID`); a storage
+  failure during session validation stays the existing `503` and an unexpected
+  fault the sanitized `500`. `audit:read` and `users:manage` are policy only —
+  no endpoint consumes them yet, and no audit journal, user-management API or
+  first-Admin provisioning exists.
 * **Logout (P5.4.6).** `POST /api/v1/auth/logout` (`src/api_logout.py`) reads
   the raw token **only** from the configured `va_session` cookie (no query or
   body token exists), calls the existing

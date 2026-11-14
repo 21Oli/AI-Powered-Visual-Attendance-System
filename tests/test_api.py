@@ -317,13 +317,21 @@ def test_endpoints_are_implemented_and_never_report_not_implemented(
 def test_unconfigured_database_is_reported_as_unavailable_not_success(
     unavailable_api_server,
 ) -> None:
-    """An unreachable database is an honest sanitized 503, never a fake row."""
+    """No fake row is ever served when nothing can be trusted.
+
+    P5.4.10 changed the ordering deliberately: the business routes now
+    authenticate **before** any business call, so an anonymous request is the
+    generic ``401 AUTHENTICATION_REQUIRED`` instead of reaching the unavailable
+    service. The storage-failure mapping itself is still the sanitized 503
+    ``DATABASE_UNAVAILABLE`` (P5.4.4's handler and
+    ``tests/test_api_rbac.py::test_database_failure_during_session_validation_stays_a_503``).
+    """
     status, raw = unavailable_api_server.request("GET", f"{API_PREFIX}/employees")
-    assert status == 503
+    assert status == 401
     payload = json.loads(raw)
-    assert payload["error"]["code"] == "DATABASE_UNAVAILABLE"
-    assert payload["error"]["message"] == "Database is temporarily unavailable."
-    for fragment in (_FAKE_SENSITIVE_DSN, "postgresql", "password"):
+    assert payload["error"]["code"] == "AUTHENTICATION_REQUIRED"
+    assert payload["error"]["message"] == "Authentication is required."
+    for fragment in (_FAKE_SENSITIVE_DSN, "postgresql", "password", "employee"):
         assert fragment not in raw
 
 
