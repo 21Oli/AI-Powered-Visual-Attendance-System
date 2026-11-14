@@ -4,6 +4,29 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5, P5.4.7: current-user (`/me`) API
+
+### Added
+
+* `src/api_me.py` — `GET /api/v1/auth/me`: `MeResponse` (exactly `user_id`, `username`, `role`, `is_active`, `extra="forbid"`) serialized with `model_dump(mode="json")` and returned with `Cache-Control: no-store`. Authentication reuses `make_session_dependency` and `AuthenticatedPrincipal`, so the existing `SessionService.validate_session` is the only validator and no token is read, digested or logged here. `current_principal_dependency` resolves the service lazily on first request; `register_me_route` registers the route exactly once.
+* `tests/test_api_me.py` (33 tests) — the four-field contract and role serialization, request ID and `no-store`, no cookie set or cleared, client-supplied identity in query/headers ignored, the full 401 matrix (missing, empty, malformed, unknown, revoked, idle- and absolute-expired, inactive, vanished) proven byte-identical, credential/session leakage checks, sanitized 503 for storage failures and 500 for an unexpected service fault, single registration, `GET`-only method behaviour, anonymous `/health`, and unchanged Origin requirements on login/logout.
+
+### Changed
+
+* `src/api.py` — registers the current-user route and extends the approved inventory from ten to eleven routes (`GET /auth/me`). No business route is protected and no middleware, CORS or caching layer was added.
+
+### Verified
+
+* Focused (`/me` + API + login + logout + auth + cookie suites): **204 passed**.
+* Full backend suite: **2900 passed, 32 skipped**, exit 0 (the 32 skips are the pre-existing opt-in PostgreSQL tier).
+* `git diff --check` clean. No frontend file changed, so the frontend suite, typecheck, lint and build were not re-run.
+
+### Notes
+
+* Read-only `GET` with no Origin/CSRF requirement; the login/logout trusted-Origin policy is unchanged and no frontend proxy allowlist entry was added.
+* No RBAC enforcement, business-route protection, session refresh/sliding changes, session- or user-management endpoints, frontend `/me` integration, throttling or audit logging.
+* Verified offline only: no live PostgreSQL, browser, TLS or deployment validation.
+
 ## [Unreleased] — Phase 5, P5.4.6: logout API
 
 ### Added

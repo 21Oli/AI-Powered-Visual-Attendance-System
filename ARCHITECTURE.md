@@ -1056,6 +1056,19 @@ the journal schema version (still 1), or the decision authority.
   already-signed-out: a database failure stays the sanitized 503 and an
   unexpected failure the sanitized 500, and in both cases the deletion cookie
   is deliberately **not** sent so the caller keeps it and can retry.
+* **Current user (P5.4.7).** `GET /api/v1/auth/me` (`src/api_me.py`) returns
+  the session's identity using the existing
+  `make_session_dependency`/`AuthenticatedPrincipal` — no second validation
+  path, no manual token handling. The body is an explicit `MeResponse`
+  (`user_id`, `username`, `role`, `is_active`, `extra="forbid"`) serialized
+  with `model_dump(mode="json")` and sent with `Cache-Control: no-store`, so
+  credential material cannot be added accidentally and a shared cache cannot
+  replay one user's profile to another. Every unusable session (missing, empty,
+  malformed, unknown, revoked, expired, inactive account) is the same 401
+  `AUTHENTICATION_REQUIRED`; storage failure stays 503 and an unexpected fault
+  500. The route is `GET` only and read-only, so it carries no Origin/CSRF
+  requirement — login and logout keep theirs unchanged — and no body, query or
+  header can select another user.
 * **Error mapping.** Login and logout failures keep the existing conventions:
   401 `AUTHENTICATION_REQUIRED`, 403 `ORIGIN_NOT_ALLOWED`, 422
   `REQUEST_INVALID`, 503 `DATABASE_UNAVAILABLE`, 500 `INTERNAL_ERROR` for

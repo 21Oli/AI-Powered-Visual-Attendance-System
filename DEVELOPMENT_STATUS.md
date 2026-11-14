@@ -3,6 +3,54 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 59 — Phase 5 P5.4.7: current-user (`/me`) API (2026-11-14)
+
+**One read-only endpoint. No RBAC enforcement, business-route protection,
+frontend integration, throttling or audit; no Git operation.**
+
+* **Baseline**: branch `main`, HEAD
+  `64ecdb8415513a18166ec48a336141165efb0446` (P5.4.6, committed and accepted),
+  clean working tree.
+* **Endpoint** — `GET /api/v1/auth/me` (`src/api_me.py`): 200 with exactly
+  `user_id`, `username`, `role`, `is_active` from an explicit `MeResponse`
+  (`extra="forbid"`, `model_dump(mode="json")`), `Cache-Control: no-store`,
+  and `X-Request-ID` from the existing middleware. Registered exactly once;
+  inventory is now eleven routes.
+* **Authentication** — the existing `make_session_dependency` over the existing
+  `SessionService.validate_session`, projecting the credential-free
+  `AuthenticatedPrincipal`. No second validator, no manual token parsing or
+  digesting, and no body/query/header can select another user.
+* **Failures** — missing, empty, malformed, unknown, revoked, idle- and
+  absolute-expired, inactive-account and vanished-account sessions are all the
+  same sanitized `401 AUTHENTICATION_REQUIRED` (byte-identical). Storage
+  failures stay `503 DATABASE_UNAVAILABLE`, unexpected faults `500
+  INTERNAL_ERROR`, both sanitized and correlated by request ID. The endpoint
+  never sets or clears a cookie.
+* **Origin** — not required for this read-only `GET`; login and logout keep
+  their mandatory trusted-Origin guard, and no CORS or bypass was added.
+* **Tests** — `tests/test_api_me.py` (33), plus the `tests/test_api.py`
+  inventory update (eleven routes; `AUTHENTICATION_REQUIRED` accepted for the
+  no-Origin probe of `/me`).
+* **Docs** — `ARCHITECTURE.md` D26, `CHANGELOG.md`,
+  `docs/PHASE5_IMPLEMENTATION_PLAN.md` §8.
+
+**Verified**
+
+* Focused (`/me` + API + login + logout + auth + cookies): **204 passed**.
+* Full backend suite: **2900 passed, 32 skipped**, exit 0 (the 32 skips are the
+  pre-existing opt-in PostgreSQL tier).
+* No frontend file changed, so the frontend suite/typecheck/lint/build were not
+  re-run; the proxy and UI are untouched.
+* `git diff --check` clean.
+
+**Not verified / deferred**
+
+* No frontend `/me` integration or proxy allowlist entry, and no browser
+  end-to-end check (the proxy still drops `Set-Cookie`).
+* No live PostgreSQL, TLS or deployment validation.
+* No RBAC enforcement, business-route protection, session refresh/sliding
+  changes, session/user management, throttling or audit logging.
+
 ## Step 58 — Phase 5 P5.4.6: logout API (2026-11-14)
 
 **One endpoint. No `/me`, RBAC, business-route protection, throttling, audit,

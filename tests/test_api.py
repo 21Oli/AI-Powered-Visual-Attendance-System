@@ -123,8 +123,9 @@ def test_route_inventory_is_exactly_the_approved_eight() -> None:
         (f"{API_PREFIX}{path}", method) for path, method in APPROVED_ROUTES
     )
     assert sorted(inventory) == expected
-    assert len(expected) == 10, (
-        "eight business routes plus P5.4.5 login and P5.4.6 logout"
+    assert len(expected) == 11, (
+        "eight business routes plus P5.4.5 login, P5.4.6 logout and "
+        "P5.4.7 me"
     )
 
 
@@ -305,8 +306,11 @@ def test_endpoints_are_implemented_and_never_report_not_implemented(
             "REQUEST_INVALID",
             "ATTENDANCE_UNAVAILABLE",
             # P5.4.5/P5.4.6: login and logout reject a request that carries no
-            # trusted Origin before they ever touch the database.
+            # trusted Origin before they ever touch the database; P5.4.7 `/me`
+            # refuses an unauthenticated request for the same reason a 401 is
+            # expected there.
             "ORIGIN_NOT_ALLOWED",
+            "AUTHENTICATION_REQUIRED",
         }
 
 

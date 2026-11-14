@@ -301,5 +301,12 @@ successes with the same cookie clearing and no hint about session existence;
 the existing trusted-Origin guard blocks cross-site logout before any
 revocation, a database failure stays the sanitized 503 (cookie deliberately
 retained so the client can retry) and an unexpected failure the sanitized 500.
-`/me`, throttling, RBAC, audit logging, frontend login/logout UI and protection
-of the eight business routes remain unimplemented.
+P5.4.7 adds `GET /api/v1/auth/me` (`src/api_me.py`): the identity comes from
+the existing `make_session_dependency`/`AuthenticatedPrincipal`, the body is the
+explicit four-field `MeResponse` (`user_id`, `username`, `role`, `is_active`)
+sent with `Cache-Control: no-store`, and every unusable session is the same
+sanitized 401 while storage failures remain 503. The route is read-only `GET`,
+so it requires no Origin and the login/logout policy is untouched. RBAC
+enforcement, business-route protection, session refresh, throttling, audit
+logging, frontend login/logout/`me` UI and the frontend proxy allowlist remain
+unimplemented.

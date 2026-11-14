@@ -44,9 +44,12 @@ Design rules (unchanged from the foundation step)
   (:mod:`src.api_cookies`) and a cookie-only authentication dependency
   (:mod:`src.api_auth`); P5.4.5 adds ``POST /api/v1/auth/login``
   (:mod:`src.api_login`) and P5.4.6 ``POST /api/v1/auth/logout``
-  (:mod:`src.api_logout`), both guarded by exact same-origin validation. The
-  dependency still guards nothing, so the eight business endpoints remain
-  unauthenticated; the served inventory is those eight plus login and logout.
+  (:mod:`src.api_logout`), both guarded by exact same-origin validation;
+  P5.4.7 adds the read-only, cookie-authenticated
+  ``GET /api/v1/auth/me`` (:mod:`src.api_me`), which needs no Origin check
+  because it changes nothing. The dependency still guards nothing else, so the
+  eight business endpoints remain unauthenticated; the served inventory is
+  those eight plus login, logout and me.
   Loopback-only
   binding is a development safety measure, explicitly not a production
   security boundary. Documentation URLs stay disabled.
@@ -83,6 +86,7 @@ from src.api_login import (
     register_login_route,
 )
 from src.api_logout import LOGOUT_PATH, register_logout_route
+from src.api_me import ME_PATH, register_me_route
 from src.api_request_context import (
     REQUEST_ID_HEADER,
     RequestIDMiddleware,
@@ -127,10 +131,11 @@ PERSISTENCE_REJECTED_CODE: str = "PERSISTENCE_REJECTED"
 
 
 # ---------------------------------------------------------------------------
-# Approved route inventory (exactly these ten; never more)
+# Approved route inventory (exactly these eleven; never more)
 #:
-#: P5.4.5 adds the login endpoint and P5.4.6 the logout endpoint; the eight
-#: Phase 3 business routes stay unchanged and unauthenticated.
+#: P5.4.5 adds the login endpoint, P5.4.6 the logout endpoint and P5.4.7 the
+#: current-user endpoint; the eight Phase 3 business routes stay unchanged and
+#: unauthenticated.
 # ---------------------------------------------------------------------------
 
 ApprovedRoute = tuple[str, str]  # (path without prefix, HTTP method)
@@ -139,6 +144,7 @@ APPROVED_ROUTES: tuple[ApprovedRoute, ...] = (
     ("/health", "GET"),
     ("/auth/login", "POST"),
     ("/auth/logout", "POST"),
+    ("/auth/me", "GET"),
     ("/employees", "POST"),
     ("/employees", "GET"),
     ("/employees/{employee_id}", "GET"),
@@ -479,7 +485,7 @@ def create_app(
     app = FastAPI(
         title="Visual Attendance System API (Phase 3, development)",
         # Doc URLs disabled: the served route inventory must be exactly
-        # the approved endpoints (eight business routes + login + logout).
+        # the approved endpoints (eight business routes + login + logout + me).
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
@@ -514,6 +520,14 @@ def create_app(
         path=LOGOUT_PATH,
         get_session_service=get_sessions,
         settings=resolved_settings,
+    )
+
+    # -- current user (P5.4.7) -------------------------------------------
+
+    register_me_route(
+        app,
+        path=ME_PATH,
+        get_session_service=get_sessions,
     )
 
     # -- employees ------------------------------------------------------
