@@ -446,13 +446,14 @@ describe("proxy login route (P5.4.5)", () => {
     expect(JSON.stringify(headers)).not.toContain("client-value");
   });
 
-  it("drops the backend Set-Cookie (BFF cookie integration is later)", async () => {
+  it("preserves the backend session cookie for the browser", async () => {
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ user: { user_id: "u1" } }), {
         status: 200,
         headers: {
           "content-type": "application/json",
-          "set-cookie": "va_session=token-value; HttpOnly; Path=/api/v1",
+          "set-cookie":
+            "va_session=session-token-value; HttpOnly; Path=/api/v1; SameSite=lax; Max-Age=43200",
         },
       }),
     );
@@ -463,7 +464,258 @@ describe("proxy login route (P5.4.5)", () => {
     });
 
     expect(response.status).toBe(200);
+    const cookie = response.headers.get("set-cookie") ?? "";
+    expect(cookie).toContain("va_session=session-token-value");
+    expect(cookie).toContain("Path=/api/v1");
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie.toLowerCase()).toContain("samesite=lax");
+    expect(cookie).toContain("Max-Age=43200");
+    expect(cookie.toLowerCase()).not.toContain("domain=");
+    // The cookie stays an HTTP header; it is never promoted into the body.
+    expect(await response.text()).not.toContain("session-token-value");
+  });
+
+  it("simulates opaque token values byte-for-byte, never comma-joined", async () => {
+    const value = "abc-DEF_123.xyz";
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ user: { user_id: "u1" } }), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "set-cookie": `va_session=${value}; HttpOnly; Path=/api/v1`,
+        },
+      }),
+    );
+
+    const response = await call("POST", "api/v1/auth/login", {
+      body: payload,
+      headers: { origin: ORIGIN },
+    });
+
+    expect(response.headers.get("set-cookie")).toContain(`va_session=${value};`);
+  });
+});
+
+describe("proxy /me route (P5.4.8)", () => {
+  const USER = {
+    user_id: "user-1",
+    username: "ada",
+    role: "Admin",
+    is_active: true,
+  };
+
+  it("allows only GET /api/v1/auth/me against the right upstream URL", async () => {
+    fetchMock.mockResolvedValueOnce(upstreamJson(USER));
+
+    const response = await call("GET", "api/v1/auth/me");
+
+    expect(response.status).toBe(200);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`${BACKEND}/api/v1/auth/me`);
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).method).toBe("GET");
+    expect(await bodyOf(response)).toEqual(USER);
+
+    const refused = await call("POST", "api/v1/auth/me");
+    expect(refused.status).toBe(405);
+  });
+
+  it("forwards only the va_session cookie", async () => {
+    fetchMock.mockResolvedValueOnce(upstreamJson(USER));
+
+    await call("GET", "api/v1/auth/me", {
+      headers: {
+        cookie: "theme=dark; va_session=the-token; other=value",
+        authorization: "Bearer client-token",
+        "x-user-id": "user-2",
+        "x-role": "Admin",
+      },
+    });
+
+    const headers = (fetchMock.mock.calls[0]?.[1] as RequestInit)
+      .headers as Record<string, string>;
+    expect(headers.cookie).toBe("va_session=the-token");
+    expect(Object.keys(headers).sort()).toEqual(["accept", "cookie"]);
+    expect(JSON.stringify(headers)).not.toContain("dark");
+    expect(JSON.stringify(headers)).not.toContain("client-token");
+  });
+
+  it("sends no cookie at all when the browser has none", async () => {
+    fetchMock.mockResolvedValueOnce(upstreamJson(USER));
+    await call("GET", "api/v1/auth/me");
+
+    const headers = (fetchMock.mock.calls[0]?.[1] as RequestInit)
+      .headers as Record<string, string>;
+    expect(headers.cookie).toBeUndefined();
+  });
+
+  it.each(["va_session=a; va_session=b", "va_session=", "va_session=bad value"
+  ])("ignores a malformed session cookie (%s)", async (cookie) => {
+    fetchMock.mockResolvedValueOnce(upstreamJson(USER));
+    await call("GET", "api/v1/auth/me", { headers: { cookie } });
+
+    const headers = (fetchMock.mock.calls[0]?.[1] as RequestInit)
+      .headers as Record<string, string>;
+    expect(headers.cookie).toBeUndefined();
+  });
+
+  it("preserves a 401 without inventing a body or a cookie", async () => {
+    fetchMock.mockResolvedValueOnce(
+      upstreamJson(
+        { error: { code: "AUTHENTICATION_REQUIRED", message: "Authentication is required." } },
+        401,
+      ),
+    );
+
+    const response = await call("GET", "api/v1/auth/me", {
+      headers: { cookie: "va_session=unknown" },
+    });
+
+    expect(response.status).toBe(401);
+    expect((await bodyOf(response)).error).toMatchObject({
+      code: "AUTHENTICATION_REQUIRED",
+    });
     expect(response.headers.get("set-cookie")).toBeNull();
-    expect(await response.text()).not.toContain("token-value");
+  });
+
+  it("preserves a sanitized 503", async () => {
+    fetchMock.mockResolvedValueOnce(
+      upstreamJson(
+        {
+          error: {
+            code: "DATABASE_UNAVAILABLE",
+            message: "Database is temporarily unavailable.",
+          },
+        },
+        503,
+      ),
+    );
+
+    const response = await call("GET", "api/v1/auth/me");
+    expect(response.status).toBe(503);
+    expect((await bodyOf(response)).error).toMatchObject({
+      code: "DATABASE_UNAVAILABLE",
+    });
+  });
+
+  it("never lets a client-supplied identity override the backend answer", async () => {
+    fetchMock.mockResolvedValueOnce(upstreamJson(USER));
+
+    const response = await call("GET", "api/v1/auth/me", {
+      headers: { "x-user-id": "admin-1" },
+      query: "user_id=admin-1&role=Admin",
+    });
+
+    // A query is refused outright on this route rather than forwarded.
+    expect(response.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("proxy logout route (P5.4.8)", () => {
+  const ORIGIN = "https://attendance.test.invalid";
+
+  it("allows only POST /api/v1/auth/logout", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    const response = await call("POST", "api/v1/auth/logout", {
+      headers: { origin: ORIGIN, cookie: "theme=dark; va_session=abc" },
+    });
+
+    expect(response.status).toBe(204);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`${BACKEND}/api/v1/auth/logout`);
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(init.method).toBe("POST");
+    expect(init.headers).toMatchObject({ origin: ORIGIN, cookie: "va_session=abc" });
+    expect(Object.keys(init.headers as Record<string, string>).sort()).toEqual([
+      "accept",
+      "cookie",
+      "origin",
+    ]);
+
+    const refused = await call("GET", "api/v1/auth/logout");
+    expect(refused.status).toBe(405);
+  });
+
+  it("keeps a 204 bodyless and preserves the cookie-clearing header", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(null, {
+        status: 204,
+        headers: {
+          "set-cookie":
+            'va_session=""; expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/api/v1; HttpOnly; SameSite=lax',
+        },
+      }),
+    );
+
+    const response = await call("POST", "api/v1/auth/logout", {
+      headers: { origin: ORIGIN, cookie: "va_session=abc" },
+    });
+
+    expect(response.status).toBe(204);
+    expect(await response.text()).toBe("");
+    const cookie = response.headers.get("set-cookie") ?? "";
+    expect(cookie).toContain("va_session=");
+    expect(cookie).toContain("Max-Age=0");
+    expect(cookie).toContain("Path=/api/v1");
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie.toLowerCase()).toContain("samesite=lax");
+    expect(cookie).toContain("Thu, 01 Jan 1970 00:00:00 GMT");
+    expect(cookie.toLowerCase()).not.toContain("domain=");
+  });
+
+  it("preserves 403 and 503 without clearing the cookie", async () => {
+    fetchMock.mockResolvedValueOnce(
+      upstreamJson(
+        { error: { code: "ORIGIN_NOT_ALLOWED", message: "The request origin is not allowed." } },
+        403,
+      ),
+    );
+    const forbidden = await call("POST", "api/v1/auth/logout", {
+      headers: { origin: "https://evil.test", cookie: "va_session=abc" },
+    });
+    expect(forbidden.status).toBe(403);
+    expect(forbidden.headers.get("set-cookie")).toBeNull();
+
+    fetchMock.mockResolvedValueOnce(
+      upstreamJson(
+        {
+          error: {
+            code: "DATABASE_UNAVAILABLE",
+            message: "Database is temporarily unavailable.",
+          },
+        },
+        503,
+      ),
+    );
+    const unavailable = await call("POST", "api/v1/auth/logout", {
+      headers: { origin: ORIGIN, cookie: "va_session=abc" },
+    });
+    expect(unavailable.status).toBe(503);
+    expect(unavailable.headers.get("set-cookie")).toBeNull();
+  });
+
+  it("never reports a failed upstream request as a successful logout", async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError("connect ECONNREFUSED"));
+
+    const response = await call("POST", "api/v1/auth/logout", {
+      headers: { origin: ORIGIN, cookie: "va_session=abc" },
+    });
+
+    expect(response.status).toBe(502);
+    expect((await bodyOf(response)).error).toMatchObject({
+      code: "BACKEND_UNAVAILABLE",
+    });
+    expect(response.headers.get("set-cookie")).toBeNull();
+  });
+
+  it("does not forward a body for logout", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    await call("POST", "api/v1/auth/logout", {
+      body: JSON.stringify({ session_token: "should-not-be-sent" }),
+      headers: { origin: ORIGIN, cookie: "va_session=abc" },
+    });
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(init.body).toBeUndefined();
   });
 });

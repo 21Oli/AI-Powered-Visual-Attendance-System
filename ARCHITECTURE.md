@@ -1033,13 +1033,31 @@ the journal schema version (still 1), or the decision authority.
   `X-Forwarded-Proto` and similar headers are never consulted. An empty
   allowlist fails closed, so staging/production login and logout are
   unavailable until their exact origins are configured.
-* **Proxy.** The same-origin Next.js proxy allowlists exactly
-  `POST /api/v1/auth/login` and forwards the browser's `Origin` unchanged for
-  that route only; an absent Origin is never synthesised, and no other client
-  header (cookies, authorization, forwarded host/proto) is passed through.
-  The proxy still rebuilds responses from the body, so **the backend's
-  `Set-Cookie` is dropped** — browser session establishment is the later BFF
-  milestone, and until then login is API-level only.
+* **Proxy.** One strict allowlist (`src/lib/server/proxy.ts`) serves two
+  same-origin entry points through one transport (`src/lib/server/handler.ts`):
+  the Phase 4 dashboard proxy at `/api/backend/...` and the P5.4.8
+  authentication boundary at `/api/v1/auth/...`. Exactly three auth pairs
+  exist — `POST /auth/login`, `GET /auth/me`, `POST /auth/logout` — and every
+  Phase 4 route keeps its behaviour. The auth paths live under `/api/v1`
+  deliberately: the session cookie is issued with `Path=/api/v1`, so a
+  `/api/backend` URL would never receive it, and widening the cookie path
+  would weaken the approved policy. No wildcard, arbitrary destination,
+  dynamic method or open-proxy behaviour exists.
+* **Authentication BFF (P5.4.8).** Login and logout forward the browser's
+  `Origin` unchanged (never synthesised); `/me` and logout forward **only** the
+  `va_session` cookie, extracted from the browser header and syntax-checked, so
+  unrelated cookies and `Authorization`/`X-User-Id`-style headers never reach
+  the backend. Upstream statuses and JSON bodies are preserved (401/403/503 and
+  the credential-free 200/201 payloads), `/api/v1/auth/me` returns the
+  backend's `Cache-Control: no-store`, and responses are never cached by the
+  proxy. Login and logout alone pass the backend's `Set-Cookie` back to the
+  browser, appended per header via `getSetCookie()` (never comma-joined), so
+  `va_session`, `Path=/api/v1`, `HttpOnly`, `SameSite=Lax`, `Max-Age` and the
+  absence of `Domain` survive verbatim; a 204 stays bodyless instead of being
+  read as JSON. The token is never converted into a JSON field, so it cannot
+  reach JavaScript, React state, `localStorage`, `sessionStorage` or
+  IndexedDB. A failed or unreachable backend is never reported as a successful
+  sign-out.
 * **Logout (P5.4.6).** `POST /api/v1/auth/logout` (`src/api_logout.py`) reads
   the raw token **only** from the configured `va_session` cookie (no query or
   body token exists), calls the existing

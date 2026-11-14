@@ -308,5 +308,16 @@ sent with `Cache-Control: no-store`, and every unusable session is the same
 sanitized 401 while storage failures remain 503. The route is read-only `GET`,
 so it requires no Origin and the login/logout policy is untouched. RBAC
 enforcement, business-route protection, session refresh, throttling, audit
-logging, frontend login/logout/`me` UI and the frontend proxy allowlist remain
-unimplemented.
+logging and frontend login/logout/`me` UI remain unimplemented.
+
+P5.4.8 wires the authentication endpoints through the same-origin BFF. One
+strict allowlist and one transport now serve `/api/backend/...` and a new
+`/api/v1/auth/...` entry point (the `/api/v1` path is required by the session
+cookie's `Path=/api/v1`). The allowlist gains exactly `GET /auth/me` and
+`POST /auth/logout` alongside the existing login; login and logout forward
+`Origin` and receive the backend's `Set-Cookie` back (per header, never
+comma-joined), `/me` and logout forward only `va_session`, upstream statuses
+and bodies are preserved, and a 204 stays bodyless. The typed client gains
+`login`, `fetchCurrentUser` and `logout` with `credentials: "same-origin"` and
+no token handling in JavaScript. Login/logout UI, auth context, protected
+routes and RBAC UI remain unimplemented.

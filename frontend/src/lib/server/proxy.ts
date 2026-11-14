@@ -13,6 +13,12 @@ export const PROXY_MAX_BODY_BYTES = 4_096;
 
 export const MAX_EMPLOYEE_ID_LENGTH = 128;
 
+/** The one session cookie the browser may carry; nothing else is forwarded. */
+export const SESSION_COOKIE_NAME = "va_session";
+
+/** Sanity ceiling for a forwarded session-cookie value (the token is 43 chars). */
+export const MAX_SESSION_COOKIE_BYTES = 512;
+
 /**
  * An identifier that can be carried safely in a single path segment.
  *
@@ -51,13 +57,19 @@ interface RouteRule {
   readonly allowsEmployeeQuery: boolean;
   /** Overrides the default body rule (login is a `POST` with a body). */
   readonly acceptsBody?: boolean;
-  /** Only login forwards the browser's `Origin` (P5.4.5). */
+  /** Login/logout forward the browser's `Origin` (P5.4.5/P5.4.8). */
   readonly forwardsOrigin?: boolean;
+  /** `/me` and logout forward only the `va_session` cookie (P5.4.8). */
+  readonly forwardsSessionCookie?: boolean;
+  /** Login/logout pass the backend's `Set-Cookie` back to the browser. */
+  readonly forwardsSetCookie?: boolean;
 }
 
 /**
- * The approved allowlist: the eight backend business routes plus the P5.4.5
- * login route. Nothing else is reachable through the proxy.
+ * The approved allowlist: the eight backend business routes plus the three
+ * authentication routes (`login`, `me`, `logout`). Nothing else is reachable
+ * through the proxy — there is no wildcard, no arbitrary method and no
+ * client-supplied upstream URL anywhere in this table.
  */
 const ROUTE_RULES: readonly RouteRule[] = [
   { method: "GET", pattern: ["api", "v1", "health"], allowsEmployeeQuery: false },
@@ -67,6 +79,21 @@ const ROUTE_RULES: readonly RouteRule[] = [
     allowsEmployeeQuery: false,
     acceptsBody: true,
     forwardsOrigin: true,
+    forwardsSetCookie: true,
+  },
+  {
+    method: "GET",
+    pattern: ["api", "v1", "auth", "me"],
+    allowsEmployeeQuery: false,
+    forwardsSessionCookie: true,
+  },
+  {
+    method: "POST",
+    pattern: ["api", "v1", "auth", "logout"],
+    allowsEmployeeQuery: false,
+    forwardsOrigin: true,
+    forwardsSessionCookie: true,
+    forwardsSetCookie: true,
   },
   { method: "POST", pattern: ["api", "v1", "employees"], allowsEmployeeQuery: false },
   {
@@ -109,8 +136,12 @@ export interface MatchedRoute {
   readonly allowsEmployeeQuery: boolean;
   /** Only POST /employees, PATCH /employees/{id} and login carry a body. */
   readonly acceptsBody: boolean;
-  /** Only login forwards the browser's `Origin` header unchanged. */
+  /** Login and logout forward the browser's `Origin` header unchanged. */
   readonly forwardsOrigin: boolean;
+  /** `/me` and logout forward only the `va_session` cookie. */
+  readonly forwardsSessionCookie: boolean;
+  /** Login and logout pass the backend's `Set-Cookie` to the browser. */
+  readonly forwardsSetCookie: boolean;
 }
 
 function matchesPattern(
@@ -153,6 +184,8 @@ export function matchProxyRoute(
         ((rule.method === "POST" && rule.pattern.length === 3) ||
           (rule.method === "PATCH" && rule.pattern.length === 4)),
       forwardsOrigin: rule.forwardsOrigin === true,
+      forwardsSessionCookie: rule.forwardsSessionCookie === true,
+      forwardsSetCookie: rule.forwardsSetCookie === true,
     };
   }
   return null;
@@ -303,6 +336,65 @@ export function buildUpstreamUrl(
 ): string {
   const path = matched.segments.map((segment) => encodeURIComponent(segment)).join("/");
   return `${baseUrl}/${path}${search.length > 0 ? `?${search}` : ""}`;
+}
+
+/**
+ * Return only the `va_session` cookie from a browser `Cookie` header.
+ *
+ * Every other cookie is dropped: the backend never needs them, and forwarding
+ * an unrelated credential would widen what a compromised backend sees. The
+ * value is syntax-checked (single occurrence, no separators/controls, bounded
+ * length) so a malformed header cannot inject extra upstream headers; an
+ * absent, empty, duplicated or malformed value simply yields `null` and the
+ * backend answers with its own generic 401.
+ */
+export function extractSessionCookie(
+  cookieHeader: string | null | undefined,
+): string | null {
+  if (typeof cookieHeader !== "string" || cookieHeader.length === 0) {
+    return null;
+  }
+  const values: string[] = [];
+  for (const part of cookieHeader.split(";")) {
+    const pair = part.trim();
+    const separator = pair.indexOf("=");
+    if (separator <= 0) {
+      continue;
+    }
+    if (pair.slice(0, separator).trim() !== SESSION_COOKIE_NAME) {
+      continue;
+    }
+    const value = pair.slice(separator + 1).trim();
+    if (
+      value.length === 0 ||
+      value.length > MAX_SESSION_COOKIE_BYTES ||
+      !/^[A-Za-z0-9._~+/=-]+$/.test(value)
+    ) {
+      return null;
+    }
+    values.push(value);
+  }
+  if (values.length !== 1) {
+    return null;
+  }
+  return `${SESSION_COOKIE_NAME}=${values[0]}`;
+}
+
+/**
+ * The upstream `Set-Cookie` values, never comma-joined.
+ *
+ * `Headers.getSetCookie()` is the only API that keeps multiple cookie headers
+ * separate (a cookie's `Expires` attribute legitimately contains a comma), so
+ * it is used when available; the single-value fallback is for runtimes that
+ * lack it and cannot corrupt a value the way comma-splitting would.
+ */
+export function upstreamSetCookieHeaders(headers: Headers): string[] {
+  const withCookies = headers as Headers & { getSetCookie?: () => string[] };
+  if (typeof withCookies.getSetCookie === "function") {
+    return withCookies.getSetCookie();
+  }
+  const single = headers.get("set-cookie");
+  return single === null ? [] : [single];
 }
 
 export function proxyErrorResponse(

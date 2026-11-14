@@ -55,6 +55,33 @@ export interface HealthResponse {
   readonly status: "ok";
 }
 
+/** The approved Phase 5 roles, exactly as the backend serializes them. */
+export const USER_ROLES = [
+  "Admin",
+  "HR Manager",
+  "Operator",
+  "Auditor",
+] as const;
+
+export type UserRole = (typeof USER_ROLES)[number];
+
+/**
+ * The credential-free identity returned by `/api/v1/auth/login` and
+ * `/api/v1/auth/me`: exactly four fields, never a token, digest or hash.
+ * `role` is display data only — the backend enforces every permission.
+ */
+export interface AuthUser {
+  readonly user_id: string;
+  readonly username: string;
+  readonly role: UserRole;
+  readonly is_active: boolean;
+}
+
+/** Login returns the identity inside a `user` envelope. */
+export interface LoginResponse {
+  readonly user: AuthUser;
+}
+
 export interface FieldError {
   readonly field: string;
   readonly message: string;
@@ -186,6 +213,40 @@ export function parseHealth(raw: unknown): HealthResponse | null {
     return null;
   }
   return { status: "ok" };
+}
+
+function isUserRole(value: unknown): value is UserRole {
+  return (
+    typeof value === "string" &&
+    (USER_ROLES as readonly string[]).includes(value)
+  );
+}
+
+/** Four-field identity only: an unrecognized role or extra shape is refused. */
+export function parseAuthUser(raw: unknown): AuthUser | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  const { user_id, username, role, is_active } = raw;
+  if (
+    !isString(user_id) ||
+    user_id.length === 0 ||
+    !isString(username) ||
+    username.length === 0 ||
+    !isUserRole(role) ||
+    typeof is_active !== "boolean"
+  ) {
+    return null;
+  }
+  return { user_id, username, role, is_active };
+}
+
+export function parseLoginResponse(raw: unknown): LoginResponse | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  const user = parseAuthUser(raw.user);
+  return user === null ? null : { user };
 }
 
 export function parseErrorEnvelope(raw: unknown): ErrorEnvelope | null {

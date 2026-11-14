@@ -3,6 +3,63 @@
 What is actually completed, in progress, blocked, or not started.
 Updated after every verified step — never ahead of implementation.
 
+## Step 60 — Phase 5 P5.4.8: authentication BFF proxy integration (2026-11-14)
+
+**Proxy boundary only. No login page, logout control, auth context, protected
+routes, RBAC UI or backend change; no Git operation.**
+
+* **Baseline**: branch `main`, HEAD
+  `08702196ce1aa54c417eb56c7ea9a9603dff29e3` (P5.4.7, committed and accepted),
+  clean working tree.
+* **Entry points** — one strict allowlist/transport now serves both
+  `/api/backend/...` (Phase 4, unchanged behaviour) and a new
+  `/api/v1/auth/{login,me,logout}` boundary. The `/api/v1` path is required by
+  the session cookie's `Path=/api/v1`; a `/api/backend` URL would never receive
+  the cookie.
+* **Allowlist** — exactly `POST /api/v1/auth/login`, `GET /api/v1/auth/me` and
+  `POST /api/v1/auth/logout`; unknown paths 404, wrong methods 405, no
+  wildcard, no client-selected upstream URL.
+* **Forwarding** — explicit header allowlist: login/logout forward `Origin`
+  unchanged (never synthesised); `/me` and logout forward **only** the
+  `va_session` cookie (syntax-checked, single occurrence, unrelated cookies
+  dropped); no `Authorization`, `X-User-Id` or arbitrary headers are ever
+  forwarded, and request bodies are sent only for login.
+* **`Set-Cookie`** — login and logout pass the backend header back per value
+  via `Headers.getSetCookie()` (never comma-joined), preserving `va_session`,
+  `Path=/api/v1`, `HttpOnly`, `SameSite=Lax`, `Max-Age` and the absence of
+  `Domain`; the cookie is never converted into JSON. Business routes still get
+  no cookie.
+* **Responses** — upstream statuses/bodies preserved (200 login, 200 `/me`,
+  204 logout bodyless, 401/403/503 as-is); `no-store` on proxied responses;
+  a failed or unreachable backend is never reported as a successful sign-out.
+* **Client** — `src/lib/api/auth.ts` adds typed `login`, `fetchCurrentUser`,
+  `logout` with `credentials: "same-origin"`; `AuthUser`/`UserRole` parsers
+  reject unrecognized roles; `requestVoid` accepts a 204 without JSON parsing.
+  No token is ever read, stored or rendered by JavaScript.
+* **Tests** — `tests/auth-bff.test.ts` (8), `tests/auth-api.test.ts` (16), and
+  extended `tests/proxy.test.ts` (the old "Set-Cookie is dropped" assertion is
+  replaced by the new preservation contract).
+* **Docs** — `ARCHITECTURE.md` D26, `CHANGELOG.md`,
+  `docs/PHASE5_IMPLEMENTATION_PLAN.md` §8.
+
+**Verified**
+
+* Focused (proxy + auth BFF + auth client + existing client): **102 passed**.
+* Frontend suite: **33 files / 502 tests passed**, exit 0.
+* `npm run typecheck` exit 0; `npm run lint` exit 0; `npm run build` exit 0
+  (`/api/v1/auth/[action]` server-rendered).
+* `git diff --check` clean. Backend untouched, so the backend suite was not
+  re-run.
+
+**Not verified / deferred**
+
+* No live backend, browser, TLS, PostgreSQL or deployment validation; upstream
+  responses are mocked.
+* No login page, logout control, auth context/provider, protected-route
+  middleware, RBAC UI, user management, refresh tokens or MFA.
+* No backend change of any kind (auth, session lifetime, hashing, CSRF/Origin
+  policy, audit).
+
 ## Step 59 — Phase 5 P5.4.7: current-user (`/me`) API (2026-11-14)
 
 **One read-only endpoint. No RBAC enforcement, business-route protection,

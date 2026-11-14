@@ -4,6 +4,35 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5, P5.4.8: authentication BFF proxy integration
+
+### Added
+
+* `frontend/src/lib/server/handler.ts` — one proxy transport shared by both entry points: explicit header allowlist (`accept`, optional `content-type`, `origin` for login/logout, `va_session` only for `/me` and logout), upstream status/body preservation, `Set-Cookie` playback via `Headers.getSetCookie()` for login/logout only, and a bodyless 204 path for logout.
+* `frontend/src/app/api/v1/auth/[action]/route.ts` — same-origin authentication boundary at `/api/v1/auth/{login,me,logout}`. The `/api/v1` path is required because the session cookie is issued with `Path=/api/v1`; a `/api/backend` URL would never receive it.
+* `frontend/src/lib/server/proxy.ts` — allowlist gains exactly `GET /api/v1/auth/me` and `POST /api/v1/auth/logout` (login already existed), plus `extractSessionCookie` (single well-formed `va_session` value, everything else dropped) and `upstreamSetCookieHeaders` (multi-value safe, never comma-joined).
+* `frontend/src/lib/api/auth.ts` — typed `login`, `fetchCurrentUser` and `logout` over the existing transport, with `credentials: "same-origin"` and no token handling in JavaScript.
+* `frontend/src/lib/api/types.ts` — `AuthUser` (`user_id`, `username`, `role`, `is_active`), `UserRole`, `parseAuthUser` and `parseLoginResponse`; an unrecognized role or extra shape is rejected as malformed rather than coerced.
+* `frontend/src/lib/api/client.ts` — auth paths, a `direct` option for the `/api/v1` boundary, a shared error mapper and `requestVoid` so a 204 is never JSON-parsed.
+* `frontend/tests/auth-bff.test.ts` (8) and `frontend/tests/auth-api.test.ts` (16) — BFF routing/method/allowlist behaviour, cookie forwarding and playback, 204 handling, error preservation, and the typed client's login/me/logout contracts.
+
+### Changed
+
+* `frontend/tests/proxy.test.ts` — the previous "drops the backend Set-Cookie" assertion is replaced by the milestone's contract: login and logout preserve `va_session` with `Path=/api/v1`, `HttpOnly`, `SameSite=Lax`, `Max-Age` and no `Domain`. New suites cover `/me` forwarding only the session cookie and logout's bodyless 204, 403/503 preservation and network failure.
+* `frontend/src/app/api/backend/[...path]/route.ts` — now a thin adapter over the shared handler; its allowlist, query rules, identifier validation and error contract are unchanged.
+* Business routes still receive no `Set-Cookie`, no `Origin` and no cookies: only the two session routes opt in.
+
+### Verified
+
+* Frontend suite: **33 files, 502 tests passed**, exit 0; `npm run typecheck` exit 0; `npm run lint` exit 0; `npm run build` exit 0 (`/api/v1/auth/[action]` server-rendered).
+* `git diff --check` clean. Backend untouched, so the backend suite was not re-run.
+
+### Notes
+
+* No login page, logout control, auth context, protected-route middleware, RBAC UI or user management. Browser session cookies are now created and cleared through the proxy, but no UI exercises them yet.
+* The cookie is applied by the browser from `Set-Cookie`; the frontend never reads it, so it cannot leak into JavaScript state or storage.
+* Verified with mocked upstream responses only: no live backend, browser, PostgreSQL, TLS or deployment validation.
+
 ## [Unreleased] — Phase 5, P5.4.7: current-user (`/me`) API
 
 ### Added
