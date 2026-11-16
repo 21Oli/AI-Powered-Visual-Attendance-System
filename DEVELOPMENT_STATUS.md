@@ -11,7 +11,7 @@ Updated after every verified step — never ahead of implementation.
 | P5.2 | Identity data model and persistence | Completed (offline) |
 | P5.3 | Authentication primitives | Completed (offline) |
 | P5.4 | Authentication API: session service, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10) | Completed offline through P5.4.10 and accepted (committed through `b0583df`) |
-| P5.5 | Audit journal and security-event auditing | P5.5.1 design approved; P5.5.2 primitives **implemented, awaiting review**, including the approved `YYYY-MM-NNN` segment identity; P5.5.3–P5.5.8 not started |
+| P5.5 | Audit journal and security-event auditing | P5.5.1 design approved; P5.5.2 primitives and P5.5.3 durable writer **implemented, awaiting review**; P5.5.4–P5.5.8 not started |
 | P5.6 | User administration and secure first-Admin provisioning | Not started |
 | P5.7 | Frontend authentication and session integration | Not started |
 | P5.8 | Role-aware UI and frontend security hardening | Not started |
@@ -25,6 +25,69 @@ sequence, and the scope formerly grouped as "P5.4.10+" is split into P5.5
 (audit), P5.6 (user administration), P5.7 (frontend authentication), P5.8
 (role-aware UI/hardening) and P5.9 (final review). The Step records below are
 preserved unchanged.
+
+## Step 65 — Phase 5 P5.5.3: durable audit journal writer (2026-11-16)
+
+**Writer foundation only. No HTTP integration, no manifest/rotation, no CLI,
+no database change; no Git operation by the assistant.**
+
+* **Baseline**: branch `main`, HEAD
+  `c336f33ce4f2edea034e3bde683a09d5154d561c` (P5.5.2 accepted and committed),
+  clean working tree.
+* **Deliverable** — `src/audit_writer.py`: `AuditJournalWriter`, a reusable
+  component independent of routes and services. Construction initializes a new
+  journal only when the audit directory holds no manifest or archived segments,
+  otherwise verifies the complete active journal (UTF-8/JSON/schema per line,
+  `verify_chain`, duplicate audit ids, non-decreasing timestamps) and becomes
+  `READY`; any defect raises a typed error and returns no writer. `append()`
+  owns sequence, segment, segment-local position and previous hash, builds the
+  event through `AuditEvent.create`, serializes with `canonical_json_bytes`,
+  appends one line, flushes, `os.fsync`s, re-checks the file size and only then
+  advances in-memory state.
+* **Safety model** — a module-level `threading.Lock` plus a non-blocking OS
+  advisory lock (`msvcrt.locking`/`fcntl.flock`) around every append; lock
+  contention raises `AuditJournalContendedError` without a write. A short
+  write, write/flush/`fsync` failure, size/inode change or failed size
+  confirmation poisons the instance permanently; poisoned writers raise
+  `AuditJournalPoisonedError` before touching the file. No retry, truncation,
+  rollback, repair or history rewrite exists.
+* **Typed errors** — `AuditJournalError` with `Unavailable`, `Corrupt`
+  (line), `Integrity` (position/sequence), `Poisoned` and `Contended`
+  subclasses; messages carry no path, OS error text, record contents or
+  identifiers.
+* **Tests** — `tests/test_audit_writer.py`, 66 cases: initialization
+  (missing/existing/empty, artifact refusal, permission and path failures),
+  startup verification (single/multi/cross-segment, bad JSON, schema, digests,
+  links, sequences, segment ids, torn tail, duplicate ids, timestamp
+  regression), append (first/subsequent, canonical line, one newline per
+  record, progression, reload), failure/poisoning (open/write/short-write/
+  flush/fsync injection, no retry, no rollback, permanent poison,
+  re-verification) and concurrency (8 threads x 5 appends, two writers, no
+  duplicate sequence).
+* **Review corrections (round 1)** — every unexpected write/flush/`fsync`
+  exception (not only `OSError`) poisons the instance, pre-write failures stay
+  sanitized and non-poisoning, and the journal path must still name the opened
+  file before writing and after `fsync` (device/inode with a size-only fallback
+  where unavailable); nine regression tests added.
+* **Docs** — design §17 (including §17.11 corrections), plan §2/§7/§9/§9.7, this
+  status file and `CHANGELOG.md`; `.gitignore` now excludes `data/audit/**`.
+
+**Verified**
+
+* `tests/test_audit_writer.py`: 66 passed, 0 failed, 0 skipped.
+* `tests/test_audit_schema.py`: 172 passed.
+* Full backend suite: 3329 passed, 32 skipped, exit 0 (276.18 s); the 3263/32 baseline plus the 66 new writer tests.
+* No Python linter or type checker is configured in this repository.
+
+**Not verified / deferred**
+
+* Real power-loss durability, true multi-process coordination, a genuinely full
+  disk and directory `fsync` are not claimed; manifest/archive verification and
+  rotation are P5.5.7, restricted-mode wiring and route integration are P5.5.5.
+* The writer refuses to start when a manifest or archived segments exist, because
+  P5.5.3 cannot verify them — an explicit fail-closed interim limitation.
+* Changes are unstaged and uncommitted; P5.5.3 is not accepted and P5.5.4 was
+  not started.
 
 ## Step 64 — Phase 5 P5.5.2: audit event schema and hash-chain primitives (2026-11-16)
 

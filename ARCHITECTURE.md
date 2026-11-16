@@ -1225,5 +1225,37 @@ the journal schema version (still 1), or the decision authority.
   record hashing with constant-time comparison, and `verify_chain` (genesis,
   predecessor links, global and segment-local sequences, unique
   `YYYY-MM-NNN` segment ids). Order is proven by links and sequences, never by
-  comparing segment labels. It performs no I/O. No writer, journal file, manifest, verifier CLI, rotation,
-  route integration or restricted-mode wiring exists yet (P5.5.3 onward).
+  comparing segment labels. It performs no I/O.
+
+### D28 — Audit writer: verify before append, fsync is the durability boundary, ambiguity poisons (Phase 5 — P5.5.3 implemented, awaiting review)
+
+* **Role.** `src/audit_writer.py` owns the single active journal
+  (`data/audit/audit.jsonl`). It is infrastructure only: no HTTP route, service,
+  manifest or database coupling; P5.5.4/P5.5.5 will call `append()`.
+* **Initialization and verification.** A missing journal is created only when
+  the audit directory has no manifest and no archived segments. An existing
+  journal is fully verified before any write: UTF-8/JSON/schema per line,
+  `verify_chain` (genesis, links, global and segment-local sequences, unique
+  `YYYY-MM-NNN` ids, digests), duplicate `audit_id` rejection and non-decreasing
+  timestamps. Any defect raises a typed error and no writer exists. A manifest
+  or archive present makes startup refuse (P5.5.3 cannot verify them); nothing
+  is repaired, truncated or rewritten.
+* **Append.** Under one module-level process lock plus a non-blocking OS
+  advisory lock on the journal, the writer builds and validates the event,
+  appends one canonical JSON line, flushes, `os.fsync`s, confirms the new file
+  size, and only then advances its sequence/hash/segment/timestamp state.
+  Contention raises `AuditJournalContendedError` without a write.
+* **Failure and poisoning.** A short write, any write/flush/`fsync` exception
+  (including unexpected non-OS exceptions), a failed post-`fsync` confirmation,
+  or a file-size/inode/path-identity change is an ambiguous outcome: the writer
+  is poisoned permanently, refuses all later appends, and never retries,
+  truncates or compensates. Failures before writing begins are sanitized and do
+  not poison. Recovery is a new writer with full verification. Typed messages
+  carry no path, OS error text or record contents.
+* **Identity.** Before writing and after `fsync` the journal path must still
+  name the opened handle's file (device/inode and size); otherwise the append is
+  refused and poisoned. Where `st_ino` is unavailable the check degrades to
+  size equality, and no stronger identity guarantee is claimed.
+* **Not implemented.** Manifest, archives, rotation, retention tooling,
+  verifier CLI, route integration, restricted-mode wiring and the
+  action/reason matrix (P5.5.4–P5.5.7).

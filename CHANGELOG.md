@@ -4,6 +4,32 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5, P5.5.3: durable audit journal writer
+
+### Added
+
+* `src/audit_writer.py` — `AuditJournalWriter`, a route- and service-independent durable writer for `data/audit/audit.jsonl`: initialization only when no manifest/archive history exists, full startup verification (UTF-8/JSON/schema, `verify_chain`, duplicate audit ids, non-decreasing timestamps), append via canonical JSON + one newline + flush + `os.fsync`, state advanced only after durability, a module-level process lock plus a non-blocking OS advisory lock, and permanent poisoning on any ambiguous write/flush/fsync/short-write/size-or-inode change. Typed sanitized errors (`Unavailable`, `Corrupt`, `Integrity`, `Poisoned`, `Contended`); no repair, truncation, retry or rollback.
+* `tests/test_audit_writer.py` — 66 focused tests covering initialization, startup verification, append/canonical output, durability-state ordering, injected failures and poisoning (OS and unexpected non-OS exceptions), journal replacement, lock contention/release, and thread/two-writer concurrency.
+
+### Changed
+
+* `.gitignore` — excludes the runtime audit journal (`data/audit/**`), consistent with the attendance journal.
+* `docs/AUDIT_JOURNAL_DESIGN.md` — status and new §17 record the implemented writer, its API, initialization/verification, append and durability boundary, locking model, poisoning/recovery, failure table, segment/timestamp rules, tests and limitations; §7 and §13 point at the implementation.
+* `docs/PHASE5_IMPLEMENTATION_PLAN.md`, `DEVELOPMENT_STATUS.md` (Step 65), `ARCHITECTURE.md` D28 — P5.5.3 recorded as implemented and awaiting review.
+* **Review corrections (round 1)** — every unexpected write/flush/`fsync` exception now poisons the writer (not only `OSError`), pre-write failures stay sanitized and non-poisoning, and the journal path must still name the opened file before writing and after `fsync` (device/inode, size fallback); nine regression tests added.
+
+### Notes
+
+* No manifest, archive, rotation, retention tooling, verifier CLI, HTTP route, restricted-mode wiring, database change or migration was added. The writer is not yet called by any route.
+* P5.5.3 is **not accepted**: no Git operation was performed and the changes are unstaged.
+
+### Verified
+
+* `tests/test_audit_writer.py`: 66 passed, 0 failed, 0 skipped.
+* `tests/test_audit_schema.py`: 172 passed.
+* Full backend suite: 3329 passed, 32 skipped, exit 0 (276.18 s) — baseline 3263 + 66 new tests.
+* `git diff --check`: clean. No linter or type checker is configured.
+
 ## [Unreleased] — Phase 5, P5.5.2 correction: `YYYY-MM-NNN` segment identity
 
 ### Changed

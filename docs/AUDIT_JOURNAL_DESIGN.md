@@ -2,10 +2,11 @@
 
 **Status: P5.5.1 design approved by the project owner. P5.5.2 (audit event
 schema, canonical serialization, SHA-256 record hashing and hash-chain
-verification primitives) is implemented in `src/audit_schema.py` with focused
-unit tests, and awaits independent review. The owner-approved `YYYY-MM-NNN`
-segment-identity correction is applied (§16). Nothing else exists: there is no
-writer, journal file, manifest, API integration, verifier CLI or rotation.**
+verification primitives) is implemented in `src/audit_schema.py` and awaits
+independent review; the owner-approved `YYYY-MM-NNN` segment-identity correction
+is applied (§16). P5.5.3 (the durable, verified, poisoning writer) is
+implemented in `src/audit_writer.py` and also awaits review (§17). There is
+still no manifest, archive, rotation, API integration or verifier CLI.**
 This document supersedes the first P5.5.1 design summary (which lived only in
 the review report), resolves the independent engineering review findings and
 records the owner's decisions (§14) plus the P5.5.2 implementation notes (§15).
@@ -285,8 +286,9 @@ operator procedure documented in P5.5.7 (inspect, move aside, re-verify).
 * An optional strict mode (`AUDIT_REQUIRE_INTEGRITY`, staging/production) may
   refuse to start at all instead of running restricted; that is an owner
   decision (§13) and is not implemented in P5.5.2–P5.5.6.
-* P5.5.1 makes no claim that startup verification exists today; it is a P5.5.3
-  requirement.
+* P5.5.3 implements startup verification in `src/audit_writer.py` (typed
+  construction failure, no writer returned). The restricted-mode **wiring** —
+  the 503 responses and the critical startup log — remains P5.5.5.
 
 ---
 
@@ -507,7 +509,7 @@ PostgreSQL and no biometric data are required.
 |---|---|---|---|---|---|
 | **P5.5.1** | This design: schema, vocabulary, hash/chain rules, writer trust/poisoning, mutation protocol, startup policy, retention/rotation, CLI contract, test matrix | P5.4.10 accepted | Any code | Owner review of consistency | Owner approves; no open contradiction |
 | **P5.5.2** | Schema module: field types/nullability, vocabularies, metadata allowlist, size bounds, canonical serialization, SHA-256, genesis, record validation errors, `YYYY-MM-NNN` segment identity | P5.5.1 | Writer, filesystem, HTTP | 172 unit tests (schema, canonicalization, digests, tamper at record level) | All matrix rows for schema/hash pass; no I/O |
-| **P5.5.3** | Durable writer: initialization, full verification before first write, process + OS lock, append/flush/fsync, poisoning, typed errors, restricted-mode signal; **no rotation** | P5.5.2 | Rotation, manifest writes, HTTP wiring | Concurrency, poisoning, verification-before-write, crash/torn tests | Writer never appends to an unverified journal; ambiguous failures poison; rotation absent |
+| **P5.5.3** | Durable writer: initialization, full verification before first write, process + OS lock, append/flush/fsync, poisoning, typed errors, restricted-mode signal; **no rotation** — **implemented, awaiting review**: `src/audit_writer.py` | P5.5.2 | Rotation, manifest writes, HTTP wiring | Concurrency, poisoning, verification-before-write, crash/torn tests (57 tests) | Writer never appends to an unverified journal; ambiguous failures poison; rotation absent |
 | **P5.5.4** | `AuditService`: actor/request-ID binding, action/reason API, intent/result helpers, best-effort wrapper, safe logging | P5.5.3 | Route behavior changes | Unit tests for actor/request propagation, intent/result pairing, logging redaction | Service can emit every event type; no secret in any output |
 | **P5.5.5** | Route integration: mandatory intent→mutate→result for the four mutations, best-effort login/logout/403, `AUDIT_UNAVAILABLE`/`AUDIT_RESULT_UNCERTAIN` handlers, startup restricted mode | P5.5.4 | User admin, frontend, new endpoints | Endpoint tests for applied/not-applied/unknown, fail-closed, best-effort | No unaudited success possible; existing auth/authz behavior unchanged |
 | **P5.5.6** | Read-only verifier CLI with coverage modes and exit codes | P5.5.3 | Rotation, deletion | CLI tests: tamper matrix, coverage reporting, bytes unchanged | Exit 0/2/3/4 correct; never writes |
@@ -886,3 +888,204 @@ Tests added:
 8. `test_segment_local_sequence_restarts_at_one_at_a_new_segment`.
 
 Manifest/rotation-side tests remain P5.5.7, not this layer.
+
+## 17. P5.5.3 writer implementation notes
+
+**Status: implemented in `src/audit_writer.py`, covered by
+`tests/test_audit_writer.py` (66 tests), awaiting independent review.** No
+manifest, archive, rotation, verifier CLI, HTTP integration or restricted-mode
+wiring exists; P5.5.4 was not started.
+
+### 17.1 Public API and responsibilities
+
+* `AuditJournalWriter(journal_path=None, *, clock=utc_now)` — construction
+  performs initialization/verification and returns a `READY` writer, or raises
+  a typed error and returns nothing. The default path is
+  `PROJECT_ROOT/data/audit/audit.jsonl`; tests inject a temporary path.
+* `append(*, action, outcome, reason_code, source, actor_user_id=None,
+  actor_role=None, target_type=None, target_id=None, correlation_id=None,
+  request_id=None, metadata=None, timestamp=None, audit_id=None) ->
+  AuditEvent` — the writer owns `sequence`, `segment_id`, `segment_sequence`
+  and `previous_hash`; the caller supplies the event's meaning. `timestamp`
+  defaults to the injected clock and `audit_id` to a fresh UUIDv4.
+* Read-only properties: `state`, `is_ready`, `journal_path`,
+  `last_sequence`, `last_record_hash`, `active_segment_id`.
+* `WriterState`: `NOT_INITIALIZED`, `READY`, `POISONED`, `UNAVAILABLE`. A
+  construction failure is reported by the raised typed error
+  (`UNAVAILABLE`/`CORRUPT`/`INTEGRITY`/`CONTENDED`) and never yields a writer;
+  an instance that becomes ambiguous is `POISONED` and terminal.
+* Typed errors (all `AuditJournalError`): `AuditJournalUnavailableError`,
+  `AuditJournalCorruptError` (`line`), `AuditJournalIntegrityError`
+  (`position`, `sequence`), `AuditJournalPoisonedError`,
+  `AuditJournalContendedError`. Messages are fixed and sanitized: no path, no
+  OS error text, no record contents, identifiers or digests.
+
+### 17.2 Initialization (as implemented)
+
+* A **missing** journal is created (empty) only when the audit directory holds
+  no `manifest.jsonl` and no non-empty `archive/`. Historical evidence without
+  an active journal raises `AuditJournalIntegrityError`; a new genesis chain is
+  never started over existing history.
+* A **present** journal is always verified (§17.3). If a manifest or archived
+  segments are present, the writer refuses (`AuditJournalIntegrityError`)
+  because P5.5.3 cannot verify them — fail closed rather than claim a
+  verification it did not perform. This is an explicit interim limitation;
+  P5.5.7 adds manifest/archive verification.
+* `data/audit/` itself is created when absent. A directory path that is a file,
+  a journal path that is a directory, or a permission/creation failure raise
+  `AuditJournalUnavailableError`.
+* The journal file is created at construction; the design's manifest creation
+  is P5.5.7 and is not performed here.
+* No truncation, replacement or repair ever occurs.
+
+### 17.3 Startup verification
+
+Under the OS journal lock the writer reads the active journal, then:
+
+1. rejects a non-empty file without a final newline as a torn tail
+   (`AuditJournalCorruptError`, line = fragment line);
+2. decodes UTF-8 and rejects malformed JSON, empty lines and schema-invalid
+   records (`AuditJournalCorruptError` with the 1-based line);
+3. verifies the complete chain with `verify_chain`: genesis, predecessor links,
+   global and segment-local sequences, unique `YYYY-MM-NNN` segment ids and
+   every record digest (`AuditJournalIntegrityError` with position/sequence);
+4. rejects duplicate `audit_id` values and non-monotonic timestamps
+   (historical invariant, `AuditJournalIntegrityError`);
+5. establishes the next global sequence, previous hash, active segment id,
+   next segment-local position, last timestamp, the known `audit_id` set, and
+   the expected file size/inode for stale-writer detection.
+
+An empty existing journal is a valid empty chain (schema §15.3): the next
+append is the genesis record in a segment allocated as
+`<current UTC month>-001`. A zero-length file that was truncated loses its
+history indistinguishably from a fresh journal; that is the documented
+tamper-evidence limit, not a repair path.
+
+### 17.4 Append and durability
+
+Steps, all under the process lock: require `READY`; resolve and validate the
+timestamp (fixed UTC form, non-decreasing within the active segment); resolve
+the event/segment/sequence/previous hash and reject a duplicate `audit_id`;
+build and validate the `AuditEvent`; serialize with
+`canonical_json_bytes(event.as_body()) + b"\n"`; open the journal for append;
+take the OS lock; confirm the file size and inode still match verification;
+`write` → `flush` → `os.fsync`; re-check the size; only then advance in-memory
+sequence/hash/segment/timestamp/id state and release the lock.
+
+A successful return is the durability boundary. A short write, a write/flush/
+`fsync` exception, or a size change during the append poisons the instance and
+raises `AuditJournalUnavailableError` or `AuditJournalContendedError`; there is
+no retry, truncation, rollback or compensating write.
+
+### 17.5 Locking model
+
+* One module-level `threading.Lock` serializes append steps for every instance
+  in the process (matching the design's single process-local lock).
+* A non-blocking OS advisory lock is taken on byte 0 of the journal for the
+  duration of each append, and briefly while reading during startup verification
+  (`msvcrt.locking` on Windows, `fcntl.flock` on POSIX). Contention raises
+  `AuditJournalContendedError` and never blocks or retries.
+* This is **not** multi-process support: a second process is detected rather
+  than coordinated. A second writer instance that appends after another has
+  changed the file is poisoned by the size/inode check, so two writers can
+  never both append the same sequence. Recovery is a restart with full
+  verification.
+* Locks are released in `finally` on success and on every failure path; if the
+  handle closes or the process exits, the OS releases the lock.
+
+### 17.6 Poisoning and recovery
+
+Poisoning triggers: short write, write/flush/`fsync` exception, a failed size
+confirmation after `fsync`, a file-size change since verification, or a journal
+replacement (inode change). A poisoned writer refuses every later append with
+`AuditJournalPoisonedError` before touching the file and is never cleared
+automatically.
+
+Recovery: stop the writing process, inspect with the read-only verifier
+(P5.5.6), resolve the tail by operator procedure (P5.5.7 runbook), then start a
+fresh writer, which performs full verification again. If the ambiguous append
+actually became durable, the fresh writer sees the record; if it is torn, the
+fresh writer refuses. Neither case is silently "fixed".
+
+### 17.7 Failure semantics
+
+| Failure | Error | Writer state | Journal |
+|---|---|---|---|
+| Cannot open for append (no write attempted) | `Unavailable` | `READY` | unchanged |
+| Lock contention | `Contended` | `READY` | unchanged |
+| File size/inode changed since verification | `Contended` | `POISONED` | untouched |
+| Write/flush/`fsync` exception after writing may have begun | `Unavailable` | `POISONED` | may contain a partial/full line; never repaired |
+| Short write | `Unavailable` | `POISONED` | partial line; never repaired |
+| Invalid input (schema, timestamp order, duplicate id) | `AuditSchemaError`/`AuditTimestampError` | `READY` | unchanged |
+| Append on a poisoned writer | `Poisoned` | `POISONED` | unchanged |
+| Startup defect | `Corrupt`/`Integrity`/`Unavailable`/`Contended` | no writer | unchanged |
+
+### 17.8 Identity, segment and timestamp rules
+
+* The writer never rotates: it continues the verified segment
+  (`segment_sequence + 1`) even after a calendar-month change; only a fresh or
+  empty journal allocates `<allocation month>-001`.
+* No timestamp-to-segment month comparison is performed.
+* Timestamps must be non-decreasing within the active segment (equal allowed);
+  a backwards timestamp is rejected before any write.
+* A caller-supplied `audit_id` must not already exist in the verified journal;
+  duplicates are rejected before any write. The set is held in memory for the
+  life of the writer (single segment; no rotation in P5.5.3).
+
+### 17.9 Verification
+
+`tests/test_audit_writer.py`: 66 passing tests covering initialization
+(empty/missing/existing, artifact refusal, permission and path failures, empty
+file), startup verification (valid single/multi/cross-segment chains, bad JSON,
+schema, digests, links, sequences, segment ids, torn tail, duplicate ids,
+timestamp regression), append (first/subsequent, canonical line, one newline
+per record, sequence/link/segment progression, reload), failure and poisoning
+(injected open/write/short-write/flush/fsync failures, no retry, no rollback,
+permanent poisoning, re-verification), locking (contention, release after
+success and failure) and concurrency (8 threads x 5 appends, two writers, no
+duplicate sequences). Tests use temporary directories and never the real
+`data/audit` path.
+
+Not tested here: crash-at-power-loss durability, real multi-process
+coordination, filesystem-full behaviour on a real full disk, and directory
+`fsync` (not claimed). Manifest/archive verification is P5.5.7.
+
+### 17.10 Deferred
+
+Manifest creation and verification, segment sealing, archives, operator
+rotation, retention deletion, the read-only verifier CLI, intent/result and
+best-effort event integration, the action/reason/outcome matrix, HTTP error
+mapping, restricted-mode wiring and every frontend/user-administration item.
+
+### 17.11 Review corrections (round 1)
+
+Three corrections were applied to the P5.5.3 implementation; the public API and
+all previously approved behaviour are unchanged.
+
+1. **Every ambiguous persistence exception poisons.** A short write, any
+   `OSError` from write/flush/`fsync`, and now **any unexpected non-OS
+   exception** from those steps (plus a failed post-`fsync` confirmation)
+   permanently poison the writer. Messages stay fixed and sanitized, so
+   injected or OS text never reaches the caller. Pre-write failures (open,
+   lock, pre-write stat) remain sanitized and do **not** poison, because no
+   byte could have changed; the writer stays usable.
+2. **Path identity is verified.** Before writing and again after `fsync` the
+   writer re-stats the journal path and requires it to name the opened handle's
+   file (device/inode and size where the platform exposes them). A replacement,
+   disappearance or concurrent growth is refused and poisons the instance; the
+   in-memory sequence/hash/segment/timestamp state is not advanced. On
+   platforms where `st_ino` is 0 the check falls back to size equality and no
+   stronger identity is claimed; this is not a cryptographic or
+   filesystem-level guarantee, and the Windows sharing mode may itself block
+   replacement while the append handle is open.
+3. **Tests** grew to 66 (nine new): partial write then `RuntimeError`, flush
+   `RuntimeError`, `fsync` `RuntimeError`, post-`fsync` confirmation
+   `RuntimeError`, replacement before append, path replacement after `fsync`,
+   pre-write stat failure (`OSError` and `RuntimeError`, no poisoning), no state
+   advancement after an ambiguous failure, no later writes from a poisoned
+   instance, and lock release on the new paths.
+
+Cross-process locking remains **not** claimed: the OS lock is advisory and
+non-blocking, a second process is detected through size/identity/path checks
+rather than coordinated, and the tests exercise two in-process writers and
+threads, not a separate OS process.

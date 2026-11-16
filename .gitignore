@@ -38,6 +38,9 @@ data/exports/**
 # --- Runtime attendance journal (employee IDs + timestamps; not tracked) ---
 data/attendance/**
 
+# --- Runtime audit journal (security events + hash chain; not tracked) ---
+data/audit/**
+
 # --- Runtime logs ---
 data/logs/**
 *.log

@@ -2,10 +2,10 @@
 
 **Status: in progress — P5.4 completed offline through sub-milestone P5.4.10 and
 accepted (committed in `b0583df`; no live PostgreSQL run). The P5.5.1 audit
-journal design is approved, and P5.5.2 (audit event schema, canonical JSON,
-SHA-256 hashing and chain-verification primitives) is implemented and awaiting
-review. P5.5.3 and later — writer, integration, CLI, rotation — are not started.
-Phase 5 is not complete.**
+journal design is approved; P5.5.2 (schema, canonical JSON, SHA-256 hashing and
+chain verification) and P5.5.3 (durable, verified, poisoning journal writer) are
+implemented and awaiting review. P5.5.4 and later — service integration, CLI,
+rotation — are not started. Phase 5 is not complete.**
 
 Phase 5 adds operator accounts, sessions and role-based access to the
 attendance system. It is delivered as small, separately reviewable steps. This
@@ -39,7 +39,7 @@ relational table), and does not introduce biometric storage of any kind.
 | P5.2 | Identity data model and persistence: `V002__security.sql`, user/session models and repositories, offline tests | Completed (offline) |
 | P5.3 | Authentication primitives: Argon2id hashing, opaque session tokens, session lifecycle | Completed (offline) |
 | P5.4 | Authentication API: session service integration, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10, §8) | Completed offline through P5.4.10 and accepted (committed in `b0583df`) |
-| P5.5 | Audit journal and security-event auditing (§9, `docs/AUDIT_JOURNAL_DESIGN.md`) | P5.5.1 design approved; P5.5.2 primitives implemented (including the approved `YYYY-MM-NNN` segment identity), **awaiting review**; P5.5.3+ not started |
+| P5.5 | Audit journal and security-event auditing (§9, `docs/AUDIT_JOURNAL_DESIGN.md`) | P5.5.1 design approved; P5.5.2 primitives and P5.5.3 durable writer **implemented, awaiting review**; P5.5.4+ not started |
 | P5.6 | User administration and secure first-Admin provisioning (§10) | Not started |
 | P5.7 | Frontend authentication and session integration (§10) | Not started |
 | P5.8 | Role-aware UI and frontend security hardening (§10) | Not started |
@@ -250,12 +250,12 @@ work factor was not benchmarked on target hardware.
 
 P5.4.10 (backend RBAC foundation and business-route protection) is accepted and
 committed in `b0583df`. The owner has approved the **P5.5.1** audit-journal
-design (`docs/AUDIT_JOURNAL_DESIGN.md`), and **P5.5.2** is implemented and
-awaiting review: `src/audit_schema.py` plus `tests/test_audit_schema.py` provide
-the event schema, closed vocabularies, metadata allowlist, canonical JSON,
-SHA-256 record hashing and chain-verification primitives, with no I/O. The next
-implementation milestone is **P5.5.3** — the durable writer. No journal file,
-manifest, writer, verifier CLI, rotation or route integration exists.
+design (`docs/AUDIT_JOURNAL_DESIGN.md`). **P5.5.2** (`src/audit_schema.py`) and
+**P5.5.3** (`src/audit_writer.py`) are implemented and awaiting review: the
+schema/hash/chain primitives plus the durable, fully verified, fsync-backed,
+poisoning writer. The next implementation milestone is **P5.5.4** — the audit
+service and route-facing event API. No manifest, archive, rotation, verifier
+CLI or HTTP integration exists.
 
 ## 8. P5.4 authentication API — sub-milestone status
 
@@ -410,15 +410,17 @@ outside business RBAC. `audit:read` and `users:manage` are policy definitions
 only: no audit journal, audit hash chain, user-management API, first-Admin
 provisioning, frontend authentication or route guards exist yet.
 
-## 9. P5.5 — Audit journal and security-event auditing (P5.5.2 implemented)
+## 9. P5.5 — Audit journal and security-event auditing (P5.5.3 implemented)
 
-P5.5.1 (design) is approved and P5.5.2 (schema and hash-chain primitives) is
-implemented in `src/audit_schema.py` with 172 focused unit tests (including the
-approved `YYYY-MM-NNN` segment identity); P5.5.3 and later are not started. There is still **no** journal file, writer, manifest,
-verifier, rotation or HTTP integration. This section summarises the approved
-design; the authoritative record is **`docs/AUDIT_JOURNAL_DESIGN.md`** (P5.5.1
-design plus §15 P5.5.2 implementation notes), which governs whenever the summary
-and the design record differ.
+P5.5.1 (design) is approved; P5.5.2 (schema and hash-chain primitives,
+`src/audit_schema.py`, 172 tests) and P5.5.3 (durable verified writer,
+`src/audit_writer.py`, 66 tests) are implemented and awaiting review. P5.5.4 and
+later are not started: there is still **no** manifest, archive, rotation,
+verifier CLI or HTTP integration, and no restricted-mode wiring. This section
+summarises the approved design; the authoritative record is
+**`docs/AUDIT_JOURNAL_DESIGN.md`** (P5.5.1 design plus §15 P5.5.2 and §17 P5.5.3
+implementation notes), which governs whenever the summary and the design record
+differ.
 
 ### 9.1 Objective
 
@@ -602,7 +604,7 @@ The authoritative per-milestone scope, exclusions and exit criteria are in
 | --- | --- | --- | --- | --- |
 | P5.5.1 | Design and decision record (§9; `docs/AUDIT_JOURNAL_DESIGN.md`) | P5.4.10 accepted | Code | Owner review; no open contradiction |
 | P5.5.2 | Audit event schema and hash-chain primitives (canonical JSON, SHA-256, vocabularies, allowlists, genesis) — **implemented, awaiting review**: `src/audit_schema.py`; `YYYY-MM-NNN` segment identity applied (design §16) | P5.5.1 | I/O, writer, HTTP | Unit matrix green (172 tests); no filesystem access — done |
-| P5.5.3 | Durable append-only writer: full verification before first write, process + OS lock, fsync, poisoning, typed errors; **no rotation** | P5.5.2 | Rotation, manifest writes, routes | Never appends to unverified journal; ambiguous failures poison |
+| P5.5.3 | Durable append-only writer: full verification before first write, process + OS lock, fsync, poisoning, typed errors; **no rotation** — **implemented, awaiting review**: `src/audit_writer.py` | P5.5.2 | Rotation, manifest writes, routes | Never appends to unverified journal; ambiguous failures poison — done (66 tests) |
 | P5.5.4 | Audit service, actor/request context, intent/result helpers, best-effort wrapper, safe logging | P5.5.3 | Route changes | Actor/request-ID propagation; no secret in output |
 | P5.5.5 | Mandatory mutation and best-effort event integration, `AUDIT_UNAVAILABLE`/`AUDIT_RESULT_UNCERTAIN`, restricted mode | P5.5.4 | User admin, frontend, new endpoints | No unaudited success; auth/authz behaviour unchanged |
 | P5.5.6 | Read-only verification CLI with coverage modes and exit codes 0/2/3/4 | P5.5.3 | Repair, rotation | Tamper matrix green; journal bytes unchanged |
