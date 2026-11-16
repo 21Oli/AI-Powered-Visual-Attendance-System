@@ -11,7 +11,7 @@ Updated after every verified step — never ahead of implementation.
 | P5.2 | Identity data model and persistence | Completed (offline) |
 | P5.3 | Authentication primitives | Completed (offline) |
 | P5.4 | Authentication API: session service, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10) | Completed offline through P5.4.10 and accepted (committed through `b0583df`) |
-| P5.5 | Audit journal and security-event auditing | P5.5.1 design approved; P5.5.2 primitives and P5.5.3 durable writer **implemented, awaiting review**; P5.5.4–P5.5.8 not started |
+| P5.5 | Audit journal and security-event auditing | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer and P5.5.4 service **implemented, awaiting review**; P5.5.5–P5.5.8 not started |
 | P5.6 | User administration and secure first-Admin provisioning | Not started |
 | P5.7 | Frontend authentication and session integration | Not started |
 | P5.8 | Role-aware UI and frontend security hardening | Not started |
@@ -25,6 +25,69 @@ sequence, and the scope formerly grouped as "P5.4.10+" is split into P5.5
 (audit), P5.6 (user administration), P5.7 (frontend authentication), P5.8
 (role-aware UI/hardening) and P5.9 (final review). The Step records below are
 preserved unchanged.
+
+## Step 66 — Phase 5 P5.5.4: audit service layer (2026-11-16)
+
+**Service layer only. No HTTP route, request parsing, database access, business
+mutation, manifest/rotation, verifier CLI, restricted-mode wiring or frontend
+change; no Git operation by the assistant.**
+
+* **Baseline**: branch `main`, HEAD
+  `f88551d6b300e19aae9dfd79b3d10c9f4fac974f` (P5.5.3 accepted and committed),
+  clean working tree.
+* **Deliverable** — `src/audit_service.py`: `AuditService`, the single
+  policy-checked entry point between application decisions and
+  `AuditJournalWriter`. It binds `AuditActor` (only `user_id` + `role`, projected
+  from the validated principal) and a server-generated UUIDv4 request ID through
+  `AuditContext`; enforces the approved §16.7 action/outcome/reason matrix,
+  actor/target pairings and metadata allowlist **before** any append; exposes
+  `begin_mutation`, `record_result`, `record_applied`, `record_not_applied`,
+  `record_unknown`, `record_login`, `record_logout`, `record_denied` and the
+  `record_best_effort` wrapper. All writes go through
+  `AuditJournalWriter.append`.
+* **Intent/result** — the intent is durable `uncertain`/`AWAITING_RESULT` before
+  a mutation may run; a `MutationIntent` is single-use, issued only by its
+  service instance, and every result carries `correlation_id = intent.audit_id`
+  plus the intent's action/actor/target/source/request ID. Applied, not-applied
+  and unknown stay distinct.
+* **Failure semantics** — intent/standalone failure → `AuditUnavailableError`
+  (`AUDIT_UNAVAILABLE`, fixed approved message); result failure after an applied
+  or unknown mutation → `AuditResultUncertainError`
+  (`AUDIT_RESULT_UNCERTAIN`); no retry and no compensating write; a result
+  failure after a confirmed-not-applied mutation is logged and returns `None` so
+  the original business error stands. Writer error classes are kept only as a
+  `writer_error` attribute for log classification; messages stay sanitized.
+* **Privacy** — no parameter or metadata key can carry a username, password,
+  hash, token, cookie, DSN, request body or biometric value; login failures are
+  `account` + `null` target; `authz.denied` builds its own endpoint/method/
+  `http_status=403` metadata.
+* **Tests** — `tests/test_audit_service.py`, 39 offline cases in temporary
+  directories: context/actor projection, intent construction, exhaustive
+  mutation/login/logout matrices (320 + 80 + 80 combinations), applied/
+  not-applied/unknown results, correlation and single-use intents, metadata
+  allowlist/types/bounds, login-failure username omission, denied metadata,
+  writer-unavailable/poisoned/ambiguous-write mapping, sanitized errors and
+  logs, and a final `verify_chain`.
+* **Docs** — design §18 (plus §13 row and header), plan §2/§7/§9/§9.7, this
+  status file, `ARCHITECTURE.md` D29 and `CHANGELOG.md`.
+
+**Verified**
+
+* `tests/test_audit_service.py`: 39 passed, 0 failed, 0 skipped.
+* Audit schema + writer + service regression: 277 passed.
+* Full backend suite: 3368 passed, 32 skipped, exit 0 (357.29 s).
+* No Python linter or type checker is configured in this repository.
+
+**Not verified / deferred**
+
+* No HTTP status/code mapping, request-object request-ID generation, route
+  integration, restricted mode or startup wiring (P5.5.5); no manifest, archive,
+  rotation or verifier CLI (P5.5.6–P5.5.7).
+* The issued-intent registry is process-local in-memory; `endpoint` templates
+  are trusted from the caller; no PostgreSQL, browser, camera or production
+  validation is claimed.
+* Changes are unstaged and uncommitted; P5.5.4 is not accepted and P5.5.5 was not
+  started.
 
 ## Step 65 — Phase 5 P5.5.3: durable audit journal writer (2026-11-16)
 

@@ -4,6 +4,31 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5, P5.5.4: audit service layer
+
+### Added
+
+* `src/audit_service.py` — `AuditService`, the single policy-checked entry point between application decisions and `AuditJournalWriter`: `AuditActor` (only `user_id` + `role`, projected from the validated principal) and server-generated UUIDv4 request IDs bound through `AuditContext`; the approved §16.7 action/outcome/reason matrix, actor/target rules and metadata allowlist enforced before any append; `begin_mutation` → `MutationIntent`, `record_result`/`record_applied`/`record_not_applied`/`record_unknown`, `record_login`/`record_logout`/`record_denied`, and the `record_best_effort` wrapper with sanitized warning logs. Intent/result correlation, the three distinct outcomes, `AuditUnavailableError` (`AUDIT_UNAVAILABLE`) and `AuditResultUncertainError` (`AUDIT_RESULT_UNCERTAIN`) preserve the approved fail-closed semantics; no record path, OS text, username, token or biometric value can be recorded or logged.
+* `tests/test_audit_service.py` — 39 offline tests: context/actor projection and request-ID validation, exhaustive mutation (320), login (80) and logout (80) combination matrices, applied/not-applied/unknown results, correlation and single-use intents, metadata allowlist/types/bounds, login-failure username omission, denied metadata, writer-unavailable/poisoned/ambiguous-write mapping, sanitized errors/logs and a full `verify_chain`.
+
+### Changed
+
+* `docs/AUDIT_JOURNAL_DESIGN.md` — status header, §13 P5.5.4 row and new §18 record the service, its policy, intent/result and uncertainty semantics, logging and limitations.
+* `docs/PHASE5_IMPLEMENTATION_PLAN.md`, `DEVELOPMENT_STATUS.md` (Step 66), `ARCHITECTURE.md` D29 — P5.5.4 recorded as implemented and awaiting review.
+
+### Notes
+
+* No HTTP route, request parsing, database access, business mutation, manifest, archive, rotation, verifier CLI, restricted mode or frontend change was added; the service is not wired into any route.
+* P5.5.4 is **not accepted**: no Git operation was performed and the changes are unstaged.
+* Known limitations: the issued-intent registry is process-local in-memory, `endpoint` templates are trusted from the caller, and writer failures are surfaced only through typed service errors and sanitized logs until P5.5.5 maps them to HTTP.
+
+### Verified
+
+* `tests/test_audit_service.py`: 39 passed, 0 failed, 0 skipped.
+* Audit schema + writer + service regression: 277 passed.
+* Full backend suite: 3368 passed, 32 skipped, exit 0 (357.29 s).
+* `git diff --check`: clean. No linter or type checker is configured.
+
 ## [Unreleased] — Phase 5, P5.5.3: durable audit journal writer
 
 ### Added

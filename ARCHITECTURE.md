@@ -1257,5 +1257,40 @@ the journal schema version (still 1), or the decision authority.
   refused and poisoned. Where `st_ino` is unavailable the check degrades to
   size equality, and no stronger identity guarantee is claimed.
 * **Not implemented.** Manifest, archives, rotation, retention tooling,
-  verifier CLI, route integration, restricted-mode wiring and the
-  action/reason matrix (P5.5.4–P5.5.7).
+  verifier CLI, route integration and restricted-mode wiring (P5.5.5–P5.5.7).
+
+### D29 — Audit service: policy-checked single entry point, intent/result protocol (Phase 5 — P5.5.4 implemented, awaiting review)
+
+* **Role.** `src/audit_service.py` is the only component that turns an
+  application decision into a record. It is constructed with an initialized
+  `AuditJournalWriter` (never a path) and every write goes through
+  `writer.append`, so schema validation, chaining, durability, locking and
+  poisoning cannot be bypassed.
+* **Context.** `AuditActor(user_id, role)` is projected from a validated
+  principal (`AuditActor.from_principal` reads exactly those two attributes;
+  the username is never read). `AuditContext` binds the actor and a
+  server-generated UUIDv4 request ID; `record_best_effort` logs a sanitized
+  warning (action, request ID, writer error class) and never alters the
+  caller's response for `auth.login`, `auth.logout` and `authz.denied`.
+* **Policy.** The approved §16.7 action/outcome/reason matrix, actor/target
+  pairings and metadata allowlist are enforced before appending;
+  `AuditPolicyError` means the event was never written and is never coerced
+  into a valid one. Login failures use `account` + `null` target, retaining no
+  username.
+* **Intent/result.** `begin_mutation` durably writes `uncertain` /
+  `AWAITING_RESULT` and returns a single-use, service-issued `MutationIntent`.
+  Results correlate to its `audit_id` and carry its action/actor/target/source/
+  request ID; applied is `success`/`OK`, not-applied is `error` + reason, unknown
+  is `uncertain` + `DATABASE_OUTCOME_UNKNOWN` (or checkout's
+  `PERSISTENCE_UNCONFIRMED`).
+* **Failure semantics.** A failed intent (or standalone write) raises
+  `AuditUnavailableError` (`AUDIT_UNAVAILABLE`): the operation must not run. A
+  failed result after an applied or unknown mutation raises
+  `AuditResultUncertainError` (`AUDIT_RESULT_UNCERTAIN`): it may have applied, is
+  not retried and has no compensating write. A failed result after a confirmed-
+  not-applied mutation is logged and returns `None`, leaving the original
+  business error response intact. Messages are fixed and sanitized; the stable
+  codes are exposed for P5.5.5's HTTP mapping.
+* **Not implemented.** HTTP routes, request-ID generation from a request
+  object, status/code mapping, restricted-mode wiring, manifest/rotation,
+  verifier CLI (P5.5.5–P5.5.7).

@@ -5,8 +5,9 @@ schema, canonical serialization, SHA-256 record hashing and hash-chain
 verification primitives) is implemented in `src/audit_schema.py` and awaits
 independent review; the owner-approved `YYYY-MM-NNN` segment-identity correction
 is applied (§16). P5.5.3 (the durable, verified, poisoning writer) is
-implemented in `src/audit_writer.py` and also awaits review (§17). There is
-still no manifest, archive, rotation, API integration or verifier CLI.**
+implemented in `src/audit_writer.py` (§17) and P5.5.4 (the audit service layer)
+in `src/audit_service.py` (§18); both await review. There is still no manifest,
+archive, rotation, API/route integration or verifier CLI.**
 This document supersedes the first P5.5.1 design summary (which lived only in
 the review report), resolves the independent engineering review findings and
 records the owner's decisions (§14) plus the P5.5.2 implementation notes (§15).
@@ -510,7 +511,7 @@ PostgreSQL and no biometric data are required.
 | **P5.5.1** | This design: schema, vocabulary, hash/chain rules, writer trust/poisoning, mutation protocol, startup policy, retention/rotation, CLI contract, test matrix | P5.4.10 accepted | Any code | Owner review of consistency | Owner approves; no open contradiction |
 | **P5.5.2** | Schema module: field types/nullability, vocabularies, metadata allowlist, size bounds, canonical serialization, SHA-256, genesis, record validation errors, `YYYY-MM-NNN` segment identity | P5.5.1 | Writer, filesystem, HTTP | 172 unit tests (schema, canonicalization, digests, tamper at record level) | All matrix rows for schema/hash pass; no I/O |
 | **P5.5.3** | Durable writer: initialization, full verification before first write, process + OS lock, append/flush/fsync, poisoning, typed errors, restricted-mode signal; **no rotation** — **implemented, awaiting review**: `src/audit_writer.py` | P5.5.2 | Rotation, manifest writes, HTTP wiring | Concurrency, poisoning, verification-before-write, crash/torn tests (57 tests) | Writer never appends to an unverified journal; ambiguous failures poison; rotation absent |
-| **P5.5.4** | `AuditService`: actor/request-ID binding, action/reason API, intent/result helpers, best-effort wrapper, safe logging | P5.5.3 | Route behavior changes | Unit tests for actor/request propagation, intent/result pairing, logging redaction | Service can emit every event type; no secret in any output |
+| **P5.5.4** | `AuditService`: actor/request-ID binding, action/reason API, intent/result helpers, best-effort wrapper, safe logging — **implemented, awaiting review**: `src/audit_service.py` | P5.5.3 | Route behavior changes | Unit tests for actor/request propagation, intent/result pairing, logging redaction (39 tests) | Service can emit every event type; no secret in any output |
 | **P5.5.5** | Route integration: mandatory intent→mutate→result for the four mutations, best-effort login/logout/403, `AUDIT_UNAVAILABLE`/`AUDIT_RESULT_UNCERTAIN` handlers, startup restricted mode | P5.5.4 | User admin, frontend, new endpoints | Endpoint tests for applied/not-applied/unknown, fail-closed, best-effort | No unaudited success possible; existing auth/authz behavior unchanged |
 | **P5.5.6** | Read-only verifier CLI with coverage modes and exit codes | P5.5.3 | Rotation, deletion | CLI tests: tamper matrix, coverage reporting, bytes unchanged | Exit 0/2/3/4 correct; never writes |
 | **P5.5.7** | Rotation, manifest, archives, retention documentation, operator runbook; monthly cadence | P5.5.6 | Automatic deletion/schedule | Four crash-stage tests, manifest continuity, immutability, retention entries | Rotation preserves chain; crash states detected; no silent mutation of history |
@@ -1089,3 +1090,129 @@ Cross-process locking remains **not** claimed: the OS lock is advisory and
 non-blocking, a second process is detected through size/identity/path checks
 rather than coordinated, and the tests exercise two in-process writers and
 threads, not a separate OS process.
+
+---
+
+## 18. P5.5.4 audit service implementation notes
+
+**Status: implemented in `src/audit_service.py`, covered by
+`tests/test_audit_service.py` (39 tests), awaiting independent review.** No HTTP
+route, request parsing, database access, business mutation, manifest/rotation,
+verifier CLI, restricted-mode wiring or frontend change exists; P5.5.5 was not
+started.
+
+### 18.1 Role, boundary and public interface
+
+The service is the only component that turns an application decision into a
+record. Every write goes through `AuditJournalWriter.append`, so schema
+validation, chain state, `fsync`, locking and poisoning cannot be bypassed, and
+the service never touches the JSONL file.
+
+* `AuditService(writer, *, clock=utc_now, audit_id_factory=...)` — the writer is
+  injected (never a path); the clock and UUIDv4 factory are seams for tests.
+* `AuditActor(user_id, role)` — the two fields the schema accepts.
+  `AuditActor.from_principal(principal)` projects only `user_id` and `role`; the
+  username and every credential-bearing object are never read.
+* `AuditContext(actor, request_id)` — built with `AuditService.context(...)`,
+  which validates the request ID as a UUIDv4. Request IDs are server-generated;
+  the service accepts no client-supplied value.
+* `begin_mutation(action, target_id, context, metadata=None, source=api)` →
+  `MutationIntent` (immutable: event, action, target, actor, source; `audit_id`
+  property for correlation).
+* `record_result(intent, outcome, reason_code, metadata=None)`;
+  `record_applied(intent)`; `record_not_applied(intent, reason_code)`;
+  `record_unknown(intent, reason_code=DATABASE_OUTCOME_UNKNOWN)`.
+* `record_login(...)`, `record_logout(...)`, `record_denied(endpoint, method,
+  context, ...)` for the three standalone events.
+* `record_best_effort(emit, *, action, request_id=None)` — the wrapper for
+  login/logout/denial emission.
+* Typed errors: `AuditServiceError` → `AuditPolicyError` (invalid combination,
+  before any write), `AuditUnavailableError` (`AUDIT_UNAVAILABLE`),
+  `AuditResultUncertainError` (`AUDIT_RESULT_UNCERTAIN`).
+
+### 18.2 Action / outcome / reason policy
+
+§16.7 is implemented exactly, as four independent tables plus cross-cutting
+rules, and validated **before** the append: mutation results per action, login
+results, logout results, and the single `authz.denied` pair. An intent is only
+`uncertain`/`AWAITING_RESULT` with no correlation. `denied` exists only for
+`auth.login` and `authz.denied`; `JOURNAL_CORRUPT` is never emitted;
+`PERSISTENCE_UNCONFIRMED` is checkout-only and always `uncertain`;
+`DATABASE_OUTCOME_UNKNOWN` is always `uncertain`; `PERMISSION_DENIED` only for
+`authz.denied`. Unknown actions, outcomes or reason codes, and the wrong Python
+types, are refused rather than coerced.
+
+### 18.3 Actor and target rules
+
+* Mutation records always carry an actor and `employee` + target id.
+* `auth.login` success requires the authenticated actor and records `account` +
+  the actor's user id. Every login failure is pre-session: the actor must be
+  absent and the target is `account` with `target_id=null` (decision 1), so no
+  username is retained.
+* `auth.logout` success requires the actor and records `account` + user id;
+  `SESSION_INVALID` is pre-session (null actor, null target); database/unknown
+  failures accept either an authenticated or a pre-session context.
+* `authz.denied` requires an actor, keeps the target null and builds its own
+  metadata (`endpoint` route template, `method`, `http_status=403`).
+
+### 18.4 Metadata
+
+Callers may supply only keys from the approved allowlist, with `str`/`int`/
+`bool` values; unknown keys (including `password`, `session_token`, `cookie`,
+`username`, `face_embedding`, `request_body`) are refused with
+`AuditPolicyError` before writing. Count, per-key and serialized-size bounds are
+re-enforced by `audit_schema`. `authz.denied` metadata is not caller-supplied,
+and endpoints containing `?` or `#`, non-uppercase methods and non-`/`-prefixed
+templates are refused. The service cannot verify that a route passed a template
+rather than a concrete path; that remains a P5.5.5 route obligation.
+
+### 18.5 Intent / result and uncertainty semantics
+
+* `begin_mutation` writes the intent durably before returning. If it raises
+  `AuditUnavailableError`, the caller must not execute the mutation.
+* `MutationIntent` is single-use and accepted only by the service instance that
+  issued it, so a result cannot be written without its intent, and a second
+  result for the same intent is refused. A result always carries
+  `correlation_id = intent.audit_id`, the intent's action, actor, target, source
+  and request ID.
+* Applied → `success`/`OK`; not applied → `error` + the matching reason; unknown
+  → `uncertain`/`DATABASE_OUTCOME_UNKNOWN` (or `PERSISTENCE_UNCONFIRMED` for
+  checkout). The three states are never conflated, and an unknown result is
+  never reported as success or failure.
+* Result-write failure after an applied or unknown mutation raises
+  `AuditResultUncertainError` (`AUDIT_RESULT_UNCERTAIN`): the mutation may have
+  applied, no result exists, nothing is retried and no compensating write is
+  made. A result-write failure after a **confirmed-not-applied** mutation is
+  logged (sanitized warning) and returns `None`, so the caller's original
+  business error stands (design §10 step 6).
+
+### 18.6 Error semantics and logging
+
+`AuditUnavailableError` and `AuditResultUncertainError` carry the exact approved
+fixed messages and the stable codes `AUDIT_UNAVAILABLE` /
+`AUDIT_RESULT_UNCERTAIN`; HTTP status mapping is P5.5.5. Messages never contain
+a path, OS text, record contents, identifiers or writer exception text — the
+writer error class is kept only as a `writer_error` attribute for log
+classification. `record_best_effort` swallows writer failures after one
+`WARNING` line containing the action, request ID and writer error class, never
+event contents or metadata values, and never changes the caller's response.
+
+### 18.7 Verification and limitations
+
+`tests/test_audit_service.py`: 39 offline tests in temporary directories —
+actor/request-ID projection and validation; intent construction and rejection
+of standalone actions, missing actors and invalid targets; every
+`(outcome, reason)` pair for all four mutation actions plus login and logout
+(320 + 80 + 80 combinations) against the approved tables; applied,
+not-applied and unknown results; correlation and one-result-per-intent; metadata
+allowlist, types and bounds; login-failure username omission; denied metadata;
+login/logout target rules; writer-unavailable, poisoned and ambiguous-write
+mapping; sanitized messages and logs; and a final `verify_chain` over the
+journal.
+
+Limitations: the issued-intent registry is process-local in-memory (a restart
+loses it, matching the single-writer model); result-write failures reserve the
+intent's result slot so an ambiguous append can never be retried; the service
+does not map HTTP responses, generate request IDs from a request object, or
+integrate with routes (P5.5.5); metadata `endpoint` templates are trusted from
+the caller; no PostgreSQL, browser, camera or production validation is claimed.
