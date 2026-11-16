@@ -4,6 +4,69 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5, P5.5.2 correction: `YYYY-MM-NNN` segment identity
+
+### Changed
+
+* `src/audit_schema.py` — `segment_id` is now `YYYY-MM-NNN` (allocation month plus a `001`–`999` ordinal; `000` and four-digit ordinals rejected, month-only ids rejected). `verify_chain` no longer compares segment labels lexically; it still rejects a repeated segment id and still requires predecessor-hash linkage, global sequence continuity, segment-local restart at 1 and `segment_sequence == 1` at each boundary. Order comes from the hash chain and sequences; manifest seal order arrives in P5.5.7.
+* `tests/test_audit_schema.py` — fixtures moved to the new format; the known-answer digest was recomputed; the ascending-lexical test was replaced. New coverage: same-month multi-segment chains and their boundary links, repeated ids with otherwise valid hashes/sequences, ordinal `000`/`1000`/`999`, month-only ids, non-lexical label order, and a timestamp month differing from the allocation month. 172 tests total.
+* `docs/AUDIT_JOURNAL_DESIGN.md` — §2/§4/§15 record the approved format and the removal of label ordering; §16 is now the applied correction record with the test list; §9.3/§9.4 state how a fresh ordinal is allocated on rotation and recovery.
+* `docs/PHASE5_IMPLEMENTATION_PLAN.md`, `DEVELOPMENT_STATUS.md` (Step 64 follow-up), `ARCHITECTURE.md` D27 — describe the applied correction.
+
+### Notes
+
+* No writer, journal file, manifest, rotation, CLI, route integration or database change was added. The schema still performs no I/O.
+* P5.5.2 remains **awaiting review** (not accepted); P5.5.3 has not started.
+
+### Verified
+
+* `tests/test_audit_schema.py`: 172 passed, 0 failed, 0 skipped.
+* Relevant existing JSONL/serialization suites: 175 passed.
+* Full backend suite (`python -m pytest -q`, project venv): 3263 passed, 32 skipped, exit 0 — +13 from this correction, no regressions.
+* `git diff --check`: clean. No linter or type checker is configured.
+
+## [Unreleased] — Phase 5, P5.5.2 clarification: segment identity (documentation only)
+
+### Changed
+
+* `docs/AUDIT_JOURNAL_DESIGN.md` — new §16 records the review finding that `segment_id = YYYY-MM` (plus the no-repeat and lexicographic-order chain rules) cannot represent two rotations in one calendar month and would fail closed under P5.5.3; it recommends a unique `YYYY-MM-NNN` allocation identifier, states that segment order must come from global/segment sequences, predecessor links and the manifest rather than label comparison, forbids any timestamp-to-segment month equality rule, and specifies the full P5.5.4 action/outcome/reason enforcement matrix and the tests to add. §2/§4 and the status header point at the pending decision.
+* `docs/PHASE5_IMPLEMENTATION_PLAN.md` (status, §2, §9.2, §9.7), `DEVELOPMENT_STATUS.md` (Step 64 follow-up) — record the open decision without marking P5.5.2 accepted.
+
+### Notes
+
+* Documentation only: no change to `src/audit_schema.py`, `tests/test_audit_schema.py`, the writer, manifest, rotation or any route.
+* At the time of that review the correction was pending owner approval; it has since been approved and applied (entry above). P5.5.3 had not started.
+
+`src/audit_schema.py`, `tests/test_audit_schema.py` and design §16 were subsequently updated in the `YYYY-MM-NNN` correction entry at the top of this file.
+
+### Verified
+
+* `tests/test_audit_schema.py`: 159 passed, 0 failed, 0 skipped (code unchanged).
+* `git diff --check`: clean.
+
+## [Unreleased] — Phase 5, P5.5.2: audit event schema and hash-chain primitives
+
+### Added
+
+* `src/audit_schema.py` — pure P5.5.2 primitives: closed action/outcome/reason-code/source/target-type vocabularies; a frozen, fully validated `AuditEvent` with the approved nullable-pair and identifier rules (including login failures using `target_type="account"` and `target_id=null`); the metadata allowlist with scalar-only, 16-key and 1 KiB bounds; the 8 KiB record bound; a single canonical JSON serializer; SHA-256 record hashing over the canonical body excluding `record_hash` with constant-time comparison; and `verify_chain` for genesis, predecessor links, global and segment-local sequences and segment ordering. No I/O.
+* `tests/test_audit_schema.py` — 159 focused tests: vocabularies, schema/nullability/metadata rules, timestamp normalization, canonicalization, a fixed known-answer digest, tamper detection and every chain-rule failure mode.
+
+### Changed
+
+* `docs/AUDIT_JOURNAL_DESIGN.md` — status now records the approved P5.5.1 design and the P5.5.2 implementation; §14 replaces the open questions with the seven owner decisions (no usernames on login failures, restricted-mode startup, `authz.denied` route-template metadata, ≥365-day archive-only retention, missing declared segments block writes, approved audit error codes, and an explicit unknown-outcome message); new §15 documents the implementation notes.
+* `docs/PHASE5_IMPLEMENTATION_PLAN.md`, `DEVELOPMENT_STATUS.md` (Step 64), `ARCHITECTURE.md` D27 — P5.5.2 recorded as implemented and awaiting review; P5.5.3 and later remain not started.
+
+### Notes
+
+* No filesystem write, writer, journal file, manifest, rotation, verifier CLI, route integration or restricted-mode wiring was added. No database schema, migration, dependency or configuration changed.
+* P5.5.2 is **not accepted**: no Git operation was performed and the changes are unstaged.
+
+### Verified
+
+* `tests/test_audit_schema.py`: 159 passed, 0 failed, 0 skipped.
+* Relevant existing JSONL/serialization suites (`test_attendance_store`, `test_attendance_persistence`, `test_schema_contract`, `test_attendance_report_cli`): 175 passed.
+* Full backend suite (`python -m pytest -q`, project venv): 3250 passed, 32 skipped, exit 0 — +159 from the new tests, no regressions. No linter or type checker is configured in this repository.
+
 ## [Unreleased] — Phase 5, P5.5.1: audit journal design (documentation only)
 
 ### Added

@@ -1160,7 +1160,7 @@ the journal schema version (still 1), or the decision authority.
   IDs are ignored, and no password, hash, dummy hash, token, digest or cookie
   is logged.
 
-### D27 — Audit journal: separate chained JSONL, fail-closed mutations, archive-only retention (Phase 5, P5.5.1 — design, not implemented)
+### D27 — Audit journal: separate chained JSONL, fail-closed mutations, archive-only retention (Phase 5 — design approved; P5.5.2 primitives implemented)
 
 * **Store.** A separate append-only JSON Lines journal at
   `data/audit/audit.jsonl` (never the attendance journal, never PostgreSQL, no
@@ -1219,5 +1219,11 @@ the journal schema version (still 1), or the decision authority.
   retention dispositions, and the read-only `tools/audit_verify.py` reports
   full-chain, segment/manifest or anchor-only coverage with exit codes 0/2/3/4.
   Manifest anchors never claim that removed records were verified.
-* **Not implemented.** P5.5.1 is design only: no audit module, journal,
-  manifest, verifier or test exists in the tree.
+* **Implemented so far (P5.5.2).** `src/audit_schema.py` provides the pure
+  schema/hash/chain primitives: the closed vocabularies, the validated immutable
+  event record, the metadata allowlist and bounds, canonical JSON, SHA-256
+  record hashing with constant-time comparison, and `verify_chain` (genesis,
+  predecessor links, global and segment-local sequences, unique
+  `YYYY-MM-NNN` segment ids). Order is proven by links and sequences, never by
+  comparing segment labels. It performs no I/O. No writer, journal file, manifest, verifier CLI, rotation,
+  route integration or restricted-mode wiring exists yet (P5.5.3 onward).

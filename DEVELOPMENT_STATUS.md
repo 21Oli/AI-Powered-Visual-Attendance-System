@@ -11,7 +11,7 @@ Updated after every verified step — never ahead of implementation.
 | P5.2 | Identity data model and persistence | Completed (offline) |
 | P5.3 | Authentication primitives | Completed (offline) |
 | P5.4 | Authentication API: session service, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10) | Completed offline through P5.4.10 and accepted (committed through `b0583df`) |
-| P5.5 | Audit journal and security-event auditing | P5.5.1 design complete, **awaiting owner review**; implementation not started — next implementation milestone |
+| P5.5 | Audit journal and security-event auditing | P5.5.1 design approved; P5.5.2 primitives **implemented, awaiting review**, including the approved `YYYY-MM-NNN` segment identity; P5.5.3–P5.5.8 not started |
 | P5.6 | User administration and secure first-Admin provisioning | Not started |
 | P5.7 | Frontend authentication and session integration | Not started |
 | P5.8 | Role-aware UI and frontend security hardening | Not started |
@@ -25,6 +25,91 @@ sequence, and the scope formerly grouped as "P5.4.10+" is split into P5.5
 (audit), P5.6 (user administration), P5.7 (frontend authentication), P5.8
 (role-aware UI/hardening) and P5.9 (final review). The Step records below are
 preserved unchanged.
+
+## Step 64 — Phase 5 P5.5.2: audit event schema and hash-chain primitives (2026-11-16)
+
+**Pure, in-memory primitives only. No filesystem write, no writer, no API
+integration, no CLI, no manifest/rotation, no database change; no Git
+operation by the assistant.**
+
+* **Baseline**: branch `main`, HEAD
+  `8beb568c6ae7963605e80ca8fa863599e3e927a7` (approved P5.5.1 design committed),
+  clean working tree.
+* **Deliverable** — `src/audit_schema.py`: closed `AuditAction` (7),
+  `AuditOutcome` (4), `AuditReasonCode` (20), `AuditSource` (3) and
+  `AuditTargetType` (5) vocabularies; a frozen, fully validated `AuditEvent`
+  (19 fields, actor/target nullable pairs, login-failure `target_type="account"`
+  with `target_id=null`, UUIDv4 identifiers, fixed UTC microsecond timestamps);
+  the metadata allowlist with scalar-only and 16-key/1 KiB bounds; the 8 KiB
+  record bound; one canonical JSON serializer (`ensure_ascii=False`,
+  `sort_keys=True`, compact separators, `allow_nan=False`); SHA-256 record
+  hashing over the canonical body excluding `record_hash`; constant-time digest
+  comparison; and `verify_chain` covering genesis, predecessor links, global
+  and segment-local sequence continuity, segment ordering/non-reopening and
+  per-record digests.
+* **Design clarifications** (recorded in `docs/AUDIT_JOURNAL_DESIGN.md` §15):
+  metadata floats are refused entirely (no NaN/Infinity path); per-key metadata
+  rules for `endpoint`/`method`/`http_status`/roles; `segment_id` is validated
+  for format only and not coupled to the record timestamp; the constructor
+  checks `record_hash` format while digest equality is a verification property,
+  so a tampered record remains representable and reportable; `compute_record_hash`
+  accepts a body without `record_hash`.
+* **Owner decisions recorded** in the design record §14: no usernames on login
+  failures, restricted-mode startup, `authz.denied` route-template metadata,
+  ≥365-day archive-only retention, missing declared segments always block
+  writes, approved `AUDIT_UNAVAILABLE`/`AUDIT_RESULT_UNCERTAIN`, and
+  `DATABASE_OUTCOME_UNKNOWN` with a response that states the unknown outcome.
+* **Tests** — `tests/test_audit_schema.py`, 159 focused cases: vocabularies,
+  field/nullability rules, metadata bounds, canonicalization, timestamp
+  normalization, a fixed known-answer digest, tamper detection, genesis and
+  cross-segment chain rules.
+
+**Verified**
+
+* `tests/test_audit_schema.py`: 159 passed, 0 failed, 0 skipped.
+* Full backend suite (`python -m pytest -q`, project venv): 3250 passed,
+  32 skipped, exit 0 (294 s) — +159 from the new tests, no regressions.
+* Relevant existing JSONL/serialization tests
+  (`test_attendance_store`, `test_attendance_persistence`,
+  `test_schema_contract`, `test_attendance_report_cli`): 175 passed.
+* No Python linter or type checker is configured in this repository, so none
+  was run.
+
+**Not verified / deferred**
+
+* No file is written by P5.5.2, so durability, `fsync`, locking, poisoning,
+  concurrency and crash behavior are neither implemented nor tested (P5.5.3).
+* No manifest/archive/rotation (P5.5.7), no verifier CLI (P5.5.6), no route or
+  HTTP error-code integration (P5.5.5), and no restricted-mode wiring.
+* No PostgreSQL, camera, browser or deployment validation was performed.
+* Changes are unstaged and uncommitted for independent review; P5.5.2 is not
+  accepted and P5.5.3 is not started.
+
+### Step 64 follow-up — P5.5.2 segment-identity clarification (2026-11-16)
+
+**Documentation-only review. No schema, test, writer, manifest, rotation or API
+change; no Git operation.**
+
+* **Finding** — `segment_id = YYYY-MM` plus the "segment ids must not repeat"
+  and lexicographic-order rules in `verify_chain` make a second rotation in the
+  same month unrepresentable and unverifiable. Under P5.5.3 that turns a
+  legitimate operator rotation into a startup-verification failure and a
+  fail-closed mutation outage, and it blocks two rotation crash-recovery stages.
+* **Recommendation** — unique `YYYY-MM-NNN` allocation identifier (month of
+  allocation plus a `001`–`999` ordinal), global uniqueness, order established
+  by predecessor links, global/segment-local sequences and (from P5.5.7) the
+  manifest — never by comparing labels. Event timestamps must **not** be
+  required to match the segment's month. Rationale, alternatives and failure
+  cases are in `docs/AUDIT_JOURNAL_DESIGN.md` §16.
+* **P5.5.4 matrix** — the exact allowed action/outcome/reason combinations and
+  the forbidden ones are specified in design §16.7 (including `denied` only for
+  `auth.login`/`authz.denied`, no `JOURNAL_CORRUPT` emission, and target-type
+  rules), so P5.5.4 cannot construct an impossible event.
+* **Status** — the owner approved `YYYY-MM-NNN`; the correction is **applied**
+  in `src/audit_schema.py` and its tests (172 tests now, all passing). The
+  verifier no longer compares segment labels lexically; the repeated-id rule,
+  sequence continuity and hash linkage are unchanged. No P5.5.3 work was
+  started.
 
 ## Step 63 — Phase 5 P5.5.1: audit journal design and decision record (2026-11-14)
 

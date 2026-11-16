@@ -1,9 +1,14 @@
 # P5.5 — Audit Journal: Design and Decision Record (P5.5.1)
 
-**Status: design revision complete; awaits owner review. No P5.5 code exists and
-P5.5.2 has not started.** This document supersedes the first P5.5.1 design
-summary (which lived only in the review report) and resolves the independent
-engineering review findings.
+**Status: P5.5.1 design approved by the project owner. P5.5.2 (audit event
+schema, canonical serialization, SHA-256 record hashing and hash-chain
+verification primitives) is implemented in `src/audit_schema.py` with focused
+unit tests, and awaits independent review. The owner-approved `YYYY-MM-NNN`
+segment-identity correction is applied (§16). Nothing else exists: there is no
+writer, journal file, manifest, API integration, verifier CLI or rotation.**
+This document supersedes the first P5.5.1 design summary (which lived only in
+the review report), resolves the independent engineering review findings and
+records the owner's decisions (§14) plus the P5.5.2 implementation notes (§15).
 
 Scope: a separate, append-only, hash-chained audit journal for security events.
 Not an audit database table, not an external logging service, not biometric
@@ -44,7 +49,7 @@ are invalid.
 |---|---|---|---|
 | `schema_version` | int | no | `1` for P5.5 |
 | `sequence` | int | no | **Global** 1-based sequence, never reset (see §4) |
-| `segment_id` | string | no | Segment identifier, `YYYY-MM` (UTC) |
+| `segment_id` | string | no | `YYYY-MM-NNN` — UTC **allocation** month plus a `001`–`999` ordinal (§4, §16); unique across all segments; never an ordering claim |
 | `segment_sequence` | int | no | 1-based position **within** the segment |
 | `audit_id` | string (UUIDv4) | no | Stable record identity |
 | `timestamp` | string | no | UTC, `YYYY-MM-DDTHH:MM:SS.ffffffZ` |
@@ -168,8 +173,20 @@ template so an attacker cannot inject a path into the audit trail.
   `previous.sequence + 1`, across all segments, forever.
 * `segment_sequence` is segment-local: the first record of each segment is `1`
   and each later record in that segment increments by one.
-* `segment_id` is the UTC calendar month (`YYYY-MM`) and is unique across
-  sealed segments; a segment cannot be reopened once sealed.
+* `segment_id` is `YYYY-MM-NNN`: the UTC month in which the segment was
+  **allocated**, plus a `001`–`999` allocation ordinal (e.g. `2026-11-001`,
+  `2026-11-002`, `2026-12-001`). Ordinal `000` and four-digit ordinals are
+  invalid. The identifier is unique across all segments (current and archived);
+  a segment cannot be reopened once sealed. Any number of segments may be
+  allocated in one calendar month — "monthly" is a rotation cadence target, not
+  a uniqueness guarantee (§16).
+* Segment order is established by global sequence continuity, segment-local
+  restart at 1, and the predecessor `record_hash` link — **never** by comparing
+  segment labels. The verifier performs no lexical ordering check; manifest
+  seal order is added in P5.5.7.
+* A record's `timestamp` is independent of its segment's allocation month: the
+  schema validates the fixed UTC form only and never requires month equality
+  (§16.5).
 * Verifier continuity rules:
   1. within a segment: `segment_sequence` rises by exactly 1, and global
      `sequence` rises by exactly 1;
@@ -343,9 +360,10 @@ record count — never a claim that contents were verified after removal.
 3. Append the `segment_sealed` manifest entry with the segment's first/last
    global sequence, record count, `first_previous_hash`, `last_record_hash` and
    fsync; mark the archive file read-only where the OS allows.
-4. Create the new empty active journal; its first record links to the sealed
-   segment's `last_record_hash` and continues the global sequence. No
-   `audit.rotate` event is written to the event journal.
+4. Create the new empty active journal under a fresh `YYYY-MM-NNN` id (the next
+   ordinal for its allocation month, `001` when the month has none); its first
+   record links to the sealed segment's `last_record_hash` and continues the
+   global sequence. No `audit.rotate` event is written to the event journal.
 
 ### 9.4 Rotation crash recovery
 
@@ -353,8 +371,8 @@ record count — never a claim that contents were verified after removal.
 |---|---|---|
 | During step 1 | Nothing changed | Re-run rotation; no journal change |
 | After rename, before manifest entry | Archive present, manifest lacks the segment | Verifier exits 4; the tool offers an explicit `--register-existing` that re-verifies the archive's full chain before appending the manifest entry. Never silent; never a second seal |
-| After manifest entry, before new active file | Manifest declares the segment, active file absent | Writer/verifier treat as "segment sealed, active missing": a new active file may be created linked to the manifest's `last_record_hash` (defined, non-destructive recovery) |
-| After new active file, before first record | Empty active file | Normal: first append uses the manifest's last hash as `previous_hash` |
+| After manifest entry, before new active file | Manifest declares the segment, active file absent | Writer/verifier treat as "segment sealed, active missing": a new active file may be created with a fresh `YYYY-MM-NNN` id, linked to the manifest's `last_record_hash` (defined, non-destructive recovery) |
+| After new active file, before first record | Empty active file | Normal: the id is derived deterministically from the sealed predecessor (same allocation month, ordinal + 1) so restarts agree; first append uses the manifest's last hash as `previous_hash` |
 | Crash mid-manifest append | Torn manifest tail | Verifier exits 4; writer refuses; operator resolves with the verifier — no automatic repair |
 
 A crash may never produce silent loss, duplicate acceptance of one segment, or a
@@ -420,7 +438,7 @@ success, and a pending intent is reported as unknown.
 |---|---|---|---|
 | Writer not ready/poisoned, or intent write failed | 503 | `AUDIT_UNAVAILABLE` | "The operation was not attempted because it could not be audited." |
 | Result write failed after the mutation may have applied | 503 | `AUDIT_RESULT_UNCERTAIN` | "The operation may have been applied, but its audit result could not be recorded. Do not retry blindly." |
-| Mutation outcome unknown, result record written (`outcome=uncertain`) | 503 | `DATABASE_UNAVAILABLE` (existing mapping) | existing sanitized message; a 503 here does **not** prove the mutation failed |
+| Mutation outcome unknown, result record written (`outcome=uncertain`, `reason_code=DATABASE_OUTCOME_UNKNOWN`) | 503 | `DATABASE_UNAVAILABLE` (existing status/code mapping) | "The operation's outcome could not be confirmed; it may or may not have been applied." — the message must state the uncertainty and must never imply definite failure |
 | Best-effort event write failed (login/logout/denied) | unchanged | unchanged | unchanged |
 
 Both audit 503s are sanitized: no exception text, path, stack trace, SQL, token
@@ -488,7 +506,7 @@ PostgreSQL and no biometric data are required.
 | # | Scope | Prerequisites | Exclusions | Verification | Exit criteria |
 |---|---|---|---|---|---|
 | **P5.5.1** | This design: schema, vocabulary, hash/chain rules, writer trust/poisoning, mutation protocol, startup policy, retention/rotation, CLI contract, test matrix | P5.4.10 accepted | Any code | Owner review of consistency | Owner approves; no open contradiction |
-| **P5.5.2** | Schema module: field types/nullability, vocabularies, metadata allowlist, size bounds, canonical serialization, SHA-256, genesis, record validation errors | P5.5.1 | Writer, filesystem, HTTP | ~70 unit tests (schema, canonicalization, digests, tamper at record level) | All matrix rows for schema/hash pass; no I/O |
+| **P5.5.2** | Schema module: field types/nullability, vocabularies, metadata allowlist, size bounds, canonical serialization, SHA-256, genesis, record validation errors, `YYYY-MM-NNN` segment identity | P5.5.1 | Writer, filesystem, HTTP | 172 unit tests (schema, canonicalization, digests, tamper at record level) | All matrix rows for schema/hash pass; no I/O |
 | **P5.5.3** | Durable writer: initialization, full verification before first write, process + OS lock, append/flush/fsync, poisoning, typed errors, restricted-mode signal; **no rotation** | P5.5.2 | Rotation, manifest writes, HTTP wiring | Concurrency, poisoning, verification-before-write, crash/torn tests | Writer never appends to an unverified journal; ambiguous failures poison; rotation absent |
 | **P5.5.4** | `AuditService`: actor/request-ID binding, action/reason API, intent/result helpers, best-effort wrapper, safe logging | P5.5.3 | Route behavior changes | Unit tests for actor/request propagation, intent/result pairing, logging redaction | Service can emit every event type; no secret in any output |
 | **P5.5.5** | Route integration: mandatory intent→mutate→result for the four mutations, best-effort login/logout/403, `AUDIT_UNAVAILABLE`/`AUDIT_RESULT_UNCERTAIN` handlers, startup restricted mode | P5.5.4 | User admin, frontend, new endpoints | Endpoint tests for applied/not-applied/unknown, fail-closed, best-effort | No unaudited success possible; existing auth/authz behavior unchanged |
@@ -501,19 +519,370 @@ journal.
 
 ---
 
-## 14. Residual decisions for the owner
+## 14. Owner decisions (approved before P5.5.2)
 
-1. Login-failure records keep `target_type="account"`, `target_id=null` (no
-   username); confirm this data-minimisation choice.
-2. Startup on a corrupt journal: restricted mode (recommended, defined in §7)
-   versus refuse-to-start; and whether `AUDIT_REQUIRE_INTEGRITY` is on by default
-   in staging/production.
-3. Whether `authz.denied` metadata may carry the route template and method
-   (recommended) or only the HTTP status.
-4. Retention disposition wording for offsite archives (P5.5.7) and the operator
-   procedure for 365-day archive movement; no deletion is authorised here.
-5. Whether the absence of a declared segment (moved offsite) should ever permit
-   writing in anchor-only mode; the design currently **refuses** until an owner
-   decision defines it.
-6. Confirmation that the two new error codes (`AUDIT_UNAVAILABLE`,
-   `AUDIT_RESULT_UNCERTAIN`) and their fixed messages are approved.
+These were the residual questions in the P5.5.1 review; the project owner has
+resolved all seven. They are binding on P5.5.2 and every later sub-milestone.
+
+1. **Login failures store no username.** `target_type="account"`,
+   `target_id=null`. The normalized username is never retained in an audit
+   record, including on rate-limited and invalid-credential events.
+2. **Restricted mode is the startup policy.** A corrupt or unverifiable audit
+   store puts the application in restricted mode: reads, `/health` and the
+   existing authentication routes keep working, while audited mutations are
+   blocked. Strict refuse-to-start remains an optional mode
+   (`AUDIT_REQUIRE_INTEGRITY`), not the default and not part of P5.5.2.
+3. **`authz.denied` may record the route template and HTTP method** (never a
+   query string, path parameters, request body or header). This is the
+   `endpoint` + `method` metadata pair.
+4. **Retention is at least 365 days, archive-only initially**, with no
+   automatic deletion and no deletion schedule.
+5. **A missing declared historical segment always prevents new writes**, even
+   when a manifest anchor exists. Anchor-only coverage is a reporting mode for
+   the read-only verifier, never a licence to append.
+6. **`AUDIT_UNAVAILABLE` and `AUDIT_RESULT_UNCERTAIN` are approved** with the
+   fixed messages in §10.1.
+7. **An unknown database outcome is recorded as `DATABASE_OUTCOME_UNKNOWN`**
+   and its API response must explicitly communicate that the outcome is
+   unknown; it must never imply definite failure.
+
+Still deferred to later sub-milestones (not open design questions): the exact
+archive-offsite wording and 365-day operator procedure (P5.5.7).
+
+## 15. P5.5.2 implementation notes
+
+Implemented in `src/audit_schema.py` (pure, no I/O) and covered by
+`tests/test_audit_schema.py`. This section records the concrete choices made
+where the design record states a rule but not its mechanical form.
+
+### 15.1 Module contents
+
+* Closed vocabularies: `AuditAction` (7), `AuditOutcome` (4),
+  `AuditReasonCode` (20), `AuditSource` (3), `AuditTargetType` (5) — all
+  `str`-backed enums; raw strings are refused by the event constructor and
+  converted only by `AuditEvent.from_dict`.
+* `AuditEvent`: frozen dataclass with all 19 fields, validating every rule in
+  §2 at construction: supported `schema_version` (exactly `1`), positive
+  global and segment-local sequences, `sequence >= segment_sequence`,
+  `segment_id` matching `YYYY-MM`, canonical lowercase UUIDv4 `audit_id`,
+  `correlation_id` and `request_id`, the fixed UTC microsecond timestamp, the
+  actor and target nullable pairs, outcome/reason coherence, the metadata
+  allowlist and the hash formats.
+* `validate_metadata`, `canonical_json_text`, `canonical_json_bytes`,
+  `format_timestamp`, `parse_timestamp`, `compute_record_hash`,
+  `verify_record_hash`, `verify_chain` and `ChainVerification`.
+* Constants: `AUDIT_SCHEMA_VERSION`, `GENESIS_PREVIOUS_HASH` (64 zeroes),
+  `MAX_RECORD_BYTES` (8192), `MAX_METADATA_KEYS` (16), `MAX_METADATA_BYTES`
+  (1024), `MAX_TARGET_ID_LENGTH` (256), `METADATA_ALLOWED_KEYS`.
+
+### 15.2 Rules clarified for implementation
+
+* **Metadata values are `str`, `int` or `bool` only.** Floats are refused
+  outright — finite or not — so NaN/Infinity can never reach the serializer
+  through metadata. Nesting, arrays and `None` are refused by the same rule.
+* **Per-key metadata rules:** `endpoint` must match
+  `/[A-Za-z0-9._~{}/-]*` (no scheme, query, fragment or whitespace, ≤ 256
+  characters); `method` must be an uppercase HTTP method; `http_status` must
+  be an `int` (never `bool`) in 100–599; `employee_active_after` must be a
+  `bool`; `journal_event_id` a non-empty control-character-free string ≤ 256;
+  `prior_role`/`new_role` an approved role name. Allowlisted string values are
+  capped at 256 characters; the 1 KiB and 16-key bounds are enforced
+  independently as defensive limits for future allowlist growth.
+* **Outcome/reason coherence** is enforced: `OK` ⇔ `success`;
+  `PERMISSION_DENIED` is a denial reason, and the three uncertainty codes
+  (`AWAITING_RESULT`, `DATABASE_OUTCOME_UNKNOWN`, `PERSISTENCE_UNCONFIRMED`)
+  are recorded with `outcome="uncertain"` by the service layer. The schema
+  itself enforces only the `OK`/`success` equivalence.
+* **Correlation rules:** `auth.login`, `auth.logout` and `authz.denied` never
+  carry `correlation_id`; a mutation record without one must be the intent
+  record (`reason_code=AWAITING_RESULT`).
+* **`segment_id` is `YYYY-MM-NNN` and is validated for format only, not
+  coupled to the record's timestamp month.** The prefix is the segment's
+  allocation month; event time is an event fact. Demanding equality would make
+  every append fail in the window between a calendar month rollover and the
+  operator's rotation (and after crash recovery), which the design does not
+  permit.
+* **The constructor validates `record_hash` format but does not recompute it.**
+  Digest consistency is a verification property (`verify_record_hash`,
+  `verify_chain`) so a tampered record can still be read and reported instead
+  of making verification fail to load its own evidence. `AuditEvent.create`
+  always computes the digest.
+* **The 8 KiB record bound and the 1 KiB/16-key metadata bounds are enforced at
+  construction** on canonical bytes. Because the current allowlist can only
+  reach roughly 2 KiB, the bounds are defensive: tests exercise them by
+  lowering the constants/allowlist, and they guard future field growth.
+* **Hash input** is the canonical body including `previous_hash` and excluding
+  `record_hash`; `compute_record_hash` accepts a body that omits
+  `record_hash` entirely, which is the form the writer will hash.
+
+### 15.3 Chain verification contract
+
+`verify_chain(records, *, expected_previous_hash=GENESIS_PREVIOUS_HASH,
+ expected_next_sequence=1)` accepts `AuditEvent` values or parsed mappings and
+checks, per record: schema validity, predecessor link, global sequence,
+segment-local sequence (1 at each segment start, then +1), new and ascending
+segment ids (no reopening), and the recomputed digest. It returns a
+`ChainVerification` summary (`record_count`, first/last global sequence, last
+`record_hash`, segment ids). An empty input is valid and returns the zero
+summary — an empty journal is a legitimate state, not an error.
+
+The two keyword parameters are the P5.5.6/P5.5.7 extension seam for anchor
+verification; their defaults describe a full chain from genesis. Nothing is
+written, repaired or mutated: mappings are parsed into new immutable values.
+
+### 15.4 Typed errors
+
+All inherit `AuditError` (a `ValueError`) and carry optional `position` /
+`sequence` attributes only: `AuditSchemaError`, `AuditTimestampError`,
+`AuditMetadataError`, `AuditHashFormatError`, `AuditCanonicalizationError`,
+`AuditHashMismatchError`, `AuditChainError`,
+`AuditPreviousHashMismatchError`, `AuditSequenceError`, `AuditSegmentError`.
+Messages name the field, rule, position or sequence — never a record value,
+metadata content, identifier or digest.
+
+### 15.5 Verification
+
+172 focused tests in `tests/test_audit_schema.py` cover schema, vocabulary,
+canonicalization, hashing (including a fixed known-answer digest), chain
+verification, same-month multi-segment chains, segment-identity rules and the
+tamper matrix. Nothing in P5.5.2 writes a file, so
+filesystem durability, concurrency and crash behaviour remain unimplemented
+and untested (P5.5.3).
+
+## 16. Segment identity — approved `YYYY-MM-NNN` correction (applied in P5.5.2)
+
+This section records the P5.5.2 segment-identity review and the owner-approved
+correction, which **is applied** in `src/audit_schema.py` and its tests. It had
+to be resolved before P5.5.3 because the writer's startup verification and the
+rotation crash-recovery rules depend on it.
+
+### 16.1 Finding: the month-only schema could not represent two rotations in one month
+
+Before the correction, `src/audit_schema.py` accepted only
+`^\d{4}-(0[1-9]|1[0-2])$` for `segment_id` (§2), and `verify_chain` (a)
+rejected any segment id that appeared earlier in the chain — "segment ids must
+not repeat; a sealed segment cannot be reopened" — and (b) required each new
+segment id to be lexicographically greater than its predecessor. Together these
+made a second segment in the same calendar month both unrepresentable and
+unverifiable:
+
+1. An operator seals `2026-11` and creates the next active segment. The only
+   schema-valid identifier for November is `2026-11`, so the new segment
+   repeats the sealed id.
+2. On the first append to the new segment, `verify_chain` sees a repeated id and
+   raises `AuditSegmentError`. Under P5.5.3 that is not a warning: the writer
+   verifies the whole available chain at startup and refuses to become `ready`,
+   so **all audited mutations return `503 AUDIT_UNAVAILABLE`** (restricted
+   mode) until an operator intervenes. A legitimate, documented operator action
+   (incident response, pre-maintenance seal, size pressure) thus causes an
+   audit-availability outage and a false integrity alarm.
+3. The rotation crash table (§9.4) has the same problem at two stages: "after
+   rename, before manifest entry" (register an existing archive) and "after
+   manifest entry, before new active file" (create a replacement segment). Both
+   create or register a segment whose id must be distinct from every sealed
+   segment — which a month-only id cannot express when the crash and the
+   rotation fall in the same month.
+4. Re-running a failed rotation is meant to be safe; with month-only ids a
+   retry after a partial seal cannot allocate a fresh, distinct id.
+
+This is a genuine correctness defect in the schema's segment model, not a style
+issue: it makes an approved operational capability (operator-controlled
+rotation, "monthly target cadence") impossible to perform more than once per
+month and turns the second attempt into a fail-closed outage.
+
+### 16.2 Why the month-only rule seemed sufficient, and what it actually proves
+
+`YYYY-MM` was chosen so a human can see which month a segment covers, and the
+lexical comparison was a cheap sanity check. But "monthly" is a **cadence
+target**, not a uniqueness guarantee, and rotation timing is operator-controlled
+rather than clock-driven. Lexical month ordering also proves nothing about
+actual rotation order: it is implied today only because the identifier *is* the
+month. The chain already proves order cryptographically and numerically — the
+predecessor `record_hash` link, the global `sequence` continuation and the
+segment-local restart at 1 — so the label check adds no integrity, only the
+false-negative above.
+
+There is no data to migrate: no journal, segment or manifest exists yet
+(P5.5.3 is unimplemented). Correcting the format now is free; after the writer
+ships it would require coordinated archive/manifest handling.
+
+### 16.3 Approved identifier: `YYYY-MM-NNN`
+
+`segment_id = <allocation month YYYY-MM>-<3-digit ordinal NNN>` (e.g.
+`2026-11-001`, `2026-11-002`, `2026-12-001`):
+
+* `YYYY-MM` is the UTC month in which the segment was **allocated** (its first
+  active-file creation), not a claim about every record's timestamp (§16.5).
+* `NNN` is the allocation ordinal within that month, `001`–`999`, starting at
+  `001`. Any number of rotations in a month is representable; the format has
+  room for 999 and the bound is validated (no `000`, no overflow).
+* **Uniqueness is global** across all segments, current and archived, and is
+  recorded in the manifest (`segment_sealed` is unique per `segment_id`, §9.2).
+* Allocation is deterministic and operator-independent of the clock date:
+  * normal rotation: next ordinal for the allocation month, where the month is
+    the current UTC month at rotation time;
+  * empty active file after a crash: the id is derived from the sealed
+    predecessor — same allocation month as the sealed segment, ordinal + 1 — so
+    repeated restarts compute the same id and two rotations in one month stay
+    distinct even if the first append happens later;
+  * registering an archive produced by an interrupted rotation: the id is read
+    from the archive's own first record (all records in a segment share it), not
+    re-allocated, and the seal entry is appended with that id;
+  * after `999`, the rotation tool refuses and requires an operator decision —
+    it never silently reuses or renames.
+* Rationale for keeping a month prefix while making it an allocation label: it
+  preserves operator readability and rough sortability, it is deterministic
+  (unlike a random suffix, which makes a retried rotation able to produce two
+  ids for one intended seal), and it needs no new dependency (unlike a ULID).
+  Ordering is never taken from the string.
+
+Alternatives considered:
+
+| Option | Failure case |
+|---|---|
+| Keep `YYYY-MM` | The defect above: second rotation per month impossible; fail-closed outage |
+| Opaque UUIDv4 | Unique, but no operator-readable link to when the segment was opened and no deterministic retry/recovery; ordering rests entirely on links/manifest |
+| `YYYY-MM-<random 8 hex>` | Unique without bookkeeping, but a retried rotation can allocate a second id for the same intended seal, and ids do not sort or reveal missing allocations |
+| `YYYY-MM-NNN` (recommended) | Requires the rotation tool to read the manifest (already required to append seals) and caps a month at 999 segments (hit only by pathological rotation; explicit refusal) |
+
+This design is approved and applied. An opaque identifier was considered and
+rejected for the operator-readability and deterministic-retry reasons above;
+if one were ever adopted, §16.4–§16.9 would still apply, with only the format
+rule and allocation derivation changing.
+
+### 16.4 Verification and ordering after the change
+
+* **Remove** the lexicographic `segment_id` ordering rule from `verify_chain`.
+* **Keep** the "an id never repeats" rule: an id identifies exactly one
+  segment, so a re-appearance means a spliced or duplicated chain. This is
+  independent of the label format and remains a real integrity check.
+* **Keep** predecessor-link continuity, global sequence `+1`, segment-local
+  restart at 1, and the requirement that the first record of a segment has
+  `segment_sequence == 1`.
+* **Order proof** is therefore: hash linkage (cryptographic), global sequence
+  (numeric), manifest seal order and anchors (P5.5.7). A verifier note may report
+  the allocation months for human context, but never as a pass/fail condition.
+* The future manifest cross-check (P5.5.6/P5.5.7) becomes the authority for seal
+  order and for continuity across archived/missing segments; the event chain
+  must not depend on how labels sort.
+
+### 16.5 Timestamp-to-segment policy
+
+**Event timestamps must not be required to match the segment's calendar
+period.** The schema validates timestamp form and precision only; the writer
+and verifier must not reject a record because `timestamp[:7] != segment_id[:7]`.
+
+Reasons: rotation is operator-controlled and may lag or lead the calendar; the
+active segment legitimately receives records after a UTC month rollover until
+the operator rotates; crash recovery may resume an older segment after the
+month changes; and a clock seam or restore can move event time independently of
+segment allocation. Month equality would convert each of these benign states
+into a fail-closed mutation outage or a false integrity failure.
+
+What is required instead:
+
+* `timestamp` is the authoritative event time (fixed UTC microsecond form);
+  retention and reporting use it, never `segment_id`.
+* The writer requires non-decreasing timestamps within the active segment
+  (clock discipline; backwards time is an operational anomaly, not silently
+  reordered history).
+* The manifest seal entry may record first/last timestamps for operators; that
+  is descriptive metadata, not an integrity gate.
+* A verifier may print the allocation month and the observed timestamp range as
+  information, and must not fail a run on a mismatch.
+
+### 16.6 Implementation impact (applied)
+
+The change is confined to P5.5.2's pure layer:
+
+* `src/audit_schema.py`: `_SEGMENT_PATTERN` is
+  `^([0-9]{4})-(0[1-9]|1[0-2])-([0-9]{3})$` with `001`–`999` (`000` rejected
+  explicitly); the error message names the format; the
+  `record.segment_id <= previous.segment_id` branch was removed from
+  `verify_chain` (the repeated-id branch remains). No other field, hash,
+  canonicalization or metadata rule changed; `segment_id` is hashed as before.
+* `docs/AUDIT_JOURNAL_DESIGN.md` §2/§4: replace the `YYYY-MM` rule and the
+  lexical-order sentence; §9.3/§9.4: state the allocation rule for new and
+  recovered segments.
+* No writer, manifest, CLI or route change is part of this: P5.5.3 consumes the
+  corrected format later.
+
+### 16.7 P5.5.4 enforcement matrix (action / outcome / reason)
+
+The schema deliberately enforces only structural coherence (`OK` ⇔ `success`,
+standalone events never correlate, a mutation record without correlation is the
+intent). The per-action matrix below is **P5.5.4's responsibility**; it must
+refuse any combination not listed, before writing, so an impossible event can
+never be constructed by a route.
+
+| Action | Intent | Allowed result (outcome / reason) | Explicitly forbidden |
+|---|---|---|---|
+| `employee.create` | `uncertain` / `AWAITING_RESULT` | `success`/`OK`; `error`/`EMPLOYEE_EXISTS`, `EMPLOYEE_INVALID`, `VALIDATION_FAILED`, `DATABASE_UNAVAILABLE`, `INTERNAL_ERROR`; `uncertain`/`DATABASE_OUTCOME_UNKNOWN` | `denied`, `PERMISSION_DENIED`, `EMPLOYEE_NOT_FOUND`, `EMPLOYEE_INACTIVE`, checkout-only and auth-only codes |
+| `employee.update` | same | `success`/`OK`; `error`/`EMPLOYEE_NOT_FOUND`, `EMPLOYEE_INVALID`, `VALIDATION_FAILED`, `DATABASE_UNAVAILABLE`, `INTERNAL_ERROR`; `uncertain`/`DATABASE_OUTCOME_UNKNOWN` | `denied`, `EMPLOYEE_EXISTS`, `EMPLOYEE_INACTIVE`, checkout-only and auth-only codes |
+| `employee.deactivate` | same | `success`/`OK`; `error`/`EMPLOYEE_NOT_FOUND`, `EMPLOYEE_INACTIVE`, `VALIDATION_FAILED`, `DATABASE_UNAVAILABLE`, `INTERNAL_ERROR`; `uncertain`/`DATABASE_OUTCOME_UNKNOWN` | `denied`, `EMPLOYEE_EXISTS`, `EMPLOYEE_INVALID`, checkout-only and auth-only codes |
+| `attendance.checkout` | same | `success`/`OK`; `error`/`EMPLOYEE_NOT_FOUND`, `EMPLOYEE_INACTIVE`, `NO_OPEN_SESSION`, `CHECKOUT_COOLDOWN`, `VALIDATION_FAILED`, `DATABASE_UNAVAILABLE`, `INTERNAL_ERROR`; `uncertain`/`DATABASE_OUTCOME_UNKNOWN`, `PERSISTENCE_UNCONFIRMED` | `denied`; `PERSISTENCE_UNCONFIRMED` with any other outcome; `EMPLOYEE_EXISTS`, `EMPLOYEE_INVALID`, auth-only codes |
+| `auth.login` | none | `success`/`OK`; `denied`/`INVALID_CREDENTIALS`, `ACCOUNT_INACTIVE`, `RATE_LIMITED`; `error`/`DATABASE_UNAVAILABLE`, `INTERNAL_ERROR`; `uncertain`/`DATABASE_OUTCOME_UNKNOWN` (session-persistence ambiguity) | `AWAITING_RESULT`, any `correlation_id`, `PERMISSION_DENIED`, employee/checkout codes, `SESSION_*` |
+| `auth.logout` | none | `success`/`OK` (idempotent 204); `error`/`SESSION_INVALID`, `DATABASE_UNAVAILABLE`, `INTERNAL_ERROR`; `uncertain`/`DATABASE_OUTCOME_UNKNOWN` | `AWAITING_RESULT`, any `correlation_id`, `denied`/`PERMISSION_DENIED`, employee/checkout/login codes |
+| `authz.denied` | none | `denied`/`PERMISSION_DENIED` only | every other reason; every other outcome; any `correlation_id`; a null actor |
+
+Cross-cutting rules P5.5.4 must also enforce:
+
+* `outcome=denied` only for `auth.login` and `authz.denied`; mutation refusals
+  are `error`, never `denied` (a mutation is not attempted when RBAC denies it —
+  that is an `authz.denied` event).
+* `AWAITING_RESULT` only as the intent of the four mutation actions, always with
+  `outcome=uncertain` and no `correlation_id`.
+* `DATABASE_OUTCOME_UNKNOWN` always `uncertain` (decision 7); never `success`,
+  `denied` or `error`.
+* `PERSISTENCE_UNCONFIRMED` only for `attendance.checkout` and always
+  `uncertain`.
+* `OK` only with `success` (also schema-enforced); `PERMISSION_DENIED` only for
+  `authz.denied`; `EMPLOYEE_*` only for the three employee actions and checkout;
+  `NO_OPEN_SESSION`/`CHECKOUT_COOLDOWN` only checkout;
+  `INVALID_CREDENTIALS`/`ACCOUNT_INACTIVE`/`RATE_LIMITED` only login;
+  `SESSION_ABSENT`/`SESSION_INVALID` only logout.
+* `JOURNAL_CORRUPT` is **not emitted** by P5.5.4/P5.5.5: a corrupt journal is a
+  fail-closed state reported through logs and restricted mode, not an event
+  written into the journal it describes. It stays reserved for a possible
+  `source=system` event in a future, separately approved design.
+* `actor_user_id`/`actor_role` are set for every authenticated event;
+  `authz.denied` always has an actor; null actors occur only for pre-session
+  `auth.login`/`auth.logout`.
+* A logout request with no session cookie produces **no** audit event (204
+  unchanged, nothing happened); a cookie that resolves to no valid session is
+  `auth.logout`/`error`/`SESSION_INVALID` (best-effort).
+* Target types: `employee` + id for the three employee actions and checkout;
+  checkout may add `journal_event_id` metadata when known; `account` + user id
+  on successful login, `account` + `null` on every login failure (decision 1);
+  `account` + user id for an authenticated logout, `null`/`null` for a
+  pre-session logout; `null`/`null` plus `endpoint`/`method`/`http_status=403`
+  metadata for `authz.denied` (decision 3).
+* Result records always carry `correlation_id` = the intent's `audit_id`;
+  a result is never written without its intent.
+
+### 16.8 Tests after the correction
+
+The suite is now 172 tests (159 before): fixtures use `YYYY-MM-NNN`, and the
+old ascending-lexical test was replaced. Updated: `make_event`/`build_chain`
+fixtures (`2026-11` → `2026-11-001`), `test_invalid_segment_id_is_rejected`
+(10 invalid forms including month-only, `0000`, `1000`, `00a`),
+`test_empty_chain_is_valid_and_explicit`, `test_valid_single_record_chain` and
+`test_valid_chain_spanning_two_segments`. The known-answer digest was
+recomputed for the new fixture segment id.
+
+Tests added:
+
+1. `test_two_segments_allocated_in_the_same_month` — `2026-11-001` then
+   `2026-11-002` verifies; boundary links to the predecessor hash and
+   `segment_sequence` restarts at 1.
+2. `test_same_month_segment_boundary_links_to_predecessor_hash`.
+3. `test_repeated_segment_id_is_rejected_even_when_hashes_and_sequences_are_valid`.
+4. `test_zero_ordinal_is_rejected`, `test_four_digit_ordinal_is_rejected`,
+   `test_maximum_ordinal_is_accepted` (`999`, `2026-01-001`).
+5. `test_month_only_segment_id_is_rejected`.
+6. `test_non_lexically_ordered_segment_labels_are_accepted` (order from links
+   and sequences, not the string).
+7. `test_timestamp_month_may_differ_from_segment_allocation_month`.
+8. `test_segment_local_sequence_restarts_at_one_at_a_new_segment`.
+
+Manifest/rotation-side tests remain P5.5.7, not this layer.
