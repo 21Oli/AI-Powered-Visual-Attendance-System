@@ -5,9 +5,10 @@ schema, canonical serialization, SHA-256 record hashing and hash-chain
 verification primitives) is implemented in `src/audit_schema.py` and awaits
 independent review; the owner-approved `YYYY-MM-NNN` segment-identity correction
 is applied (§16). P5.5.3 (the durable, verified, poisoning writer) is
-implemented in `src/audit_writer.py` (§17) and P5.5.4 (the audit service layer)
-in `src/audit_service.py` (§18); both await review. There is still no manifest,
-archive, rotation, API/route integration or verifier CLI.**
+implemented in `src/audit_writer.py` (§17), P5.5.4 (the audit service layer) in
+`src/audit_service.py` (§18) and P5.5.5 (route integration and restricted mode)
+in `src/api_audit.py`/`src/api.py` (§19); all await review. There is still no
+manifest, archive, rotation or verifier CLI.**
 This document supersedes the first P5.5.1 design summary (which lived only in
 the review report), resolves the independent engineering review findings and
 records the owner's decisions (§14) plus the P5.5.2 implementation notes (§15).
@@ -511,8 +512,8 @@ PostgreSQL and no biometric data are required.
 | **P5.5.1** | This design: schema, vocabulary, hash/chain rules, writer trust/poisoning, mutation protocol, startup policy, retention/rotation, CLI contract, test matrix | P5.4.10 accepted | Any code | Owner review of consistency | Owner approves; no open contradiction |
 | **P5.5.2** | Schema module: field types/nullability, vocabularies, metadata allowlist, size bounds, canonical serialization, SHA-256, genesis, record validation errors, `YYYY-MM-NNN` segment identity | P5.5.1 | Writer, filesystem, HTTP | 172 unit tests (schema, canonicalization, digests, tamper at record level) | All matrix rows for schema/hash pass; no I/O |
 | **P5.5.3** | Durable writer: initialization, full verification before first write, process + OS lock, append/flush/fsync, poisoning, typed errors, restricted-mode signal; **no rotation** — **implemented, awaiting review**: `src/audit_writer.py` | P5.5.2 | Rotation, manifest writes, HTTP wiring | Concurrency, poisoning, verification-before-write, crash/torn tests (57 tests) | Writer never appends to an unverified journal; ambiguous failures poison; rotation absent |
-| **P5.5.4** | `AuditService`: actor/request-ID binding, action/reason API, intent/result helpers, best-effort wrapper, safe logging — **implemented, awaiting review**: `src/audit_service.py` | P5.5.3 | Route behavior changes | Unit tests for actor/request propagation, intent/result pairing, logging redaction (39 tests) | Service can emit every event type; no secret in any output |
-| **P5.5.5** | Route integration: mandatory intent→mutate→result for the four mutations, best-effort login/logout/403, `AUDIT_UNAVAILABLE`/`AUDIT_RESULT_UNCERTAIN` handlers, startup restricted mode | P5.5.4 | User admin, frontend, new endpoints | Endpoint tests for applied/not-applied/unknown, fail-closed, best-effort | No unaudited success possible; existing auth/authz behavior unchanged |
+| **P5.5.4** | `AuditService`: actor/request-ID binding, action/reason API, intent/result helpers, best-effort wrapper, safe logging — **implemented, awaiting review**: `src/audit_service.py` | P5.5.3 | Route behavior changes | Unit tests for actor/request propagation, intent/result pairing, logging redaction (40 tests) | Service can emit every event type; no secret in any output |
+| **P5.5.5** | Route integration: mandatory intent→mutate→result for the four mutations, best-effort login/logout/403, `AUDIT_UNAVAILABLE`/`AUDIT_RESULT_UNCERTAIN` handlers, startup restricted mode — **implemented, awaiting review**: `src/api_audit.py`, `src/api.py`, `src/api_login.py`, `src/api_logout.py`, `src/authz.py` | P5.5.4 | User admin, frontend, new endpoints | Endpoint tests for applied/not-applied/unknown, fail-closed, best-effort (40 tests) | No unaudited success possible; existing auth/authz behavior unchanged |
 | **P5.5.6** | Read-only verifier CLI with coverage modes and exit codes | P5.5.3 | Rotation, deletion | CLI tests: tamper matrix, coverage reporting, bytes unchanged | Exit 0/2/3/4 correct; never writes |
 | **P5.5.7** | Rotation, manifest, archives, retention documentation, operator runbook; monthly cadence | P5.5.6 | Automatic deletion/schedule | Four crash-stage tests, manifest continuity, immutability, retention entries | Rotation preserves chain; crash states detected; no silent mutation of history |
 | **P5.5.8** | Security regression, fault injection, exclusion sweep, docs and acceptance | P5.5.1–P5.5.7 | P5.6 work | Full matrix + soak + review | All criteria met; owner acceptance |
@@ -1096,7 +1097,7 @@ threads, not a separate OS process.
 ## 18. P5.5.4 audit service implementation notes
 
 **Status: implemented in `src/audit_service.py`, covered by
-`tests/test_audit_service.py` (39 tests), awaiting independent review.** No HTTP
+`tests/test_audit_service.py` (40 tests), awaiting independent review.** No HTTP
 route, request parsing, database access, business mutation, manifest/rotation,
 verifier CLI, restricted-mode wiring or frontend change exists; P5.5.5 was not
 started.
@@ -1199,7 +1200,7 @@ event contents or metadata values, and never changes the caller's response.
 
 ### 18.7 Verification and limitations
 
-`tests/test_audit_service.py`: 39 offline tests in temporary directories —
+`tests/test_audit_service.py`: 40 offline tests in temporary directories —
 actor/request-ID projection and validation; intent construction and rejection
 of standalone actions, missing actors and invalid targets; every
 `(outcome, reason)` pair for all four mutation actions plus login and logout
@@ -1216,3 +1217,139 @@ intent's result slot so an ambiguous append can never be retried; the service
 does not map HTTP responses, generate request IDs from a request object, or
 integrate with routes (P5.5.5); metadata `endpoint` templates are trusted from
 the caller; no PostgreSQL, browser, camera or production validation is claimed.
+
+---
+
+## 19. P5.5.5 route integration and restricted-mode notes
+
+**Status: implemented in `src/api_audit.py`, `src/api.py`, `src/api_login.py`,
+`src/api_logout.py` and `src/authz.py`; covered by `tests/test_api_audit.py`
+(40 tests); awaiting independent review.** No manifest, archive, rotation,
+retention tooling, verifier CLI, audit read API, user administration,
+database-table change or frontend work is included. P5.5.6 was not started.
+
+### 19.1 Application-scoped subsystem
+
+* `AuditSubsystem` owns exactly one lazily-built `AuditJournalWriter` and one
+  `AuditService` per application instance; no route sees the writer or the
+  journal path, and no route writes the JSONL file.
+* Production composition: `create_app(settings)` with no offline service seams
+  (exactly `run_server` → `build_server_config`) installs
+  `AuditSubsystem(builder=production_audit_builder(settings))`, whose writer
+  uses `<settings.data_dir>/audit/audit.jsonl`. `create_app` may also be given
+  an explicit `audit_subsystem`/`audit_builder` (the P5.5.5 tests do this).
+* Offline endpoint tests that inject their own employee/attendance/login/
+  session/principal services and no subsystem keep their historical
+  composition (`app.state.audit_subsystem` is `None`); they are test
+  compositions, not a production "audit off" switch.
+* Initialization is lazy (the API performs no filesystem work at import or app
+  construction). The first audited operation — a mandatory mutation, a login,
+  a logout or a denial — performs the writer's full verification. On any
+  `AuditJournalError` (unavailable, corrupt, integrity, contended) the
+  subsystem becomes permanently `restricted` for that process: one sanitized
+  `CRITICAL` log records the error class, no append is attempted, and nothing
+  is created, repaired, truncated or replaced.
+
+### 19.2 Restricted-mode behaviour
+
+* The four audited mutations answer the exact `503` envelope
+  `AUDIT_UNAVAILABLE` ("The operation was not attempted because it could not be
+  audited.") **before** the business service, repository or attendance journal
+  is touched.
+* `GET /health` stays anonymous and returns only `{"status": "ok"}`; reads,
+  login, logout and `/auth/me` keep their existing behaviour. Login/logout/
+  denial audit failures are best-effort and never change a response.
+* The subsystem state is server-internal and never reported as application
+  liveness or audit readiness.
+
+### 19.3 Request IDs and context
+
+The existing `RequestIDMiddleware` remains the only source: a server-generated
+UUIDv4 stored in `request.state`, echoed as `X-Request-ID`; a client-supplied
+header is ignored. Routes build `AuditContext` via `AuditService.context(...)`
+with the already-validated `AuthenticatedPrincipal`, so the actor is `user_id` +
+`role` only — no username, password, cookie or token reaches an event.
+
+### 19.4 Mandatory mutation ordering
+
+`POST /employees`, `PATCH /employees/{id}`, `POST /employees/{id}/deactivate`
+and `POST /attendance/{id}/checkout` follow: authenticate/RBAC → target sanity →
+`begin_mutation` (durable intent) → existing business call → classified result.
+
+* Success → `record_applied` (`success`/`OK`), response unchanged.
+* Confirmed not applied → `record_not_applied` with the matching reason:
+  validation (`EMPLOYEE_INVALID`/`VALIDATION_FAILED`), business refusal
+  (`EMPLOYEE_EXISTS`, `EMPLOYEE_NOT_FOUND`, `EMPLOYEE_INACTIVE`,
+  `NO_OPEN_SESSION`, `CHECKOUT_COOLDOWN`), `DatabaseUnavailableError`
+  (`DATABASE_UNAVAILABLE`: the connection could not be opened) or a corrupt
+  attendance journal (`DATABASE_UNAVAILABLE`); checkout input rejection is
+  `VALIDATION_FAILED`; attendance persistence uncertainty is
+  `PERSISTENCE_UNCONFIRMED`.
+* Unknown → `record_unknown` with `DATABASE_OUTCOME_UNKNOWN` (or
+  `PERSISTENCE_UNCONFIRMED` for checkout); a driver exception is never assumed
+  to mean rollback. A database-shaped unknown answers `503 DATABASE_UNAVAILABLE`
+  with "The operation's outcome could not be confirmed; it may or may not have
+  been applied."; a non-database programming error is recorded as unknown and
+  re-raised to the existing 500 handler.
+* Intent failure → `AuditUnavailableError`, no business call, 503
+  `AUDIT_UNAVAILABLE`. The same refusal applies when the target exceeds the
+  journal's 256-character schema limit. An empty target is different: no
+  mutation can be applied with it and the business layer rejects it, so no
+  intent is written and the existing validation path (422) answers. Result
+  failure after applied/unknown → `AuditResultUncertainError`, 503
+  `AUDIT_RESULT_UNCERTAIN`, no retry and no compensating write. Result failure
+  after confirmed-not-applied is logged and swallowed by the service, so the
+  original business error stands.
+* A non-database programming error is recorded as `uncertain` with the actual
+  final `http_status=500` before it is re-raised; only a database-shaped
+  unknown uses `http_status=503`.
+* Result metadata is limited to the route template (`endpoint`), uppercase
+  `method`, `http_status` and, for checkout success, `journal_event_id`.
+
+### 19.5 Best-effort authentication and authorization events
+
+* Login: success records the authenticated actor and `account` + user id;
+  failure records a null actor with `account` + `target_id=null` (no username),
+  `denied`/`INVALID_CREDENTIALS`, `denied`/`RATE_LIMITED`,
+  `error`/`DATABASE_UNAVAILABLE` or `error`/`INTERNAL_ERROR`. Unknown account,
+  wrong password and inactive account are deliberately indistinguishable in the
+  existing API, so all three are audited as `INVALID_CREDENTIALS`
+  (`ACCOUNT_INACTIVE` is therefore never emitted by this integration).
+* Logout: no cookie → no event; a live session → `success`/`OK` with the actor
+  and account target; a token that resolves to no valid session →
+  `error`/`SESSION_INVALID` with a null actor and null target; database/internal
+  failures keep their existing 503/500 and are audited best-effort. The
+  principal lookup used for the event never changes the logout response.
+* Authorization denial: emitted once from the centralized `PermissionDenied`
+  handler using the matched FastAPI route template (`request.scope["route"]`),
+  the uppercase method and `http_status=403`; without a matched template the
+  event is skipped rather than recording the raw path. Successful authorization
+  emits nothing.
+
+### 19.6 HTTP mapping and sanitization
+
+`AuditUnavailableError` → `503` `AUDIT_UNAVAILABLE` and
+`AuditResultUncertainError` → `503` `AUDIT_RESULT_UNCERTAIN`, both with the exact
+approved messages, registered as central exception handlers in
+`src/api.py`. They reuse the existing `{"error": {"code", "message"}}`
+envelope and never expose a path, OS text, stack trace, record, hash or
+identifier. Existing 400/401/403/404/409/422/429/500/503 business mappings are
+unchanged.
+
+### 19.7 Verification and limitations
+
+`tests/test_api_audit.py`: 40 offline tests over temporary directories and
+injected services — request-ID generation/ignoring, intent-before-business
+ordering, correlated success/error/uncertain results, applied/not-applied result
+failures, checkout mappings, restricted mode for every mutation, reads/health
+availability, corrupt-journal refusal without repair, login/logout/denial
+events and their failure isolation, exact audit envelopes, and a scan proving
+no username, password, token or biometric material reaches the journal.
+
+Limitations: audit initialization is lazy (there is no startup hook in this
+application), so restricted mode is first observed on the first audited
+operation and logged then; the `audit_subsystem` is process-local like the
+writer; login `ACCOUNT_INACTIVE` cannot be distinguished from invalid
+credentials without changing the security contract, so it is not emitted; the
+denial event depends on a matched route template; no PostgreSQL, browser,
+camera, deployment or production validation is claimed.

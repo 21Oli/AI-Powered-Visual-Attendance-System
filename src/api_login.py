@@ -54,10 +54,15 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from starlette.responses import Response
 
+from src.api_audit import AuditSubsystem
 from src.api_auth import AuthenticatedPrincipal, AuthenticationRequired
 from src.api_cookies import set_session_cookie
+from src.api_request_context import request_id_for
+from src.audit_schema import AuditAction, AuditOutcome, AuditReasonCode
+from src.audit_service import AuditService
 from src.config import PASSWORD_HASHING, AppSettings
-from src.login_throttle import LoginThrottle
+from src.db import DatabaseUnavailableError
+from src.login_throttle import LoginRateLimited, LoginThrottle
 from src.origin import OriginSyntaxError, normalize_origin, origin_is_allowed
 from src.password import PasswordService
 from src.session_service import AuthenticatedSession, SessionService
@@ -280,12 +285,74 @@ def require_trusted_origin_dependency(
     return require_trusted_origin
 
 
+#: Failure class → the approved login audit outcome/reason. Unknown account,
+#: wrong password and inactive account are deliberately indistinguishable in
+#: the existing API, so all three map to INVALID_CREDENTIALS and no username is
+#: ever recorded. Anything else is an internal error.
+_LOGIN_FAILURE_EVENTS: dict[
+    type[BaseException], tuple[AuditOutcome, AuditReasonCode]
+] = {
+    LoginRateLimited: (AuditOutcome.DENIED, AuditReasonCode.RATE_LIMITED),
+    AuthenticationRequired: (
+        AuditOutcome.DENIED,
+        AuditReasonCode.INVALID_CREDENTIALS,
+    ),
+    DatabaseUnavailableError: (
+        AuditOutcome.ERROR,
+        AuditReasonCode.DATABASE_UNAVAILABLE,
+    ),
+}
+
+
+def _login_failure_event(
+    exc: BaseException,
+) -> tuple[AuditOutcome, AuditReasonCode]:
+    """The best-effort audit outcome for a failed login attempt."""
+    for failure, event in _LOGIN_FAILURE_EVENTS.items():
+        if isinstance(exc, failure):
+            return event
+    return AuditOutcome.ERROR, AuditReasonCode.INTERNAL_ERROR
+
+
+def _record_login_best_effort(
+    audit: AuditSubsystem | None,
+    request: Request,
+    *,
+    outcome: AuditOutcome,
+    reason_code: AuditReasonCode,
+    principal: AuthenticatedPrincipal | None = None,
+) -> None:
+    """Emit one ``auth.login`` event without ever changing the response.
+
+    A missing/restricted subsystem skips the event (one sanitized warning in
+    the subsystem); the caller's status, headers and body are untouched.
+    """
+    if audit is None:
+        return
+    request_id = request_id_for(request)
+    try:
+        context = AuditService.context(principal, request_id=request_id)
+    except Exception:  # pragma: no cover - defensive; fixed constants only
+        return
+
+    audit.best_effort(
+        lambda service: service.record_login(
+            outcome=outcome,
+            reason_code=reason_code,
+            context=context,
+        ),
+        action=AuditAction.AUTH_LOGIN,
+        request_id=request_id,
+    )
+
+
 def register_login_route(
     app: FastAPI,
     *,
     path: str,
     get_login_service: Callable[[], LoginService],
     settings: AppSettings,
+    audit: AuditSubsystem | None = None,
 ) -> None:
     """Register ``POST {path}`` on ``app`` (the only login surface)."""
     origin_guard = Depends(require_trusted_origin_dependency(settings))
@@ -296,9 +363,30 @@ def register_login_route(
 
         The success body contains identity only. The raw token is written to
         ``Set-Cookie`` and nowhere else; failures propagate as the existing
-        sanitized 401/503/500 responses.
+        sanitized 401/503/500 responses. Every outcome is audited best-effort:
+        a failed audit write never changes this response.
         """
-        result = get_login_service().authenticate(payload.username, payload.password)
+        try:
+            result = get_login_service().authenticate(
+                payload.username, payload.password
+            )
+        except Exception as exc:
+            outcome, reason_code = _login_failure_event(exc)
+            _record_login_best_effort(
+                audit,
+                request,
+                outcome=outcome,
+                reason_code=reason_code,
+            )
+            raise
+
+        _record_login_best_effort(
+            audit,
+            request,
+            outcome=AuditOutcome.SUCCESS,
+            reason_code=AuditReasonCode.OK,
+            principal=result.principal,
+        )
         body = LoginResponse(
             user=LoginUser(
                 user_id=result.principal.user_id,

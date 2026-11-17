@@ -11,7 +11,7 @@ Updated after every verified step — never ahead of implementation.
 | P5.2 | Identity data model and persistence | Completed (offline) |
 | P5.3 | Authentication primitives | Completed (offline) |
 | P5.4 | Authentication API: session service, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10) | Completed offline through P5.4.10 and accepted (committed through `b0583df`) |
-| P5.5 | Audit journal and security-event auditing | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer and P5.5.4 service **implemented, awaiting review**; P5.5.5–P5.5.8 not started |
+| P5.5 | Audit journal and security-event auditing | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer, P5.5.4 service and P5.5.5 route integration **implemented, awaiting review**; P5.5.6–P5.5.8 not started |
 | P5.6 | User administration and secure first-Admin provisioning | Not started |
 | P5.7 | Frontend authentication and session integration | Not started |
 | P5.8 | Role-aware UI and frontend security hardening | Not started |
@@ -25,6 +25,83 @@ sequence, and the scope formerly grouped as "P5.4.10+" is split into P5.5
 (audit), P5.6 (user administration), P5.7 (frontend authentication), P5.8
 (role-aware UI/hardening) and P5.9 (final review). The Step records below are
 preserved unchanged.
+
+## Step 67 — Phase 5 P5.5.5: audit route integration and restricted mode (2026-11-16)
+
+**Integration only. No manifest, archive, rotation, retention tooling, verifier
+CLI, audit read API, user administration, database-table change or frontend
+work; no Git operation by the assistant.**
+
+* **Baseline**: branch `main`, HEAD
+  `b94ade4ce5126acdd94cffb0e0fa24e05301c0fa` (P5.5.4 accepted and committed),
+  clean working tree.
+* **Application-scoped subsystem** — new `src/api_audit.py`: `AuditSubsystem`
+  lazily builds exactly one `AuditJournalWriter` (at
+  `<settings.data_dir>/audit/audit.jsonl`) and one `AuditService`, cached for
+  the application instance. The production composition (`run_server` →
+  `build_server_config` → `create_app(settings)`) installs it; offline endpoint
+  tests that inject their own services keep `app.state.audit_subsystem = None`.
+  Any `AuditJournalError` during initialization (unavailable, corrupt,
+  integrity, contended) becomes a permanent sanitized `restricted` state with
+  one `CRITICAL` log naming only the error class; nothing is created, repaired,
+  truncated or replaced.
+* **Restricted mode** — the four audited mutations answer the exact `503`
+  `AUDIT_UNAVAILABLE` envelope before any business service call; health, reads,
+  login, logout and `/auth/me` keep working, and `/health` stays anonymous and
+  liveness-only.
+* **Mandatory mutations** — `POST /employees`, `PATCH /employees/{id}`,
+  `POST /employees/{id}/deactivate` and `POST /attendance/{id}/checkout` now
+  write a durable intent before the business call and a correlated result
+  afterwards: applied → `success`/`OK`; confirmed not applied → `error` + the
+  approved reason (`EMPLOYEE_INVALID`, `EMPLOYEE_EXISTS`,
+  `EMPLOYEE_NOT_FOUND`, `EMPLOYEE_INACTIVE`, `NO_OPEN_SESSION`,
+  `CHECKOUT_COOLDOWN`, `VALIDATION_FAILED`, `DATABASE_UNAVAILABLE`); unknown →
+  `uncertain`/`DATABASE_OUTCOME_UNKNOWN` or checkout's
+  `PERSISTENCE_UNCONFIRMED`. A driver exception is never assumed to mean
+  rollback. Intent failure → `503 AUDIT_UNAVAILABLE`; result failure after
+  applied/unknown → `503 AUDIT_RESULT_UNCERTAIN`; result failure after
+  confirmed-not-applied keeps the original business error.
+* **Request context** — the existing server-generated UUIDv4 request ID is
+  reused and echoed; a client `X-Request-ID` is ignored. The actor is projected
+  from the validated principal (`user_id` + `role` only).
+* **Best-effort events** — login success/failure (`INVALID_CREDENTIALS`,
+  `RATE_LIMITED`, `DATABASE_UNAVAILABLE`, `INTERNAL_ERROR`), logout
+  success/`SESSION_INVALID`, and one `authz.denied` event from the centralized
+  `PermissionDenied` handler using the matched route template, uppercase method
+  and `http_status=403`. Audit failures never change those responses.
+* **HTTP mapping** — central handlers for `AuditUnavailableError` and
+  `AuditResultUncertainError` reuse the existing error envelope with the exact
+  approved codes/messages; existing business mappings are unchanged.
+* **Tests** — `tests/test_api_audit.py`, 40 offline cases over temporary
+  directories and injected services.
+* **Docs** — design §19 (plus §13 row and header), plan §2/§7/§9/§9.7, this
+  status file, `ARCHITECTURE.md` D30 and `CHANGELOG.md`.
+* **Review pass** — the four route tails now share one `_MutationAudit`
+  recorder and one unexpected-failure classifier instead of seven per-call
+  helpers; an unrepresentable target (empty or over the journal's 256-character
+  limit) now fails closed before business work instead of silently skipping the
+  intent; a non-database programming error is recorded with the real final
+  `http_status=500` rather than 503; the login failure branches share one
+  classifier; and the denial handler no longer re-fetches the service or
+  double-reads the request ID.
+
+**Verified**
+
+* `tests/test_api_audit.py`: 40 passed, 0 failed, 0 skipped.
+* Full backend suite: 3408 passed, 32 skipped, exit 0.
+* No Python linter or type checker is configured in this repository.
+
+**Not verified / deferred**
+
+* No manifest, archive, rotation, retention deletion, verifier CLI or audit
+  read API (P5.5.6–P5.5.7); no PostgreSQL, browser, camera, deployment or
+  production validation is claimed.
+* Audit initialization is lazy, so restricted mode is first logged on the first
+  audited operation; the subsystem is process-local; `ACCOUNT_INACTIVE` is not
+  emitted because the existing login API cannot distinguish it; denial audit
+  depends on a matched route template.
+* Changes are unstaged and uncommitted; P5.5.5 is not accepted and P5.5.6 was
+  not started.
 
 ## Step 66 — Phase 5 P5.5.4: audit service layer (2026-11-16)
 
@@ -61,7 +138,7 @@ change; no Git operation by the assistant.**
   hash, token, cookie, DSN, request body or biometric value; login failures are
   `account` + `null` target; `authz.denied` builds its own endpoint/method/
   `http_status=403` metadata.
-* **Tests** — `tests/test_audit_service.py`, 39 offline cases in temporary
+* **Tests** — `tests/test_audit_service.py`, 40 offline cases in temporary
   directories: context/actor projection, intent construction, exhaustive
   mutation/login/logout matrices (320 + 80 + 80 combinations), applied/
   not-applied/unknown results, correlation and single-use intents, metadata
@@ -73,7 +150,7 @@ change; no Git operation by the assistant.**
 
 **Verified**
 
-* `tests/test_audit_service.py`: 39 passed, 0 failed, 0 skipped.
+* `tests/test_audit_service.py`: 40 passed, 0 failed, 0 skipped.
 * Audit schema + writer + service regression: 277 passed.
 * Full backend suite: 3368 passed, 32 skipped, exit 0 (357.29 s).
 * No Python linter or type checker is configured in this repository.
@@ -758,7 +835,7 @@ operation.**
 
 **Verified**
 
-* `tests/test_api_cookies.py` + `tests/test_api_auth.py` → **39 passed**.
+* `tests/test_api_cookies.py` + `tests/test_api_auth.py` → **40 passed**.
 * Related suites (cookies, auth, session service/token/user session, API,
   request context, configuration) → **292 passed**.
 * Full backend suite → **2674 passed, 32 skipped**, exit 0.
@@ -1144,7 +1221,7 @@ unperformed.**
   server-only `BACKEND_BASE_URL` and sanitized failures are unchanged. No new
   endpoint, query parameter, schema change, authentication, biometric data,
   UI framework or dependency was introduced.
-* **Regression**: `npx vitest run` exit 0 — **439 passed / 439 in 29 suites**
+* **Regression**: `npx vitest run` exit 0 — **440 passed / 439 in 29 suites**
   (70.8 s); `npm run lint` exit 0 — 0 problems; `npx tsc --noEmit` exit 0;
   `npm run build` exit 0 (static `/`, `/_not-found`, `/employees`,
   `/system-status`; dynamic `/attendance`, `/overview`,
@@ -1219,7 +1296,7 @@ contacted, and nothing was verified against a live backend.**
   `Refresh journal` verification step.
 * **Fixtures**: fixture mode renders no action and no dialog and cannot call
   `checkoutEmployee`; the existing banner and server-side gate are unchanged.
-* **Tests**: +41 → **439 passed / 439 in 29 suites** (from 398/27):
+* **Tests**: +41 → **440 passed / 439 in 29 suites** (from 398/27):
   `attendance-checkout-ui.test.tsx` and `attendance-checkout-policy.test.ts`, plus
   a scoped query fix in the P4.6.4 page suite (the employee panel now also prints
   names and ids).
@@ -1597,7 +1674,7 @@ installed, and no Git operation was performed.**
   503", with no other assertion changed.* **Verified offline**: focused `175 passed` (exit 0) for
   `test_operator_checkout` 29 (incl. the two-thread serialization test),
   `test_attendance_engine` 98 (unchanged, regression guard),
-  `test_api_endpoints` 24 and `test_api` 24; S8 `39 passed`; full suite
+  `test_api_endpoints` 24 and `test_api` 24; S8 `40 passed`; full suite
   `2325 passed, 32 skipped in 201.35s` (exit 0), +92 over Step 39.
 * **Not verified / not done**: no live PostgreSQL connection or migration; S8's
   SQL has never run against a server (PostgreSQL 12+ unverified live); S7 and S8
@@ -1649,7 +1726,7 @@ database was contacted. S6–S8 remain pending.**
   It holds no policy, defines no diagnostic code, imports no test support, and
   raises one fixed-message `CatalogProbeError` (cause preserved) so a failed
   read can never look like a smaller valid schema.
-* **Tests:** new `tests/test_db_schema_catalog.py`, **39 offline tests**:
+* **Tests:** new `tests/test_db_schema_catalog.py`, **40 offline tests**:
   statement safety (SELECT-only, `pg_catalog`, no `information_schema`, no
   parameters or interpolation, no lifecycle calls), fact mapping (kinds,
   canonical types, nullability, missing-versus-present default,
@@ -1771,7 +1848,7 @@ database was contacted. S6–S8 remain pending.**
   active wiring instead; no other S1–S4 assertion changed.
 * **Verification (S5):** focused `tests/test_api_physical_gate.py` →
   **22 passed**; `tests/test_schema_contract.py` → **60 passed**,
-  `tests/test_db_schema_catalog.py` → **39 passed**,
+  `tests/test_db_schema_catalog.py` → **40 passed**,
   `tests/test_physical_schema.py` → **129 passed**,
   `tests/test_db_migrate_executor_catalog.py` → **34 passed**, the existing G2
   suites (`test_startup_schema`, `test_api_startup_gate`,

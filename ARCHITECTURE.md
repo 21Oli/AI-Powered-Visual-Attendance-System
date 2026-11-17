@@ -1291,6 +1291,39 @@ the journal schema version (still 1), or the decision authority.
   not-applied mutation is logged and returns `None`, leaving the original
   business error response intact. Messages are fixed and sanitized; the stable
   codes are exposed for P5.5.5's HTTP mapping.
-* **Not implemented.** HTTP routes, request-ID generation from a request
-  object, status/code mapping, restricted-mode wiring, manifest/rotation,
-  verifier CLI (P5.5.5–P5.5.7).
+* **Not implemented.** Manifest, rotation, retention, verifier CLI and the
+  audit read API (P5.5.6–P5.5.7).
+
+### D30 — Audit route integration: one subsystem, fail-closed mutations, best-effort security events (Phase 5 — P5.5.5 implemented, awaiting review)
+
+* **One subsystem.** `src/api_audit.py` owns the application's single lazily
+  built `AuditJournalWriter` + `AuditService`. Routes never see the writer or
+  the journal path. Production (`run_server` → `build_server_config` →
+  `create_app(settings)`) installs it; offline test compositions that inject
+  their own services keep `app.state.audit_subsystem = None`.
+* **Restricted mode.** Any writer initialization/verification failure
+  (`unavailable`, `corrupt`, `integrity`, `contended`) becomes a permanent
+  sanitized `restricted` state with one `CRITICAL` log carrying only the error
+  class. Nothing is created, repaired or replaced. The four audited mutations
+  then answer the exact `503 AUDIT_UNAVAILABLE` before any business call;
+  health, reads, login, logout and `/auth/me` keep working, and `/health` stays
+  liveness-only.
+* **Context.** The existing server-generated UUIDv4 request ID is reused; a
+  client header is ignored. `AuditContext` uses the validated principal
+  (`user_id` + `role` only), never a username, cookie or token.
+* **Mutation ordering.** `POST /employees`, `PATCH /employees/{id}`,
+  `POST /employees/{id}/deactivate` and `POST /attendance/{id}/checkout` write a
+  durable intent before the business call and a correlated result after it:
+  applied → `success`/`OK`; confirmed not applied → `error` + the matching
+  approved reason; unknown → `uncertain`/`DATABASE_OUTCOME_UNKNOWN` (or
+  checkout's `PERSISTENCE_UNCONFIRMED`). A database exception is never assumed
+  to mean rollback.
+* **Failures.** Intent failure → 503 `AUDIT_UNAVAILABLE`, no business call.
+  Result failure after applied/unknown → 503 `AUDIT_RESULT_UNCERTAIN`, no retry,
+  no compensating write. Result failure after confirmed-not-applied leaves the
+  original business error response intact.
+* **Best-effort events.** Login, logout and the centralized `PermissionDenied`
+  handler emit their approved events through the subsystem wrapper; a failed or
+  skipped write logs a sanitized warning and never changes the authentication/
+  authorization response. Denials use the matched route template and uppercase
+  method only; no raw path, query string or body is recorded.

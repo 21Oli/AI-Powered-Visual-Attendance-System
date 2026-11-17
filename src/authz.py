@@ -203,6 +203,13 @@ def permission_dependency(
 
     def require_permission(request: Request) -> AuthenticatedPrincipal:
         principal = get_principal(request)
+        # P5.5.5: publish the already-validated principal on the request so the
+        # centralized denial handler can emit one best-effort ``authz.denied``
+        # event. This adds no authority and reads nothing from the request; the
+        # guard also keeps bare request doubles usable in unit tests.
+        state = getattr(request, "state", None)
+        if state is not None:
+            state.principal = principal
         enforce_permission(principal, permission)
         return principal
 

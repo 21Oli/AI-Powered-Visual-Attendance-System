@@ -57,7 +57,13 @@ from starlette.responses import Response
 
 from src.api_cookies import clear_session_cookie
 from src.api_login import require_trusted_origin_dependency
+from src.api_audit import AuditSubsystem
+from src.api_auth import AuthenticatedPrincipal
+from src.api_request_context import request_id_for
+from src.audit_schema import AuditAction, AuditOutcome, AuditReasonCode
+from src.audit_service import AuditService
 from src.config import SESSION_COOKIE, AppSettings
+from src.db import DatabaseUnavailableError
 from src.session_repository import SessionNotFound
 from src.session_service import AuthenticationError, SessionService
 
@@ -97,12 +103,41 @@ def perform_logout(
     return response
 
 
+def _record_logout_best_effort(
+    audit: AuditSubsystem | None,
+    request: Request,
+    *,
+    outcome: AuditOutcome,
+    reason_code: AuditReasonCode,
+    principal: AuthenticatedPrincipal | None = None,
+) -> None:
+    """One best-effort ``auth.logout`` event; never changes the 204."""
+    if audit is None:
+        return
+    request_id = request_id_for(request)
+    try:
+        context = AuditService.context(principal, request_id=request_id)
+    except Exception:  # pragma: no cover - defensive; fixed constants only
+        return
+
+    audit.best_effort(
+        lambda service: service.record_logout(
+            outcome=outcome,
+            reason_code=reason_code,
+            context=context,
+        ),
+        action=AuditAction.AUTH_LOGOUT,
+        request_id=request_id,
+    )
+
+
 def register_logout_route(
     app: FastAPI,
     *,
     path: str,
     get_session_service: Callable[[], SessionService],
     settings: AppSettings,
+    audit: AuditSubsystem | None = None,
 ) -> None:
     """Register ``POST {path}`` on ``app`` (the only logout surface)."""
     origin_guard = Depends(require_trusted_origin_dependency(settings))
@@ -112,10 +147,66 @@ def register_logout_route(
         """Sign out the session carried by the ``va_session`` cookie.
 
         The body is never read and no query parameter is consulted, so a
-        client cannot nominate a different session to revoke.
+        client cannot nominate a different session to revoke. Audit emission is
+        best-effort and happens only after the existing revocation path has
+        produced its response.
         """
-        return perform_logout(
-            get_session_service(),
-            token=request.cookies.get(SESSION_COOKIE.name),
-            settings=settings,
-        )
+        sessions = get_session_service()
+        token = request.cookies.get(SESSION_COOKIE.name)
+        if not token:
+            # No cookie, nothing happened: the design records no event.
+            return perform_logout(
+                sessions, token=None, settings=settings
+            )
+
+        principal: AuthenticatedPrincipal | None = None
+        invalid_session = False
+        try:
+            authenticated = sessions.validate_session(token)
+            principal = AuthenticatedPrincipal.from_session(authenticated)
+        except (AuthenticationError, SessionNotFound):
+            invalid_session = True
+        except Exception:
+            # Identity is only for the audit record; never let a lookup
+            # failure change logout's existing behaviour.
+            pass
+
+        try:
+            response = perform_logout(
+                sessions, token=token, settings=settings
+            )
+        except DatabaseUnavailableError:
+            _record_logout_best_effort(
+                audit,
+                request,
+                outcome=AuditOutcome.ERROR,
+                reason_code=AuditReasonCode.DATABASE_UNAVAILABLE,
+                principal=principal,
+            )
+            raise
+        except Exception:
+            _record_logout_best_effort(
+                audit,
+                request,
+                outcome=AuditOutcome.ERROR,
+                reason_code=AuditReasonCode.INTERNAL_ERROR,
+                principal=principal,
+            )
+            raise
+
+        if principal is not None:
+            _record_logout_best_effort(
+                audit,
+                request,
+                outcome=AuditOutcome.SUCCESS,
+                reason_code=AuditReasonCode.OK,
+                principal=principal,
+            )
+        elif invalid_session:
+            _record_logout_best_effort(
+                audit,
+                request,
+                outcome=AuditOutcome.ERROR,
+                reason_code=AuditReasonCode.SESSION_INVALID,
+            )
+        return response

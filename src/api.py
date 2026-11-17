@@ -77,12 +77,22 @@ from pydantic import BaseModel
 # and the MRO-based handler lookup only walks the raised type's bases.
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from src.api_audit import AuditSubsystem, production_audit_builder
 from src.api_auth import (
     AUTHENTICATION_REQUIRED_CODE,
     AUTHENTICATION_REQUIRED_MESSAGE,
     AuthenticatedPrincipal,
     AuthenticationRequired,
     build_session_service,
+)
+from src.audit_schema import MAX_TARGET_ID_LENGTH, AuditAction, AuditReasonCode
+from src.audit_service import (
+    AUDIT_RESULT_UNCERTAIN_CODE,
+    AUDIT_UNAVAILABLE_CODE,
+    AuditResultUncertainError,
+    AuditService,
+    AuditUnavailableError,
+    MutationIntent,
 )
 from src.api_login import (
     ORIGIN_NOT_ALLOWED_CODE,
@@ -149,6 +159,29 @@ CHECKOUT_REJECTED_CODE: str = "CHECKOUT_REJECTED"
 ATTENDANCE_UNAVAILABLE_CODE: str = "ATTENDANCE_UNAVAILABLE"
 PERSISTENCE_UNCONFIRMED_CODE: str = "PERSISTENCE_UNCONFIRMED"
 PERSISTENCE_REJECTED_CODE: str = "PERSISTENCE_REJECTED"
+DATABASE_UNAVAILABLE_CODE: str = "DATABASE_UNAVAILABLE"
+
+#: The exact approved audit messages (design §10.1); never built from a caught
+#: exception, a path or a record.
+AUDIT_UNAVAILABLE_MESSAGE: str = (
+    "The operation was not attempted because it could not be audited."
+)
+AUDIT_RESULT_UNCERTAIN_MESSAGE: str = (
+    "The operation may have been applied, but its audit result could not be "
+    "recorded. Do not retry blindly."
+)
+DATABASE_OUTCOME_UNKNOWN_MESSAGE: str = (
+    "The operation's outcome could not be confirmed; it may or may not have "
+    "been applied."
+)
+
+#: Checkout business-refusal code → the approved audit result reason.
+_CHECKOUT_AUDIT_REASONS: dict[str, AuditReasonCode] = {
+    "EMPLOYEE_NOT_FOUND": AuditReasonCode.EMPLOYEE_NOT_FOUND,
+    "EMPLOYEE_INACTIVE": AuditReasonCode.EMPLOYEE_INACTIVE,
+    "NO_OPEN_SESSION": AuditReasonCode.NO_OPEN_SESSION,
+    "CHECKOUT_COOLDOWN": AuditReasonCode.CHECKOUT_COOLDOWN,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +339,9 @@ def handle_database_unavailable(
         type(exc).__name__,
         request_id_for(request) or "unassigned",
     )
-    return _error_json(503, "DATABASE_UNAVAILABLE", "Database is temporarily unavailable.")
+    return _error_json(
+        503, DATABASE_UNAVAILABLE_CODE, "Database is temporarily unavailable."
+    )
 
 
 def handle_database_config_error(
@@ -358,6 +393,48 @@ def handle_authentication_required(
     )
 
 
+def _audit_subsystem(request: Request) -> AuditSubsystem | None:
+    """The app-scoped audit subsystem, if this composition installed one."""
+    return getattr(request.app.state, "audit_subsystem", None)
+
+
+def _route_template(request: Request) -> str | None:
+    """The matched route template (never the concrete request path)."""
+    path = getattr(request.scope.get("route"), "path", None)
+    return path if isinstance(path, str) else None
+
+
+def _record_denial_best_effort(request: Request) -> None:
+    """Best-effort ``authz.denied`` for a rejected authorized request.
+
+    Uses only the matched route template and the uppercase method, plus the
+    authenticated principal already resolved by the RBAC dependency. Without a
+    template there is no safe endpoint value, so the event is skipped rather
+    than recording the raw path. Never affects the 403 response.
+    """
+    subsystem = _audit_subsystem(request)
+    principal = getattr(request.state, "principal", None)
+    endpoint = _route_template(request)
+    if subsystem is None or endpoint is None:
+        return
+    if not isinstance(principal, AuthenticatedPrincipal):
+        return
+    request_id = request_id_for(request)
+    try:
+        context = AuditService.context(principal, request_id=request_id)
+    except Exception:  # pragma: no cover - defensive; sanitized constants only
+        return
+    subsystem.best_effort(
+        lambda service: service.record_denied(
+            endpoint=endpoint,
+            method=request.method.upper(),
+            context=context,
+        ),
+        action=AuditAction.AUTHZ_DENIED,
+        request_id=request_id,
+    )
+
+
 def handle_permission_denied(
     request: Request, exc: PermissionDenied
 ) -> JSONResponse:
@@ -371,8 +448,41 @@ def handle_permission_denied(
         "rejected request: permission denied request_id=%s",
         request_id_for(request) or "unassigned",
     )
+    _record_denial_best_effort(request)
     return _error_json(
         403, PERMISSION_DENIED_CODE, PERMISSION_DENIED_MESSAGE
+    )
+
+
+def handle_audit_unavailable(
+    request: Request, exc: AuditUnavailableError
+) -> JSONResponse:
+    """The operation was not attempted because it could not be audited.
+
+    Fixed 503 ``AUDIT_UNAVAILABLE`` envelope: no path, OS text, journal state,
+    record or identifier. The client is told only that nothing was attempted.
+    """
+    _logger.warning(
+        "audited mutation blocked: audit unavailable request_id=%s",
+        request_id_for(request) or "unassigned",
+    )
+    return _error_json(503, AUDIT_UNAVAILABLE_CODE, AUDIT_UNAVAILABLE_MESSAGE)
+
+
+def handle_audit_result_uncertain(
+    request: Request, exc: AuditResultUncertainError
+) -> JSONResponse:
+    """The mutation may have applied but its result could not be recorded.
+
+    Fixed 503 ``AUDIT_RESULT_UNCERTAIN`` envelope. It never implies the business
+    operation failed, and the response is never retried automatically.
+    """
+    _logger.warning(
+        "audit result not recorded after a possible mutation request_id=%s",
+        request_id_for(request) or "unassigned",
+    )
+    return _error_json(
+        503, AUDIT_RESULT_UNCERTAIN_CODE, AUDIT_RESULT_UNCERTAIN_MESSAGE
     )
 
 
@@ -417,6 +527,154 @@ def handle_unexpected_error(request: Request, exc: BaseException) -> JSONRespons
     if request_id is not None:
         response.headers[REQUEST_ID_HEADER] = request_id
     return response
+
+
+# ---------------------------------------------------------------------------
+# Audit integration for the mandatory mutations (P5.5.5)
+# ---------------------------------------------------------------------------
+
+
+class _MutationAudit:
+    """One mutation's durable intent plus its route identifiers.
+
+    ``_begin_mutation`` builds this once per request and the route records the
+    correlated result through ``applied`` / ``not_applied`` / ``unknown``. Every
+    method is a no-op when this composition installed no audit subsystem, so the
+    route code needs no ``None`` checks of its own.
+    """
+
+    __slots__ = ("_service", "_intent", "_endpoint", "_method")
+
+    def __init__(
+        self,
+        service: AuditService | None,
+        intent: MutationIntent | None,
+        *,
+        endpoint: str,
+        method: str,
+    ) -> None:
+        self._service = service
+        self._intent = intent
+        self._endpoint = endpoint
+        self._method = method
+
+    def _metadata(
+        self, status: int, *, journal_event_id: str | None = None
+    ) -> dict[str, str | int | bool]:
+        metadata: dict[str, str | int | bool] = {
+            "endpoint": self._endpoint,
+            "method": self._method,
+            "http_status": status,
+        }
+        if journal_event_id is not None:
+            metadata["journal_event_id"] = journal_event_id
+        return metadata
+
+    def applied(
+        self, *, status: int, journal_event_id: str | None = None
+    ) -> None:
+        service, intent = self._service, self._intent
+        if service is None or intent is None:
+            return
+        service.record_applied(
+            intent,
+            metadata=self._metadata(status, journal_event_id=journal_event_id),
+        )
+
+    def not_applied(self, reason: AuditReasonCode, *, status: int) -> None:
+        service, intent = self._service, self._intent
+        if service is None or intent is None:
+            return
+        service.record_not_applied(
+            intent, reason, metadata=self._metadata(status)
+        )
+
+    def unknown(self, reason: AuditReasonCode, *, status: int) -> None:
+        service, intent = self._service, self._intent
+        if service is None or intent is None:
+            return
+        service.record_unknown(
+            intent, reason_code=reason, metadata=self._metadata(status)
+        )
+
+
+def _begin_mutation(
+    request: Request,
+    principal: AuthenticatedPrincipal,
+    *,
+    action: AuditAction,
+    target_id: str,
+    endpoint: str,
+    method: str,
+) -> _MutationAudit:
+    """Durably record the intent before any business work (fail-closed).
+
+    Raises :class:`AuditUnavailableError` - rendered as ``503``
+    ``AUDIT_UNAVAILABLE`` - when the subsystem is restricted, cannot be
+    initialized, or the target cannot be represented in the journal, so the
+    mutation is never attempted.
+    """
+    subsystem = _audit_subsystem(request)
+    if subsystem is None:
+        return _MutationAudit(None, None, endpoint=endpoint, method=method)
+    service = subsystem.service()
+    if service is None:
+        raise AuditUnavailableError()
+    if len(target_id) > MAX_TARGET_ID_LENGTH:
+        raise AuditUnavailableError()
+    if not target_id:
+        # Nothing can be applied with an empty target, and the business layer
+        # rejects it (422) before any write; no intent is written for it.
+        return _MutationAudit(service, None, endpoint=endpoint, method=method)
+    intent = service.begin_mutation(
+        action=action,
+        target_id=target_id,
+        context=AuditService.context(
+            principal, request_id=request_id_for(request)
+        ),
+        metadata={"endpoint": endpoint, "method": method},
+    )
+    return _MutationAudit(service, intent, endpoint=endpoint, method=method)
+
+
+def _looks_like_database_failure(exc: BaseException) -> bool:
+    """Whether an unexpected exception may have reached PostgreSQL.
+
+    Duck-typed on the driver's ``sqlstate``/module so no driver import is
+    needed. Anything else is a programming error and keeps the existing 500.
+    """
+    if getattr(exc, "sqlstate", None) is not None:
+        return True
+    module = type(exc).__module__ or ""
+    return module == "psycopg" or module.startswith("psycopg.")
+
+
+def _record_unexpected_failure(
+    record: _MutationAudit, exc: BaseException
+) -> JSONResponse | None:
+    """Record an unexpected business failure and classify its HTTP outcome.
+
+    A ``DatabaseUnavailableError`` means the connection could not be opened, so
+    nothing was applied and the original 503 is re-raised. Any other exception
+    may have run a statement: it is recorded as unknown, and a database-shaped
+    failure returns the sanitized uncertainty envelope while a programming error
+    is re-raised to the existing 500.
+    """
+    if isinstance(exc, DatabaseUnavailableError):
+        record.not_applied(
+            AuditReasonCode.DATABASE_UNAVAILABLE, status=503
+        )
+        return None
+    database_shaped = _looks_like_database_failure(exc)
+    record.unknown(
+        AuditReasonCode.DATABASE_OUTCOME_UNKNOWN,
+        status=503 if database_shaped else 500,
+    )
+    if not database_shaped:
+        return None
+    return _error_json(
+        503, DATABASE_UNAVAILABLE_CODE, DATABASE_OUTCOME_UNKNOWN_MESSAGE
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -532,6 +790,8 @@ def create_app(
     session_service: SessionService | None = None,
     login_throttle: LoginThrottle | None = None,
     principal_resolver: Callable[[Request], AuthenticatedPrincipal] | None = None,
+    audit_subsystem: AuditSubsystem | None = None,
+    audit_builder: Callable[[], AuditService] | None = None,
 ) -> FastAPI:
     """Create the Phase 3 API application (no server, no connections).
 
@@ -573,6 +833,28 @@ def create_app(
         else current_principal_dependency(get_sessions)
     )
 
+    # P5.5.5: one application-scoped audit subsystem. It is installed
+    # explicitly, or built for the production composition (`settings` supplied
+    # with no offline service seams, which is exactly `run_server`'s call).
+    # Offline endpoint tests that inject their own services keep their existing
+    # composition; the P5.5.5 suite injects an `AuditSubsystem` explicitly.
+    offline_seams = (
+        employee_service,
+        attendance_service,
+        login_service,
+        session_service,
+        principal_resolver,
+    )
+    if audit_subsystem is None:
+        if audit_builder is not None:
+            audit_subsystem = AuditSubsystem(builder=audit_builder)
+        elif settings is not None and not any(
+            seam is not None for seam in offline_seams
+        ):
+            audit_subsystem = AuditSubsystem(
+                builder=production_audit_builder(resolved_settings)
+            )
+
     def guard(permission: Permission):
         """The single RBAC dependency used by every protected business route."""
         return Depends(permission_dependency(permission, resolve_principal))
@@ -588,6 +870,9 @@ def create_app(
     # Exactly one middleware: server-generated request IDs (P5.4.3). It adds no
     # CORS, authentication or authorization behaviour — deliberately.
     app.add_middleware(RequestIDMiddleware)
+    # The audit subsystem is server-internal state: routes and the centralized
+    # denial handler read it from here; it is never exposed on any response.
+    app.state.audit_subsystem = audit_subsystem
 
     # -- health ---------------------------------------------------------
 
@@ -606,6 +891,7 @@ def create_app(
         path=LOGIN_PATH,
         get_login_service=get_login,
         settings=resolved_settings,
+        audit=audit_subsystem,
     )
 
     # -- logout (P5.4.6) -------------------------------------------------
@@ -615,6 +901,7 @@ def create_app(
         path=LOGOUT_PATH,
         get_session_service=get_sessions,
         settings=resolved_settings,
+        audit=audit_subsystem,
     )
 
     # -- current user (P5.4.7) -------------------------------------------
@@ -630,14 +917,31 @@ def create_app(
     @app.post(
         f"{API_PREFIX}/employees",
         status_code=201,
-        dependencies=[guard(Permission.EMPLOYEES_CREATE)],
     )
-    def create_employee(payload: EmployeeCreateRequest) -> JSONResponse:
-        """Create one employee; duplicate ID → 409, invalid input → 422."""
+    def create_employee(
+        payload: EmployeeCreateRequest,
+        request: Request,
+        principal: AuthenticatedPrincipal = guard(Permission.EMPLOYEES_CREATE),
+    ) -> JSONResponse:
+        """Create one employee; duplicate ID → 409, invalid input → 422.
+
+        Mandatory audit: a durable intent is written before validation/business
+        work and a correlated result afterwards. A restricted subsystem answers
+        503 ``AUDIT_UNAVAILABLE`` without touching the repository.
+        """
         from src.employee import Employee, EmployeeValidationError
         from src.employee_repository import EmployeeAlreadyExists
         from src.api_service import employee_payload
 
+        endpoint, method = f"{API_PREFIX}/employees", "POST"
+        record = _begin_mutation(
+            request,
+            principal,
+            action=AuditAction.EMPLOYEE_CREATE,
+            target_id=payload.employee_id,
+            endpoint=endpoint,
+            method=method,
+        )
         try:
             employee = Employee(
                 employee_id=payload.employee_id,
@@ -645,6 +949,7 @@ def create_app(
                 is_active=payload.is_active,
             )
         except EmployeeValidationError:
+            record.not_applied(AuditReasonCode.EMPLOYEE_INVALID, status=422)
             return _error_json(
                 422,
                 EMPLOYEE_INVALID_CODE,
@@ -653,11 +958,18 @@ def create_app(
         try:
             created = get_employee().create(employee)
         except EmployeeAlreadyExists:
+            record.not_applied(AuditReasonCode.EMPLOYEE_EXISTS, status=409)
             return _error_json(
                 409,
                 EMPLOYEE_EXISTS_CODE,
                 "An employee already exists for the requested identifier.",
             )
+        except Exception as exc:
+            response = _record_unexpected_failure(record, exc)
+            if response is None:
+                raise
+            return response
+        record.applied(status=201)
         return JSONResponse(status_code=201, content=employee_payload(created))
 
     @app.get(
@@ -719,50 +1031,90 @@ def create_app(
 
     @app.patch(
         f"{API_PREFIX}/employees/{{employee_id}}",
-        dependencies=[guard(Permission.EMPLOYEES_UPDATE)],
     )
     def update_employee(
-        employee_id: str, payload: EmployeeUpdateRequest
+        employee_id: str,
+        payload: EmployeeUpdateRequest,
+        request: Request,
+        principal: AuthenticatedPrincipal = guard(Permission.EMPLOYEES_UPDATE),
     ) -> JSONResponse:
         """Update ``full_name`` only; missing → 404, invalid name → 422."""
         from src.employee import EmployeeValidationError
         from src.employee_repository import EmployeeNotFound
         from src.api_service import employee_payload
 
+        endpoint = f"{API_PREFIX}/employees/{{employee_id}}"
+        method = "PATCH"
+        record = _begin_mutation(
+            request,
+            principal,
+            action=AuditAction.EMPLOYEE_UPDATE,
+            target_id=employee_id,
+            endpoint=endpoint,
+            method=method,
+        )
         try:
             employee = get_employee().rename(employee_id, payload.full_name)
         except EmployeeNotFound:
+            record.not_applied(AuditReasonCode.EMPLOYEE_NOT_FOUND, status=404)
             return _error_json(
                 404,
                 EMPLOYEE_NOT_FOUND_CODE,
                 "No employee exists for the requested identifier.",
             )
         except EmployeeValidationError:
+            record.not_applied(AuditReasonCode.EMPLOYEE_INVALID, status=422)
             return _error_json(
                 422,
                 EMPLOYEE_INVALID_CODE,
                 "full_name does not satisfy the documented validation rules.",
             )
+        except Exception as exc:
+            response = _record_unexpected_failure(record, exc)
+            if response is None:
+                raise
+            return response
+        record.applied(status=200)
         return JSONResponse(status_code=200, content=employee_payload(employee))
 
     @app.post(
         f"{API_PREFIX}/employees/{{employee_id}}/deactivate",
-        dependencies=[guard(Permission.EMPLOYEES_DEACTIVATE)],
     )
-    def deactivate_employee(employee_id: str) -> JSONResponse:
+    def deactivate_employee(
+        employee_id: str,
+        request: Request,
+        principal: AuthenticatedPrincipal = guard(Permission.EMPLOYEES_DEACTIVATE),
+    ) -> JSONResponse:
         """Set ``is_active = FALSE``; missing → 404. Idempotent by nature
         (deactivating an inactive employee returns the same row)."""
         from src.employee_repository import EmployeeNotFound
         from src.api_service import employee_payload
 
+        endpoint = f"{API_PREFIX}/employees/{{employee_id}}/deactivate"
+        method = "POST"
+        record = _begin_mutation(
+            request,
+            principal,
+            action=AuditAction.EMPLOYEE_DEACTIVATE,
+            target_id=employee_id,
+            endpoint=endpoint,
+            method=method,
+        )
         try:
             employee = get_employee().deactivate(employee_id)
         except EmployeeNotFound:
+            record.not_applied(AuditReasonCode.EMPLOYEE_NOT_FOUND, status=404)
             return _error_json(
                 404,
                 EMPLOYEE_NOT_FOUND_CODE,
                 "No employee exists for the requested identifier.",
             )
+        except Exception as exc:
+            response = _record_unexpected_failure(record, exc)
+            if response is None:
+                raise
+            return response
+        record.applied(status=200)
         return JSONResponse(status_code=200, content=employee_payload(employee))
 
     # -- attendance -----------------------------------------------------
@@ -798,10 +1150,12 @@ def create_app(
     @app.post(
         f"{API_PREFIX}/attendance/{{employee_id}}/checkout",
         status_code=201,
-        dependencies=[guard(Permission.ATTENDANCE_CHECKOUT)],
     )
     def checkout(
-        employee_id: str, body: CheckoutRequest | None = None
+        employee_id: str,
+        request: Request,
+        body: CheckoutRequest | None = None,
+        principal: AuthenticatedPrincipal = guard(Permission.ATTENDANCE_CHECKOUT),
     ) -> JSONResponse:
         """Operator check-out: 201 only after the durable journal append."""
         from src.attendance_store import (
@@ -818,6 +1172,16 @@ def create_app(
             except EmployeeNotFound:
                 return None
 
+        endpoint = f"{API_PREFIX}/attendance/{{employee_id}}/checkout"
+        method = "POST"
+        record = _begin_mutation(
+            request,
+            principal,
+            action=AuditAction.ATTENDANCE_CHECKOUT,
+            target_id=employee_id,
+            endpoint=endpoint,
+            method=method,
+        )
         try:
             event = get_attendance().checkout(employee_id, employee_lookup=lookup)
         except CheckoutRejected as exc:
@@ -827,8 +1191,11 @@ def create_app(
                 if exc.code == "EMPLOYEE_NOT_FOUND"
                 else CHECKOUT_REJECTED_CODE
             )
+            record.not_applied(_CHECKOUT_AUDIT_REASONS[exc.code], status=status)
             return _error_json(status, code, exc.message, reason=exc.code)
         except CorruptAttendanceJournalError:
+            # The journal could not be read, so no check-out was attempted.
+            record.not_applied(AuditReasonCode.DATABASE_UNAVAILABLE, status=503)
             return _error_json(
                 503,
                 ATTENDANCE_UNAVAILABLE_CODE,
@@ -836,6 +1203,7 @@ def create_app(
                 "not attempted.",
             )
         except AttendanceStoreInputError:
+            record.not_applied(AuditReasonCode.VALIDATION_FAILED, status=422)
             return _error_json(
                 422,
                 PERSISTENCE_REJECTED_CODE,
@@ -843,12 +1211,22 @@ def create_app(
                 "journal is unchanged.",
             )
         except AttendanceStoreError:
+            # The append may have reached disk: unknown, never success/failure.
+            record.unknown(
+                AuditReasonCode.PERSISTENCE_UNCONFIRMED, status=503
+            )
             return _error_json(
                 503,
                 PERSISTENCE_UNCONFIRMED_CODE,
                 "The check-out could not be confirmed as persisted; it was not "
                 "retried and the journal may or may not contain the record.",
             )
+        except Exception as exc:
+            response = _record_unexpected_failure(record, exc)
+            if response is None:
+                raise
+            return response
+        record.applied(status=201, journal_event_id=event.event_id)
         return JSONResponse(status_code=201, content=event_payload(event))
 
     # -- stable, sanitized error surface -------------------------------
@@ -862,6 +1240,10 @@ def create_app(
     app.add_exception_handler(OriginNotAllowed, handle_origin_not_allowed)
     app.add_exception_handler(LoginRateLimited, handle_login_rate_limited)
     app.add_exception_handler(PermissionDenied, handle_permission_denied)
+    app.add_exception_handler(AuditUnavailableError, handle_audit_unavailable)
+    app.add_exception_handler(
+        AuditResultUncertainError, handle_audit_result_uncertain
+    )
     app.add_exception_handler(Exception, handle_unexpected_error)
     return app
 
