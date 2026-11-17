@@ -4,6 +4,37 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5, P5.5.7.2: audit manifest schema and integrity foundation
+
+### Added
+
+* `src/audit_manifest.py` — the manifest record model, validation, canonical hashing, chain verification and archive-reference validation for sealed audit segments. Pure module: it performs **no filesystem access**.
+  * Record: the exact `docs/AUDIT_JOURNAL_DESIGN.md` §9.2 field set — `manifest_version` (1), `manifest_sequence`, `entry_type`, `segment_id`, `disposition`, `segment_file`, `first_global_sequence`, `last_global_sequence`, `record_count`, `first_previous_hash`, `last_record_hash`, `sealed_at`, `tool`, `tool_version`, `previous_manifest_hash`, `entry_hash`. Segment-local bounds are derived (1 and `record_count`), so no field was invented.
+  * Validation: unknown/missing fields, wrong types, unsupported version, unknown vocabularies, `YYYY-MM-NNN` violations, inverted bounds, a `record_count` inconsistent with the bounds or zero, invalid timestamps and hashes, oversized values, malformed `tool`/`tool_version` and the entry-type/disposition pairings are refused with typed errors that never echo values.
+  * Archive references: exactly `archive/audit-<first>-<last>.jsonl` whose bounds match the entry; absolute paths, drive/UNC/scheme prefixes, backslashes, `.`/`..`, nested directories, other extensions, leading zeros and inverted ranges are refused.
+  * Hashing: `sha256(canonical_json(body without entry_hash))` reusing the event schema's canonical serializer and constant-time comparison; a claimed hash never influences its own verification.
+  * Chain: `verify_manifest` enforces the `"0"*64` genesis, contiguous `manifest_sequence`, per-entry digests, seal-once per `segment_id`, unique archive references, global-sequence and anchor continuity, and retention decisions that follow and match their seal. Manifest order is authoritative; segment labels are never sorted.
+* `tests/test_audit_manifest.py` — 163 offline tests: schema and field-type matrix, version rejection, canonicalization and digest stability, tampered hashes and predecessor links, genesis and multi-segment chains, gaps/duplicates/reordering, retention decisions (valid, orphaned, contradicting, duplicated), archive path safety (absolute, traversal, Windows separators, bad extensions and names), output sanitization, no file creation and no real `data/audit` access.
+
+### Changed
+
+* `docs/AUDIT_JOURNAL_DESIGN.md` — header, §9.2 (implemented schema and chain rules), §9.5 (coverage limits) and §13 row; P5.5.6 marked accepted (committed in `87c73e5`).
+* `docs/PHASE5_IMPLEMENTATION_PLAN.md` — header, §2, §7 and §9 milestone table.
+* `DEVELOPMENT_STATUS.md` (Step 69 and the P5.5 row), `ARCHITECTURE.md` D32 — P5.5.7.2 recorded as implemented and awaiting review.
+
+### Notes
+
+* P5.5.7.2 is **not accepted** and P5.5.7 is **not complete**: no manifest file, archive, sealing, rotation, retention disposal, recovery or CLI integration exists.
+* Manifest verification proves the manifest chain and its statements about segments only — never that an archive or segment exists or matches the declared anchors.
+* No Git operation was performed by the assistant; the changes are unstaged.
+
+### Verified
+
+* `tests/test_audit_manifest.py`: 163 passed, 0 failed, 0 skipped.
+* Complete audit suite: 518 passed.
+* Full backend suite: 3609 passed, 32 skipped, exit 0.
+* `git diff --check`: clean.
+
 ## [Unreleased] — Phase 5, P5.5.6: read-only audit journal verification CLI
 
 ### Added

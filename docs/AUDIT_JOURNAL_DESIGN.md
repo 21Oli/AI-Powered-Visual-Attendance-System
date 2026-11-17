@@ -8,8 +8,12 @@ is applied (§16). P5.5.3 (the durable, verified, poisoning writer) is
 implemented in `src/audit_writer.py` (§17), P5.5.4 (the audit service layer) in
 `src/audit_service.py` (§18), P5.5.5 (route integration and restricted mode) in
 `src/api_audit.py`/`src/api.py` (§19) and P5.5.6 (the read-only verifier CLI) in
-`tools/audit_verify.py` (§11); all await review. There is still no manifest,
-archive or rotation.**
+`tools/audit_verify.py` (§11). **P5.5.6 is accepted by the project owner
+(committed in `87c73e5`); P5.5.2–P5.5.5 await review.** P5.5.7.2 (the manifest
+schema, canonical hashing, manifest-chain verification and archive-reference
+validation) is implemented in `src/audit_manifest.py` and awaits review. There
+is still no manifest file handling, no archive, no rotation, no retention
+disposal and no recovery tool.**
 This document supersedes the first P5.5.1 design summary (which lived only in
 the review report), resolves the independent engineering review findings and
 records the owner's decisions (§14) plus the P5.5.2 implementation notes (§15).
@@ -355,6 +359,51 @@ are unique per `segment_id`; a duplicate is an integrity failure. Retention
 entries record `segment_id` and the disposition (`archived_offsite`) plus the
 record count — never a claim that contents were verified after removal.
 
+**Schema implemented in P5.5.7.2** (`src/audit_manifest.py`). The immutable
+`ManifestEntry` carries exactly the sixteen fields above — nothing more is
+accepted, nothing less is optional — and enforces:
+
+* `manifest_version` is `1`; `manifest_sequence` is a positive integer
+  contiguous from 1; `segment_id` uses the approved `YYYY-MM-NNN` form
+  (ordinal `001`–`999`).
+* `record_count` must equal `last_global_sequence - first_global_sequence + 1`
+  and be at least 1. The segment-local bounds are therefore implied (1 and
+  `record_count`) and are exposed as derived values rather than stored fields,
+  so the approved field set is unchanged.
+* `entry_type` and `disposition` are closed vocabularies paired by rule:
+  `segment_sealed` requires `archived` and a non-null `segment_file`;
+  `retention_decision` requires `archived_offsite` and a null `segment_file`.
+* `segment_file` must be exactly
+  `archive/audit-<first_global_sequence>-<last_global_sequence>.jsonl`
+  (§9.1/§9.3): a relative POSIX path with the approved `archive` component and
+  no absolute path, drive/UNC/scheme prefix, backslash separator, `.`/`..`
+  component, other extension or leading zero; the file-name bounds must agree
+  with the entry's own sequences. Nothing is opened or resolved.
+* `sealed_at` uses the event schema's fixed UTC microsecond form; `tool` is a
+  lowercase stable name of at most 64 characters and `tool_version` at most 32
+  characters of letters, digits or `.`, `_`, `+`, `-`.
+* `entry_hash` is the SHA-256 digest of the canonical JSON body without
+  `entry_hash`, using the **event schema's** canonical serializer (sorted
+  keys, `","`/`":"` separators, no ASCII escaping, no NaN) and constant-time
+  comparison on verification. Manifest hashes never reuse event hashes.
+* Unknown or missing fields, wrong types, oversized values, unknown
+  vocabularies and unsupported versions are refused, exactly like events.
+
+**Manifest chain implemented in P5.5.7.2** (`verify_manifest`):
+`previous_manifest_hash` links from the `"0"*64` genesis; `manifest_sequence`
+is contiguous from 1; every `entry_hash` matches its canonical body; a
+`segment_id` is sealed at most once; a `segment_file` is referenced at most
+once; each sealed segment continues the global sequence
+(`first_global_sequence` = previous `last_global_sequence` + 1) and the anchor
+(`first_previous_hash` = previous `last_record_hash`); a `retention_decision`
+follows its seal, appears once per segment and repeats that seal's bounds,
+record count and anchors exactly (a contradicting decision is refused). Order
+is the **manifest order**; segment labels are never sorted and the allocation
+month is never compared with event timestamps. An empty manifest is valid and
+invents no segment. All of this is in-memory and pure: P5.5.7.2 reads no file,
+so it proves the manifest's own chain and its statements about segments — never
+that segment or archive bytes exist or match them.
+
 ### 9.3 Rotation steps (operator tool, P5.5.7)
 
 1. Stop the application (or take the exclusive writer lock with the writer
@@ -394,6 +443,11 @@ chain reset; an inconsistent state is detected and reported, never "fixed".
    is verified against its own chain and the surrounding link, and the run is
    reported as **anchor-only coverage**. This is never described as proof that
    the removed records were verified.
+
+P5.5.7.2 implements the in-memory half of mode 2 only: the manifest chain and
+its segment/sequence statements. Modes 1 and 3, and the file-level comparison of
+manifest anchors with segment contents, require the archive/rotation work of
+P5.5.7.3+; no coverage mode is reported by any tool yet.
 
 The CLI always states which modes applied and which parts of history were not
 covered by content verification.
@@ -549,7 +603,8 @@ PostgreSQL and no biometric data are required.
 | **P5.5.3** | Durable writer: initialization, full verification before first write, process + OS lock, append/flush/fsync, poisoning, typed errors, restricted-mode signal; **no rotation** — **implemented, awaiting review**: `src/audit_writer.py` | P5.5.2 | Rotation, manifest writes, HTTP wiring | Concurrency, poisoning, verification-before-write, crash/torn tests (57 tests) | Writer never appends to an unverified journal; ambiguous failures poison; rotation absent |
 | **P5.5.4** | `AuditService`: actor/request-ID binding, action/reason API, intent/result helpers, best-effort wrapper, safe logging — **implemented, awaiting review**: `src/audit_service.py` | P5.5.3 | Route behavior changes | Unit tests for actor/request propagation, intent/result pairing, logging redaction (40 tests) | Service can emit every event type; no secret in any output |
 | **P5.5.5** | Route integration: mandatory intent→mutate→result for the four mutations, best-effort login/logout/403, `AUDIT_UNAVAILABLE`/`AUDIT_RESULT_UNCERTAIN` handlers, startup restricted mode — **implemented, awaiting review**: `src/api_audit.py`, `src/api.py`, `src/api_login.py`, `src/api_logout.py`, `src/authz.py` | P5.5.4 | User admin, frontend, new endpoints | Endpoint tests for applied/not-applied/unknown, fail-closed, best-effort (40 tests) | No unaudited success possible; existing auth/authz behavior unchanged |
-| **P5.5.6** | Read-only active-journal verifier CLI — **implemented, awaiting review**: `tools/audit_verify.py` | P5.5.3 | Rotation, deletion, manifest/archive verification | CLI tests: tamper matrix, journal bytes unchanged, no creation (38 tests) | Exit 0/1/2/3/4 correct; never writes |
+| **P5.5.6** | Read-only active-journal verifier CLI — **accepted by the owner, committed in `87c73e5`**: `tools/audit_verify.py` | P5.5.3 | Rotation, deletion, manifest/archive verification | CLI tests: tamper matrix, journal bytes unchanged, no creation (38 tests) | Exit 0/1/2/3/4 correct; never writes |
+| **P5.5.7.2** | Manifest schema and integrity foundation: `ManifestEntry`, canonical hashing, manifest-chain verification, archive-reference validation — **implemented, awaiting review**: `src/audit_manifest.py` | P5.5.6 accepted | Manifest file I/O, sealing, archives, rotation, recovery, CLI | Schema/hash/chain/path matrix, no filesystem access (163 tests) | Exact §9.2 field set; chain and continuity rules enforced; no file read or write |
 | **P5.5.7** | Rotation, manifest, archives, retention documentation, operator runbook; monthly cadence | P5.5.6 | Automatic deletion/schedule | Four crash-stage tests, manifest continuity, immutability, retention entries | Rotation preserves chain; crash states detected; no silent mutation of history |
 | **P5.5.8** | Security regression, fault injection, exclusion sweep, docs and acceptance | P5.5.1–P5.5.7 | P5.6 work | Full matrix + soak + review | All criteria met; owner acceptance |
 

@@ -1356,3 +1356,43 @@ the journal schema version (still 1), or the decision authority.
   transactional snapshot or cross-process coordination.
 * **Deferred.** Manifest/archive verification, rotation, retention, repair,
   machine-readable output and an audit read API remain P5.5.7+.
+
+### D32 — Audit manifest is a separate schema with its own chain (Phase 5 — P5.5.7.2 implemented, awaiting review)
+
+* **Separate format, separate chain.** `src/audit_manifest.py` defines the
+  manifest record as `ManifestEntry`: `manifest_version` 1, contiguous
+  `manifest_sequence`, `entry_type` (`segment_sealed` | `retention_decision`),
+  `segment_id`, `disposition` (`archived` | `archived_offsite`), `segment_file`,
+  `first_global_sequence`, `last_global_sequence`, `record_count`,
+  `first_previous_hash`, `last_record_hash`, `sealed_at`, `tool`,
+  `tool_version`, `previous_manifest_hash`, `entry_hash`. Manifest entries are
+  never written to `audit.jsonl` and audit events are never written to the
+  manifest; the two chains share no hashes.
+* **Reuse, not a second implementation.** Canonical JSON, the fixed UTC
+  timestamp form and SHA-256 are taken from `src.audit_schema`. An entry hash is
+  `sha256(canonical_json(body without entry_hash))`, compared in constant time;
+  a claimed hash never influences its own verification.
+* **Strict schema.** Unknown or missing fields, wrong types, unsupported
+  versions, unknown vocabularies, oversized values, inverted or non-positive
+  sequence bounds, a `record_count` that disagrees with the global bounds and a
+  zero-record seal are refused. `segment_sealed` requires `archived` plus a
+  `segment_file`; `retention_decision` requires `archived_offsite` and a null
+  `segment_file`. Segment-local bounds are implied (1 and `record_count`).
+* **Archive references.** `segment_file` must be exactly
+  `archive/audit-<first>-<last>.jsonl` and its bounds must match the entry:
+  relative POSIX path, approved `archive` component, no absolute path,
+  drive/UNC/scheme prefix, backslash, `.`/`..`, other extension or leading
+  zero. Validation is pure — no path is opened, resolved or created.
+* **Chain rules.** Genesis `"0"*64` predecessor, contiguous
+  `manifest_sequence`, canonical digest per entry, seal-once per `segment_id`,
+  unique archive reference, global-sequence and anchor continuity between
+  sealed segments, and a `retention_decision` only after its seal with
+  identical bounds, count and anchors. Order is the manifest order; segment
+  labels are never sorted and an allocation month is never compared with event
+  timestamps. An empty manifest is valid.
+* **What verification proves.** The manifest chain and its statements about
+  segments. Not that a segment or archive exists, is complete, or matches the
+  declared anchors — that needs the content verification of P5.5.7.3+.
+* **Not implemented.** Manifest file reading/appending, sealing, archive
+  movement, rotation, retention disposal, recovery, verifier integration and
+  any scheduler.

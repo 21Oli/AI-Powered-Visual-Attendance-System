@@ -11,7 +11,7 @@ Updated after every verified step — never ahead of implementation.
 | P5.2 | Identity data model and persistence | Completed (offline) |
 | P5.3 | Authentication primitives | Completed (offline) |
 | P5.4 | Authentication API: session service, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10) | Completed offline through P5.4.10 and accepted (committed through `b0583df`) |
-| P5.5 | Audit journal and security-event auditing | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer, P5.5.4 service and P5.5.5 route integration **implemented, awaiting review** (P5.5.5 committed in `4dcb154` before this step); P5.5.6 verifier CLI **implemented, awaiting review**; P5.5.7–P5.5.8 not started |
+| P5.5 | Audit journal and security-event auditing | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer, P5.5.4 service and P5.5.5 route integration **implemented, awaiting review** (P5.5.5 committed in `4dcb154`); P5.5.6 verifier CLI **accepted (committed `87c73e5`)**; P5.5.7.2 manifest schema/integrity **implemented, awaiting review**; P5.5.7.3–P5.5.8 not started |
 | P5.6 | User administration and secure first-Admin provisioning | Not started |
 | P5.7 | Frontend authentication and session integration | Not started |
 | P5.8 | Role-aware UI and frontend security hardening | Not started |
@@ -25,6 +25,85 @@ sequence, and the scope formerly grouped as "P5.4.10+" is split into P5.5
 (audit), P5.6 (user administration), P5.7 (frontend authentication), P5.8
 (role-aware UI/hardening) and P5.9 (final review). The Step records below are
 preserved unchanged.
+
+## Step 69 — Phase 5 P5.5.7.2: audit manifest schema and integrity foundation (2026-11-17)
+
+**Schema and integrity module only. No manifest file read/write, no sealing, no
+archive, no rotation, no retention disposal, no recovery, no CLI integration,
+no endpoint, database, camera, biometric, deployment or frontend work; no Git
+operation by the assistant.**
+
+* **Baseline**: branch `main`, HEAD
+  `87c73e567bdb0e41eee4be03154018cdd7f8b10c` (P5.5.6 accepted by the owner and
+  committed; clean working tree).
+* **Deliverable** — `src/audit_manifest.py`: the manifest record model,
+  validation, canonical serialization, hashing, manifest-chain verification and
+  archive-reference validation, as a pure module with **no filesystem access at
+  all**. Nothing reads, creates, moves, renames, truncates, repairs or deletes a
+  manifest, journal or archive.
+* **Record** — the exact §9.2 field set: `manifest_version` (1),
+  `manifest_sequence`, `entry_type` (`segment_sealed` | `retention_decision`),
+  `segment_id`, `disposition` (`archived` | `archived_offsite`),
+  `segment_file`, `first_global_sequence`, `last_global_sequence`,
+  `record_count`, `first_previous_hash`, `last_record_hash`, `sealed_at`, `tool`,
+  `tool_version`, `previous_manifest_hash`, `entry_hash`. Segment-local bounds
+  are implied (1 and `record_count`) and exposed as derived properties, so no
+  unapproved field was added; the brief's "unique manifest record identifier" is
+  the contiguous `manifest_sequence` plus the hash chain, which is what §9.2
+  defines.
+* **Validation** — unknown or missing fields, non-string keys, wrong types,
+  unsupported version, unknown `entry_type`/`disposition`, `segment_id` outside
+  `YYYY-MM-NNN` (`000` and `>999` refused), non-positive or inverted global
+  bounds, `record_count` that disagrees with the bounds or is zero, invalid
+  `sealed_at`, non-lowercase/ill-sized hashes, oversized `segment_file`,
+  malformed `tool`/`tool_version`, and the type/disposition pairings
+  (`segment_sealed`→`archived`+file; `retention_decision`→`archived_offsite`+null
+  file) are all refused with typed errors whose messages carry field names but
+  never values.
+* **Archive references** — exactly `archive/audit-<first>-<last>.jsonl` with
+  bounds equal to the entry's sequences: no absolute path, drive/UNC/scheme
+  prefix, backslash, `.`/`..`, nested directory, other extension, leading zero
+  or inverted range. Platform-independent (POSIX-separator) string validation;
+  nothing is opened or resolved.
+* **Hashing** — `sha256(canonical_json(body without entry_hash))` using the
+  **event schema's** canonical serializer and fixed-form timestamps, with
+  constant-time digest comparison. A claimed `entry_hash` never influences its
+  own verification and manifest hashes never reuse event hashes.
+* **Chain** — `verify_manifest` enforces the `"0"*64` genesis link, contiguous
+  `manifest_sequence`, canonical per-entry digest, seal-once per `segment_id`,
+  unique `segment_file`, global-sequence and anchor continuity between sealed
+  segments, and a `retention_decision` only after its seal, once per segment,
+  repeating that seal's bounds, count and anchors. Order is the manifest order —
+  segment labels are never sorted and an allocation month is never compared
+  with event timestamps. An empty manifest verifies as empty and invents
+  nothing.
+* **What it proves** — the manifest's own chain and its statements about
+  segments. It never proves an archive or segment exists, is complete, or
+  matches the declared anchors: that needs the content verification of
+  P5.5.7.3+.
+* **Docs** — design header, §9.2 (schema and chain implementation rules), §9.5
+  (coverage limits) and §13 row; plan header, §2, §7 and §9; this status file;
+  `ARCHITECTURE.md` D32; `CHANGELOG.md`.
+
+**Verified**
+
+* `tests/test_audit_manifest.py`: 163 passed, 0 failed, 0 skipped.
+* Complete audit suite (`test_audit_schema`, `test_audit_writer`,
+  `test_audit_service`, `test_api_audit`, `test_audit_verify`,
+  `test_audit_manifest`): 518 passed.
+* Full backend suite: 3609 passed, 32 skipped, exit 0.
+* `git diff --check`: clean.
+
+**Not verified / deferred**
+
+* No manifest file is read or written, so file-level parsing, torn-tail
+  handling, append/fsync ordering and manifest durability are P5.5.7.3+.
+* No archive or segment content is read: counts, anchors and boundaries are
+  checked as manifest statements only. No rotation, sealing, recovery,
+  retention disposal, CLI integration or runbook (P5.5.7.3+).
+* No live PostgreSQL, camera, biometric, deployment or production run.
+* Changes are unstaged and uncommitted; P5.5.7.2 is not accepted and P5.5.7.3
+  was not started.
 
 ## Step 68 — Phase 5 P5.5.6: read-only audit journal verifier CLI (2026-11-17)
 
