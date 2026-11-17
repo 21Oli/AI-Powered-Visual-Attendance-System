@@ -1327,3 +1327,32 @@ the journal schema version (still 1), or the decision authority.
   skipped write logs a sanitized warning and never changes the authentication/
   authorization response. Denials use the matched route template and uppercase
   method only; no raw path, query string or body is recorded.
+
+### D31 — Audit verification is a separate, read-only operator surface (Phase 5 — P5.5.6 implemented, awaiting review)
+
+* **One tool, one job.** `tools/audit_verify.py` loads and verifies the active
+  JSONL journal without importing the API, the writer or any database/startup
+  code. It reuses `src.audit_schema` (`AuditEvent.from_dict`, `verify_chain`,
+  canonical hashing and constant-time digest comparison) rather than
+  reimplementing serialization or chain rules.
+* **Read-only by construction.** The verifier performs only `os.stat` and a
+  binary read-only open. It cannot create a missing journal or directory,
+  append, truncate, repair a torn tail, rewrite JSON, save hashes, change
+  permissions, delete, create manifests/archives or construct
+  `AuditJournalWriter`. Missing/corrupt journals are reported and left exactly
+  as found.
+* **Checks.** File/UTF-8/JSONL structure and final newline; schema validity;
+  genesis; predecessor links across segment boundaries; canonical digests;
+  global and segment-local sequence continuity from 1; non-repeating
+  `YYYY-MM-NNN` segment ids in journal order; fixed UTC timestamps
+  non-decreasing within each segment; duplicate `audit_id`.
+* **Stable interface.** Exit `0` pass, `1` integrity/corruption, `2` missing/
+  unreadable/changed, `3` usage, `4` internal. Output is a fixed sanitized
+  report (no record bodies, identifiers, OS text or stack traces).
+* **Concurrency.** No lock is taken, so the verifier cannot block or interfere
+  with the writer's non-blocking exclusive append lock. A size/mtime/identity
+  change during the read, or a changed path afterwards, reports
+  `JOURNAL_CHANGED` and never PASS. This is change detection, not a
+  transactional snapshot or cross-process coordination.
+* **Deferred.** Manifest/archive verification, rotation, retention, repair,
+  machine-readable output and an audit read API remain P5.5.7+.

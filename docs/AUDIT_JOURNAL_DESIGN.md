@@ -6,9 +6,10 @@ verification primitives) is implemented in `src/audit_schema.py` and awaits
 independent review; the owner-approved `YYYY-MM-NNN` segment-identity correction
 is applied (§16). P5.5.3 (the durable, verified, poisoning writer) is
 implemented in `src/audit_writer.py` (§17), P5.5.4 (the audit service layer) in
-`src/audit_service.py` (§18) and P5.5.5 (route integration and restricted mode)
-in `src/api_audit.py`/`src/api.py` (§19); all await review. There is still no
-manifest, archive, rotation or verifier CLI.**
+`src/audit_service.py` (§18), P5.5.5 (route integration and restricted mode) in
+`src/api_audit.py`/`src/api.py` (§19) and P5.5.6 (the read-only verifier CLI) in
+`tools/audit_verify.py` (§11); all await review. There is still no manifest,
+archive or rotation.**
 This document supersedes the first P5.5.1 design summary (which lived only in
 the review report), resolves the independent engineering review findings and
 records the owner's decisions (§14) plus the P5.5.2 implementation notes (§15).
@@ -451,35 +452,69 @@ business operation failed.
 
 ---
 
-## 11. Verification CLI (`tools/audit_verify.py`)
+## 11. Verification CLI (`tools/audit_verify.py`) — P5.5.6 implemented
 
-Read-only. Never writes, repairs, rotates, rewrites or locks for writing.
+**Status: implemented and awaiting independent review (38 tests).** Scope is the
+active journal only; manifest, archive, rotation, retention and repair remain
+P5.5.7. This section supersedes the earlier broader CLI sketch: P5.5.7 will add
+manifest/archive checks and their own distinct exit codes rather than reusing
+the codes below (the earlier "exit 4" references in §9.4 are superseded).
+
+Read-only: the only filesystem operations are `os.stat` and one binary
+read-only open. The tool never creates a missing journal or directory, appends,
+truncates, repairs a torn tail, rewrites JSON, recomputes or saves hashes,
+changes permissions, deletes, creates a manifest or archive, or constructs
+`AuditJournalWriter`. A missing journal is reported and exits non-zero.
+
+Usage:
 
 ```
-python tools/audit_verify.py [--journal PATH] [--archive-dir PATH]
-                             [--manifest PATH] [--json] [--max-errors N]
+python -m tools.audit_verify [--journal PATH]
+python tools/audit_verify.py [--journal PATH]
 ```
 
-Checks: UTF-8 and JSON syntax per line; supported `schema_version`; required and
-unknown fields; nullability and vocabulary rules; metadata allowlist and size
-bounds; global and segment sequence continuity; genesis; previous-hash links
-including segment boundaries; recomputed `record_hash`; torn or malformed
-records; manifest schema, chain and entry uniqueness; segment/manifest agreement
-and cross-segment links; coverage mode (full-chain, segment/manifest continuity,
-anchor-only).
+Default: `PROJECT_ROOT/data/audit/audit.jsonl`, derived from the tool's own
+location (independent of the working directory); no `.env`, credential,
+database or biometric access.
 
-Exit codes: `0` verified (with the coverage mode printed); `2` integrity failure
-(hash, sequence, link, schema, torn tail); `3` invalid arguments; `4`
-archive/manifest inconsistency (missing/unexpected segment, count or anchor
-mismatch, torn manifest).
+Checks: the path exists and is a regular readable file; UTF-8 and JSON syntax
+per line; no empty lines; a non-empty journal ends with a newline (torn tail);
+full `AuditEvent` schema; genesis and every predecessor link; every canonical
+SHA-256 digest through the schema's constant-time verifier; global sequence
+from 1 and contiguous; segment-local sequence from 1 and contiguous; a segment
+id never repeats; `YYYY-MM-NNN` identity; timestamps in the fixed UTC form and
+non-decreasing within each segment (event month is never compared to the
+allocation month and segment labels are never sorted); duplicate `audit_id`.
+Timestamps and duplicate ids are checked by the CLI after `verify_chain`, which
+owns links, sequences and digests.
 
-Output: coverage summary, record/segment counts, first failure position and
-reason; `--json` for machine consumption. It reports identifiers needed to
-locate a failure and never dumps record bodies, metadata values, paths beyond
-the configured journal root, or any user data beyond a `target_id` when that id
-is the failing record's key.
+Exit codes (stable):
 
----
+| Code | Meaning |
+|---|---|
+| 0 | PASS — the active journal verified |
+| 1 | FAIL — integrity, corruption or schema failure |
+| 2 | FAIL — missing, not a regular file, unreadable, or changed during verification |
+| 3 | usage error (invalid command line arguments) |
+| 4 | unexpected internal error (verification incomplete) |
+
+Output: PASS report (journal path, record count, first/last global sequence,
+segment count and first/last ids in journal order, first/last timestamp, final
+record hash). An empty journal is reported as a valid empty chain with no
+invented record or segment. FAIL report: stable category, line when available,
+one fixed sanitized explanation, and the next step "stop audited writes and
+investigate using the approved operator procedure". Output never contains
+record bodies, metadata values, identifiers from records, usernames, tokens,
+cookies, biometric data, raw OS exception text or stack traces.
+
+Concurrency: no lock is taken, so the verifier cannot block or interfere with
+the writer's non-blocking exclusive append lock. It reads through one handle
+and compares size, mtime and file identity before and after the read, then
+re-stats the path after closing; a detected change reports `JOURNAL_CHANGED`,
+exit 2, and never PASS. This detects appends and replacements during the run
+but is not a transactional snapshot and does not coordinate multiple processes;
+run it while audited writes are stopped when a stable snapshot is required
+(P5.5.7's operator procedure owns that quiescence).
 
 ## 12. Test matrix (planned)
 
@@ -498,7 +533,7 @@ is the failing record's key.
 | Propagation | actor/role, request ID, correlation IDs, `source` | exact values; nulls only where allowed |
 | Exclusion | password/hash/token/cookie/DSN/embedding/body in any field | rejected or absent; sweep finds nothing |
 | Rotation/retention | seal/rename/manifest/next-active, missing segment with retention entry, offsite disposition | chain continuity preserved; coverage reported honestly; exit 4 on inconsistency |
-| CLI | healthy, tampered, torn, unsupported version, bad args, `--json` | exit 0/2/2/2/3/0; no file modification |
+| CLI | healthy, empty, tampered, torn, unreadable, changed during read, bad args | exit 0/0/1/1/2/2/3; no file modification or creation |
 
 All tests use temporary directories, injected clocks and monkeypatched I/O; no
 PostgreSQL and no biometric data are required.
@@ -514,7 +549,7 @@ PostgreSQL and no biometric data are required.
 | **P5.5.3** | Durable writer: initialization, full verification before first write, process + OS lock, append/flush/fsync, poisoning, typed errors, restricted-mode signal; **no rotation** — **implemented, awaiting review**: `src/audit_writer.py` | P5.5.2 | Rotation, manifest writes, HTTP wiring | Concurrency, poisoning, verification-before-write, crash/torn tests (57 tests) | Writer never appends to an unverified journal; ambiguous failures poison; rotation absent |
 | **P5.5.4** | `AuditService`: actor/request-ID binding, action/reason API, intent/result helpers, best-effort wrapper, safe logging — **implemented, awaiting review**: `src/audit_service.py` | P5.5.3 | Route behavior changes | Unit tests for actor/request propagation, intent/result pairing, logging redaction (40 tests) | Service can emit every event type; no secret in any output |
 | **P5.5.5** | Route integration: mandatory intent→mutate→result for the four mutations, best-effort login/logout/403, `AUDIT_UNAVAILABLE`/`AUDIT_RESULT_UNCERTAIN` handlers, startup restricted mode — **implemented, awaiting review**: `src/api_audit.py`, `src/api.py`, `src/api_login.py`, `src/api_logout.py`, `src/authz.py` | P5.5.4 | User admin, frontend, new endpoints | Endpoint tests for applied/not-applied/unknown, fail-closed, best-effort (40 tests) | No unaudited success possible; existing auth/authz behavior unchanged |
-| **P5.5.6** | Read-only verifier CLI with coverage modes and exit codes | P5.5.3 | Rotation, deletion | CLI tests: tamper matrix, coverage reporting, bytes unchanged | Exit 0/2/3/4 correct; never writes |
+| **P5.5.6** | Read-only active-journal verifier CLI — **implemented, awaiting review**: `tools/audit_verify.py` | P5.5.3 | Rotation, deletion, manifest/archive verification | CLI tests: tamper matrix, journal bytes unchanged, no creation (38 tests) | Exit 0/1/2/3/4 correct; never writes |
 | **P5.5.7** | Rotation, manifest, archives, retention documentation, operator runbook; monthly cadence | P5.5.6 | Automatic deletion/schedule | Four crash-stage tests, manifest continuity, immutability, retention entries | Rotation preserves chain; crash states detected; no silent mutation of history |
 | **P5.5.8** | Security regression, fault injection, exclusion sweep, docs and acceptance | P5.5.1–P5.5.7 | P5.6 work | Full matrix + soak + review | All criteria met; owner acceptance |
 
@@ -630,7 +665,7 @@ segment ids (no reopening), and the recomputed digest. It returns a
 `record_hash`, segment ids). An empty input is valid and returns the zero
 summary — an empty journal is a legitimate state, not an error.
 
-The two keyword parameters are the P5.5.6/P5.5.7 extension seam for anchor
+The two keyword parameters are the P5.5.7 extension seam for anchor
 verification; their defaults describe a full chain from genesis. Nothing is
 written, repaired or mutated: mappings are parsed into new immutable values.
 
@@ -766,8 +801,8 @@ rule and allocation derivation changing.
 * **Order proof** is therefore: hash linkage (cryptographic), global sequence
   (numeric), manifest seal order and anchors (P5.5.7). A verifier note may report
   the allocation months for human context, but never as a pass/fail condition.
-* The future manifest cross-check (P5.5.6/P5.5.7) becomes the authority for seal
-  order and for continuity across archived/missing segments; the event chain
+* The future manifest cross-check (P5.5.7) becomes the authority for seal order
+  and for continuity across archived/missing segments; the event chain
   must not depend on how labels sort.
 
 ### 16.5 Timestamp-to-segment policy

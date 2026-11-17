@@ -5,10 +5,11 @@ accepted (committed in `b0583df`; no live PostgreSQL run). The P5.5.1 audit
 journal design is approved; P5.5.2 (schema, canonical JSON, SHA-256 hashing and
 chain verification) and P5.5.3 (durable, verified, poisoning journal writer) are
 implemented and awaiting review, P5.5.4 (the policy-checking audit service) is
-implemented in `src/audit_service.py`, and P5.5.5 (route integration and
-restricted mode) is implemented in `src/api_audit.py`/`src/api.py`; all await
-review. P5.5.6 and later — verifier CLI, rotation — are not started. Phase 5 is
-not complete.**
+implemented in `src/audit_service.py`, P5.5.5 (route integration and restricted
+mode) in `src/api_audit.py`/`src/api.py`, and P5.5.6 (the read-only active-
+journal verifier CLI) in `tools/audit_verify.py`; all await review. P5.5.7 and
+later — manifest, archive and rotation — are not started. Phase 5 is not
+complete.**
 
 Phase 5 adds operator accounts, sessions and role-based access to the
 attendance system. It is delivered as small, separately reviewable steps. This
@@ -42,7 +43,7 @@ relational table), and does not introduce biometric storage of any kind.
 | P5.2 | Identity data model and persistence: `V002__security.sql`, user/session models and repositories, offline tests | Completed (offline) |
 | P5.3 | Authentication primitives: Argon2id hashing, opaque session tokens, session lifecycle | Completed (offline) |
 | P5.4 | Authentication API: session service integration, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10, §8) | Completed offline through P5.4.10 and accepted (committed in `b0583df`) |
-| P5.5 | Audit journal and security-event auditing (§9, `docs/AUDIT_JOURNAL_DESIGN.md`) | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer, P5.5.4 service and P5.5.5 route integration **implemented, awaiting review**; P5.5.6+ not started |
+| P5.5 | Audit journal and security-event auditing (§9, `docs/AUDIT_JOURNAL_DESIGN.md`) | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer, P5.5.4 service and P5.5.5 route integration **implemented, awaiting review**; P5.5.6 verifier CLI **implemented, awaiting review**; P5.5.7+ not started |
 | P5.6 | User administration and secure first-Admin provisioning (§10) | Not started |
 | P5.7 | Frontend authentication and session integration (§10) | Not started |
 | P5.8 | Role-aware UI and frontend security hardening (§10) | Not started |
@@ -261,9 +262,10 @@ service layer (context binding, matrix enforcement, intent/result helpers,
 best-effort wrapper), and **P5.5.5** integrates that service into the FastAPI
 application (`src/api_audit.py`, `src/api.py`, `src/api_login.py`,
 `src/api_logout.py`, `src/authz.py`) with fail-closed mutations, best-effort
-security events and restricted mode. The next implementation milestone is
-**P5.5.6** — the read-only verifier CLI. No manifest, archive or rotation
-exists.
+security events and restricted mode, and **P5.5.6** adds the read-only
+active-journal verifier CLI (`tools/audit_verify.py`). The next implementation
+milestone is **P5.5.7** — manifest, archive and operator-controlled rotation.
+No manifest, archive or rotation exists.
 
 ## 8. P5.4 authentication API — sub-milestone status
 
@@ -424,9 +426,9 @@ P5.5.1 (design) is approved; P5.5.2 (schema and hash-chain primitives,
 `src/audit_schema.py`, 172 tests), P5.5.3 (durable verified writer,
 `src/audit_writer.py`, 66 tests), P5.5.4 (policy-checked service,
 `src/audit_service.py`, 39 tests) and P5.5.5 (route integration and restricted
-mode, 40 tests) are implemented and awaiting review. P5.5.6 and later are not
-started: there is still **no** manifest, archive, rotation or verifier CLI, and
-no audit read API. This section summarises the approved design; the
+mode, 40 tests) and P5.5.6 (read-only verifier CLI, 38 tests) are implemented
+and awaiting review. P5.5.7 and later are not started: there is still **no**
+manifest, archive, rotation or audit read API. This section summarises the approved design; the
 authoritative record is **`docs/AUDIT_JOURNAL_DESIGN.md`** (P5.5.1 design plus
 §15 P5.5.2, §17 P5.5.3, §18 P5.5.4 and §19 P5.5.5 implementation notes), which
 governs whenever the summary and the design record differ.
@@ -616,7 +618,7 @@ The authoritative per-milestone scope, exclusions and exit criteria are in
 | P5.5.3 | Durable append-only writer: full verification before first write, process + OS lock, fsync, poisoning, typed errors; **no rotation** — **implemented, awaiting review**: `src/audit_writer.py` | P5.5.2 | Rotation, manifest writes, routes | Never appends to unverified journal; ambiguous failures poison — done (66 tests) |
 | P5.5.4 | Audit service, actor/request context, intent/result helpers, best-effort wrapper, safe logging — **implemented, awaiting review**: `src/audit_service.py` | P5.5.3 | Route changes | Actor/request-ID propagation; no secret in output — done (40 tests) |
 | P5.5.5 | Mandatory mutation and best-effort event integration, `AUDIT_UNAVAILABLE`/`AUDIT_RESULT_UNCERTAIN`, restricted mode — **implemented, awaiting review**: `src/api_audit.py`, `src/api.py`, `src/api_login.py`, `src/api_logout.py`, `src/authz.py` | P5.5.4 | User admin, frontend, new endpoints | No unaudited success; auth/authz behaviour unchanged — done (40 tests) |
-| P5.5.6 | Read-only verification CLI with coverage modes and exit codes 0/2/3/4 | P5.5.3 | Repair, rotation | Tamper matrix green; journal bytes unchanged |
+| P5.5.6 | Read-only active-journal verifier CLI, exit codes 0/1/2/3/4 — **implemented, awaiting review**: `tools/audit_verify.py` | P5.5.3 | Repair, rotation, manifest/archive | Tamper matrix green; journal bytes unchanged; nothing created — done (38 tests) |
 | P5.5.7 | Retention, archive and operator-controlled monthly rotation; manifest; crash recovery; runbook | P5.5.6 | Automatic deletion or schedule | Rotation preserves chain; crash states detected, never silent |
 | P5.5.8 | Security regression, fault injection, exclusion sweep, docs and acceptance | P5.5.1–P5.5.7 | P5.6 work | Full matrix + review; owner acceptance |
 

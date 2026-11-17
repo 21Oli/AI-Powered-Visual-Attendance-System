@@ -11,7 +11,7 @@ Updated after every verified step — never ahead of implementation.
 | P5.2 | Identity data model and persistence | Completed (offline) |
 | P5.3 | Authentication primitives | Completed (offline) |
 | P5.4 | Authentication API: session service, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10) | Completed offline through P5.4.10 and accepted (committed through `b0583df`) |
-| P5.5 | Audit journal and security-event auditing | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer, P5.5.4 service and P5.5.5 route integration **implemented, awaiting review**; P5.5.6–P5.5.8 not started |
+| P5.5 | Audit journal and security-event auditing | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer, P5.5.4 service and P5.5.5 route integration **implemented, awaiting review** (P5.5.5 committed in `4dcb154` before this step); P5.5.6 verifier CLI **implemented, awaiting review**; P5.5.7–P5.5.8 not started |
 | P5.6 | User administration and secure first-Admin provisioning | Not started |
 | P5.7 | Frontend authentication and session integration | Not started |
 | P5.8 | Role-aware UI and frontend security hardening | Not started |
@@ -25,6 +25,71 @@ sequence, and the scope formerly grouped as "P5.4.10+" is split into P5.5
 (audit), P5.6 (user administration), P5.7 (frontend authentication), P5.8
 (role-aware UI/hardening) and P5.9 (final review). The Step records below are
 preserved unchanged.
+
+## Step 68 — Phase 5 P5.5.6: read-only audit journal verifier CLI (2026-11-17)
+
+**New operator tool only. No manifest, archive, rotation, retention deletion,
+journal repair, audit read API, database, camera, biometric, deployment or
+frontend work; no Git operation by the assistant.**
+
+* **Baseline**: branch `main`, HEAD
+  `4dcb154a67e12a0eee06af26e1766e75a1629e41` (P5.5.5 committed; clean tree).
+* **Deliverable** — `tools/audit_verify.py`: a standalone read-only verifier for
+  the active journal, runnable as `python -m tools.audit_verify` or
+  `python tools/audit_verify.py`, with optional `--journal PATH`. The default is
+  `PROJECT_ROOT/data/audit/audit.jsonl` derived from the tool's own location, so
+  it is independent of the working directory and reads no `.env`, credential or
+  database setting.
+* **Checks** — regular readable file; UTF-8, JSON syntax, no empty lines and a
+  final newline; full `AuditEvent` schema; genesis and predecessor links; every
+  canonical digest through `verify_chain`/`verify_record_hash` (the schema's
+  constant-time comparison); global and segment-local sequences from 1 and
+  contiguous; no repeated segment id; `YYYY-MM-NNN` identity; fixed UTC
+  timestamps non-decreasing within each segment; duplicate `audit_id`. Segment
+  labels are never sorted and event months are never compared with allocation
+  months.
+* **Read-only guarantee** — only `os.stat` and a binary read-only open; no
+  directory or journal creation, append, truncation, repair, rewrite, hash save,
+  permission change, deletion, manifest/archive creation or
+  `AuditJournalWriter` construction. Byte and metadata comparisons in the tests
+  prove valid and corrupt journals are unchanged and a missing journal stays
+  absent.
+* **Exit codes** — `0` pass; `1` integrity/corruption/schema; `2` missing, not a
+  regular file, unreadable or changed during verification; `3` usage error;
+  `4` unexpected internal error. Failures print one stable category, the line
+  when available, a fixed sanitized explanation and the stop-writes next step;
+  they never print records, identifiers, OS text or stack traces.
+* **Concurrency** — no lock is taken (it must not interfere with the writer's
+  non-blocking exclusive append lock). Size, mtime and file identity are
+  compared before/after the read and the path is re-statted after close; a
+  change reports `JOURNAL_CHANGED` (exit 2) and never PASS. This is change
+  detection, not transactional snapshot consistency or multi-process
+  coordination.
+* **Docs** — design §11 rewritten to the implemented P5.5.6 interface (the
+  earlier broader CLI sketch and its `2`-means-integrity codes are superseded;
+  P5.5.7 will add manifest/archive checks and distinct codes), §13 row, plan
+  header/§2/§7/§9/§9.6, this status file, `ARCHITECTURE.md` D31 and
+  `CHANGELOG.md`.
+
+**Verified**
+
+* `tests/test_audit_verify.py`: 38 passed, 0 failed, 0 skipped.
+* Complete audit suite (`test_audit_schema`, `test_audit_writer`,
+  `test_audit_service`, `test_api_audit`, `test_audit_verify`): 355 passed.
+* Full backend suite: 3446 passed, 32 skipped, exit 0.
+* `git diff --check`: clean.
+
+**Not verified / deferred**
+
+* No manifest, archive, rotation, retention, repair, `--json` output, audit read
+  API or HTTP endpoint (P5.5.7 scope); no live PostgreSQL, camera, biometrics,
+  deployment or production run.
+* The read-only lock decision relies on the writer's documented non-blocking
+  lock model; on a filesystem where the writer appends between the final stat
+  and process exit, the verification is still a best-effort read of a
+  quiescent-at-read journal, never a snapshot guarantee.
+* Changes are unstaged and uncommitted; P5.5.6 is not accepted and P5.5.7 was
+  not started.
 
 ## Step 67 — Phase 5 P5.5.5: audit route integration and restricted mode (2026-11-16)
 
@@ -886,7 +951,7 @@ RBAC, audit, frontend, schema or P5.3 change; no Git operation.**
 **Verified**
 
 * `tests/test_request_context.py` + `tests/test_api.py` → **44 passed**.
-* Full backend suite → **2635 passed, 32 skipped**, exit 0.
+* Full backend suite → **2638 passed, 32 skipped**, exit 0.
 * `git diff --check` clean; only the P5.4.3 files plus the carried P5.4.2 work
   appear in `git status`.
 
@@ -937,7 +1002,7 @@ CSRF code, migration, dependency or frontend change; no Git operation.**
 
 **Verified**
 
-* `tests/test_config.py` → **135 passed** (75 new cases from 20 new test
+* `tests/test_config.py` → **138 passed** (75 new cases from 20 new test
   functions).
 * Full backend suite → **2581 passed, 32 skipped**, exit 0.
 * `git diff --check` clean; only `src/config.py`, `tests/test_config.py` and
@@ -2964,7 +3029,7 @@ committed.**
 to persistence or to this CLI; no journal schema, store behavior,
 recovery API, threshold, or `src/` file changed; the P2-2 four-state
 outcome contract is unchanged; stdlib only (no new dependencies).
-Focused CLI suite 36 passed, full suite 965 passed (929 prior + 36
+Focused CLI suite 38 passed, full suite 965 passed (929 prior + 36
 new), `git diff --check` clean (exit 0 each, captured under
 `pipefail`); no camera opened, no real biometric/enrollment/attendance
 data accessed; nothing staged or committed.**
@@ -4541,7 +4606,7 @@ is **not** an attendance event — recording arrives in Step 13.
 | # | Step | Status | Notes |
 |---|------|--------|-------|
 | 01 | Project structure & environment | ✅ Complete | Verified 2026-09-23 — 17/17 tests pass. Details below. |
-| 02 | Configuration & constants | ✅ Complete | Verified 2026-09-23 — 35/35 tests pass (18 new config tests). Details below. |
+| 02 | Configuration & constants | ✅ Complete | Verified 2026-09-23 — 35/38 tests pass (18 new config tests). Details below. |
 | 03 | Employee data model | ✅ Complete | Verified 2026-10-09 — 71/71 tests pass (36 new employee tests). Details below. |
 | 04 | Live camera service | ✅ Complete | Verified 2026-10-09 — 101/101 tests pass (30 new camera tests). Details below. |
 | 05 | Face detection | ✅ Complete | Verified 2026-10-09 — 143/143 tests pass (42 new face-detection tests); YuNet backend requires an operator-supplied ONNX model. Details below. |
@@ -4638,8 +4703,8 @@ Docker/deployment · Advanced liveness + optimization.
 
 **Verified**
 
-* `python -m pytest` → **35 passed** (17 Step 01 + 18 Step 02)
-* External-cwd run → **35 passed**
+* `python -m pytest` → **38 passed** (17 Step 01 + 18 Step 02)
+* External-cwd run → **38 passed**
 * Foreign-cwd subprocess test proves path resolution is cwd-independent
 * Fresh-interpreter check: importing `src.config` imports no CV/ML stack
   and creates no directories
@@ -4661,7 +4726,7 @@ Docker/deployment · Advanced liveness + optimization.
   with `employee_id`, `full_name`, `is_active`, `created_at` and
   `__post_init__` validation raising `EmployeeValidationError(ValueError)`
   with field-specific messages; explicit `to_dict()` serialization
-* `tests/test_employee.py` — 36 tests mapped to the nine Step 03
+* `tests/test_employee.py` — 38 tests mapped to the nine Step 03
   requirements
 * New `ARCHITECTURE.md` decision **D6**: identity boundaries (no biometric
   fields, no CV/ML/database dependencies in the employee model)
@@ -4689,7 +4754,7 @@ Docker/deployment · Advanced liveness + optimization.
   project root
 * External-cwd run (`cd /tmp`, project venv specified explicitly) →
   **71 passed** — import guarantees hold regardless of working directory
-* Focused employee tests: **36 passed**
+* Focused employee tests: **38 passed**
 * `git diff --check` → no whitespace errors
 * Fresh-interpreter check: importing `src.employee` imports no CV/ML
   stack (no cv2, mediapipe, insightface, onnxruntime, numpy) and performs

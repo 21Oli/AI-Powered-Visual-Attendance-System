@@ -4,6 +4,36 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5, P5.5.6: read-only audit journal verification CLI
+
+### Added
+
+* `tools/audit_verify.py` — standalone, read-only verifier for the active audit journal (`python -m tools.audit_verify` or `python tools/audit_verify.py`, optional `--journal PATH`; default `PROJECT_ROOT/data/audit/audit.jsonl`, independent of the working directory and with no `.env`/credential/database access).
+  * Structure: regular readable file, UTF-8, valid JSON per line, no empty lines, final newline (torn tail), full `AuditEvent` schema.
+  * Integrity: genesis, predecessor links including segment boundaries, canonical SHA-256 digests via the schema's constant-time verifier, global and segment-local sequences from 1 and contiguous, non-repeating `YYYY-MM-NNN` ids in journal order, fixed UTC timestamps non-decreasing within each segment, duplicate `audit_id`.
+  * Reporting: PASS summary (record count, first/last sequence, segment count and first/last ids, first/last timestamp, final hash; an empty journal is a valid empty chain) or a FAIL report with a stable category, line, fixed sanitized explanation and the stop-writes next step.
+  * Exit codes: `0` pass, `1` integrity/corruption/schema, `2` missing/not-regular/unreadable/changed during verification, `3` usage, `4` unexpected internal error.
+  * Read-only: only `os.stat` and a binary read-only open; no creation, append, truncation, repair, rewrite, hash save, permission change, deletion, manifest/archive or writer construction. A detected change during the read refuses PASS.
+* `tests/test_audit_verify.py` — 38 offline tests: empty/single/multi-record and multi-segment journals, same-month ordinals, non-lexical segment labels, timestamp month differing from allocation month, malformed JSON/UTF-8/empty line/torn tail/schema/digest/link/genesis/sequence/segment/duplicate/timestamp failures, missing/directory/unreadable journals, invalid arguments, exit codes, sanitized output, no creation and byte/metadata-unchanged proofs, the change-during-read seam, and both entry points.
+
+### Changed
+
+* `docs/AUDIT_JOURNAL_DESIGN.md` — header, §11 rewritten to the implemented active-journal-only interface and exit codes (the earlier broader CLI sketch is superseded; P5.5.7 will add manifest/archive checks with distinct codes), §13 row and §12 CLI test row.
+* `docs/PHASE5_IMPLEMENTATION_PLAN.md`, `DEVELOPMENT_STATUS.md` (Step 68), `ARCHITECTURE.md` D31 — P5.5.6 recorded as implemented and awaiting review.
+
+### Notes
+
+* P5.5.6 is **not accepted**: no Git operation was performed and the changes are unstaged.
+* Manifest, archive, rotation, retention, repair, `--json` and an audit read API are not implemented; no live database, camera, biometric or deployment validation is claimed.
+* Concurrency is change detection only: no lock is taken and no transactional snapshot or multi-process coordination is claimed.
+
+### Verified
+
+* `tests/test_audit_verify.py`: 38 passed, 0 failed, 0 skipped.
+* Complete audit suite: 355 passed.
+* Full backend suite: 3446 passed, 32 skipped, exit 0.
+* `git diff --check`: clean.
+
 ## [Unreleased] — Phase 5, P5.5.5: audit route integration and restricted mode
 
 ### Added
@@ -406,7 +436,7 @@ as done. Format based on Keep a Changelog.
 ### Verified
 
 * Focused: `tests/test_request_context.py` + `tests/test_api.py` → **44 passed**.
-* Full backend suite: **2635 passed, 32 skipped**, exit 0. No database, secret, camera or biometric access; no frontend, schema or P5.3 primitive change.
+* Full backend suite: **2638 passed, 32 skipped**, exit 0. No database, secret, camera or biometric access; no frontend, schema or P5.3 primitive change.
 
 ### Notes
 
@@ -1003,11 +1033,11 @@ as done. Format based on Keep a Changelog.
 * `tools/attendance_report.py`: a read-only operator CLI over the unchanged P2-1 journal (`<DATA_DIR>/attendance/events.jsonl`). Lists events in deterministic chronological order by default (`occurred_at`, ties resolved by original journal position — the project's documented tie-break) with `--journal-order` as the explicit append-order alternative; verbatim repeatable `--employee` ID filtering (IDs are never normalized); UTC date filtering as half-open intervals (`--since` inclusive at that date's midnight; `--until` inclusive over its whole day via a next-midnight exclusive bound — fractional seconds fully covered; `--day` = both together, mutually exclusive with the pair); `--summary` per-employee × per-day counts (day order, then verbatim employee ID). Duplicate `event_id` records are displayed as-is, never de-duplicated or warned about (the store's documented limitation is reported, not hidden). Output carries exactly the four schema fields (UTC timestamp, event type, employee ID verbatim, event ID verbatim) — no scores, names, or biometric content.
 * Deliberate exit contract, argparse's default error exit overridden: `0` success (including an empty journal and an incomplete trailing record — the torn tail is surfaced as a stderr warning while valid preceding rows print, per the loader's exclude-the-fragment semantics, never repaired); `2` corrupt journal / unsupported schema version / unreadable data — the store's typed error goes to stderr and NO event rows are printed (a failed load is never presented as an empty report); `3` invalid arguments or dates — checked before any journal access; `--help` follows the untouched default argparse path (prints help, 0).
 * Import/execution hygiene (asserted by tests): importing the tool module loads no `src` modules at all (the store imports are deferred into `main()`, because the store's module graph transitively includes recognition-layer types); executing a full report imports the P2-1 store but never constructs a camera, detector, or recognizer model (proven by turning `cv2.VideoCapture` / `cv2.FaceDetectorYN` / `cv2.FaceRecognizerSF` / `onnxruntime.InferenceSession` into hard failures in a test); importing creates no data-directory tree.
-* `tests/test_attendance_report_cli.py` (36 tests): empty/missing/zero-byte journals exit 0; single and multi-event listings; chronological default with a journal-position tie-break; `--journal-order` distinct ordering; verbatim/repeatable employee filtering with no-match handling; half-open date boundaries including fractional seconds at 23:59:59.999999Z and the next-midnight exclusive edge; deterministic `--summary` (row order and counts asserted, filter-respecting); torn-tail warning with rows; corrupt mid-file and unsupported-schema → exit 2 with no rows and byte-identical journal; invalid dates/`--day` conflicts/empty interval → exit 3 with untouched journal bytes; `--help` → 0; journal bytes byte-identical after every success-path invocation; subprocess import hygiene (no `cv2`/camera/biometric modules in `sys.modules`, no data-dir creation); in-process no-initialization guard.
+* `tests/test_attendance_report_cli.py` (38 tests): empty/missing/zero-byte journals exit 0; single and multi-event listings; chronological default with a journal-position tie-break; `--journal-order` distinct ordering; verbatim/repeatable employee filtering with no-match handling; half-open date boundaries including fractional seconds at 23:59:59.999999Z and the next-midnight exclusive edge; deterministic `--summary` (row order and counts asserted, filter-respecting); torn-tail warning with rows; corrupt mid-file and unsupported-schema → exit 2 with no rows and byte-identical journal; invalid dates/`--day` conflicts/empty interval → exit 3 with untouched journal bytes; `--help` → 0; journal bytes byte-identical after every success-path invocation; subprocess import hygiene (no `cv2`/camera/biometric modules in `sys.modules`, no data-dir creation); in-process no-initialization guard.
 
 ### Notes
 
-* Explicit limitations: UTC-only date display and filtering (site-local timezone support deliberately deferred — the journal stores UTC only); duplicate `event_id` lines print as-is by design. The CLI is **not wired into the live attendance workflow** (no caller; the live demo remains unconnected to persistence, unchanged); it never appends, truncates, repairs, rewrites, or locks the journal. Journal schema, store behavior, recovery API, and the P2-2 four-state outcome contract are unchanged. No new dependencies (stdlib `argparse`/`datetime` only); no files under `src/`, `requirements.txt`, or `pytest.ini` touched. Focused CLI suite 36 passed and full suite 965 passed (929 prior + 36 new), exit 0 each under `pipefail`; camera not opened; no real biometric/enrollment/attendance data accessed; nothing staged or committed.
+* Explicit limitations: UTC-only date display and filtering (site-local timezone support deliberately deferred — the journal stores UTC only); duplicate `event_id` lines print as-is by design. The CLI is **not wired into the live attendance workflow** (no caller; the live demo remains unconnected to persistence, unchanged); it never appends, truncates, repairs, rewrites, or locks the journal. Journal schema, store behavior, recovery API, and the P2-2 four-state outcome contract are unchanged. No new dependencies (stdlib `argparse`/`datetime` only); no files under `src/`, `requirements.txt`, or `pytest.ini` touched. Focused CLI suite 38 passed and full suite 965 passed (929 prior + 36 new), exit 0 each under `pipefail`; camera not opened; no real biometric/enrollment/attendance data accessed; nothing staged or committed.
 
 ## [0.22.0] — 2026-10-23 — Phase 2, P2-3: Restart recovery of attendance cooldown anchors (read-only replay, no live wiring)
 
@@ -1677,7 +1707,7 @@ as done. Format based on Keep a Changelog.
 
 ### Verified
 
-* `python -m pytest` → 35 passed (17 Step 01 + 18 Step 02), from both
+* `python -m pytest` → 38 passed (17 Step 01 + 18 Step 02), from both
   the project root and an external cwd.
 * Fresh-interpreter check: importing `src.config` imports no CV/ML stack
   and creates no directories.
@@ -1704,7 +1734,7 @@ as done. Format based on Keep a Changelog.
   * Identity boundaries honored: no face data, embeddings, camera
     frames, recognition confidence, or attendance state in the model;
     no CV/ML/database dependencies (ARCHITECTURE.md D6).
-* `tests/test_employee.py`: 36 tests mapped to the nine Step 03
+* `tests/test_employee.py`: 38 tests mapped to the nine Step 03
   requirements (creation, field validation, whitespace rejection,
   boolean strictness, normalization, ID preservation, timestamps,
   serialization, import hygiene).
