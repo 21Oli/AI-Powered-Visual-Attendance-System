@@ -11,7 +11,7 @@ Updated after every verified step — never ahead of implementation.
 | P5.2 | Identity data model and persistence | Completed (offline) |
 | P5.3 | Authentication primitives | Completed (offline) |
 | P5.4 | Authentication API: session service, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10) | Completed offline through P5.4.10 and accepted (committed through `b0583df`) |
-| P5.5 | Audit journal and security-event auditing | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer, P5.5.4 service and P5.5.5 route integration **implemented, awaiting review** (P5.5.5 committed in `4dcb154`); P5.5.6 verifier CLI **accepted (committed `87c73e5`)**; P5.5.7.2 manifest schema/integrity **accepted (committed `c2871f3`)**; P5.5.7 manifest persistence, rotation, recovery, retention and manifest-aware verification **implemented, awaiting review**; P5.5.8 not started |
+| P5.5 | Audit journal and security-event auditing | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer, P5.5.4 service and P5.5.5 route integration **implemented, awaiting review** (P5.5.5 committed in `4dcb154`); P5.5.6 verifier CLI **accepted (committed `87c73e5`)**; P5.5.7.2 manifest schema/integrity **accepted (committed `c2871f3`)**; P5.5.7 manifest persistence, rotation, recovery, retention and manifest-aware verification **implemented, awaiting review**; P5.5.8 in progress: P5.5.8.2, P5.5.8.3 and P5.5.8.4 **implemented, awaiting review** (68 + 5 tests); P5.5.8.5 documentation reconciliation done; P5.5.8.6 evidence pack prepared — all awaiting independent review |
 | P5.6 | User administration and secure first-Admin provisioning | Not started |
 | P5.7 | Frontend authentication and session integration | Not started |
 | P5.8 | Role-aware UI and frontend security hardening | Not started |
@@ -25,6 +25,154 @@ sequence, and the scope formerly grouped as "P5.4.10+" is split into P5.5
 (audit), P5.6 (user administration), P5.7 (frontend authentication), P5.8
 (role-aware UI/hardening) and P5.9 (final review). The Step records below are
 preserved unchanged.
+
+## Step 72 — Phase 5 P5.5.8.3: audit failure and recovery regression (2026-11-18)
+
+**Test-only milestone: end-to-end regression for audit failure, interrupted
+operations, restricted mode and the documented recovery commands. No production
+module, schema, manifest field, hash rule, event vocabulary, CLI contract, exit
+code, endpoint, database, frontend or deployment change; no Git operation by the
+assistant.**
+
+* **Baseline**: branch `main`, HEAD
+  `012ae31aff2a9d28e1808659bb92866e5fe4a986`, with the uncommitted P5.5.8.2 work
+  present. P5.5.7, P5.5.8.2 and P5.5.8.3 all remain unaudited, awaiting owner
+  review.
+* **New file**: `tests/test_audit_failure_regression.py` - 18 tests (one
+  parametrized over the four mandatory mutations), reusing
+  `tests/audit_support.py` and the API fakes from `tests/test_api_audit.py`
+  rather than duplicating them.
+* **API intent/result failures** - a failed intent write answers 503
+  `AUDIT_UNAVAILABLE` for all four mutations and no mutating business call is
+  made; the poisoned writer refuses every later request with the journal bytes
+  unchanged; a failed result write answers 503 `AUDIT_RESULT_UNCERTAIN` after
+  exactly one business call, leaves the durable intent (plus at most the
+  unconfirmed result) and the journal still PASSes verification; a short write is
+  reported by the verifier as an integrity failure and the damaged bytes are
+  never repaired.
+* **Restricted mode** - a corrupt manifest and a missing-active-after-seal
+  history both enter restricted mode with an unchanged installation, the exact
+  503 envelope, and no path, filename, traceback or OS text in the response.
+* **Recovery-required states** - an unregistered archive and a missing active
+  journal are reported with exit 5 and block the API; the documented
+  `--register-existing` and `--create-active` commands resolve them, after which
+  the verifier passes and the API accepts a new create. No read recovers
+  automatically.
+* **Crash cycles** - `SEAL_NOT_RECORDED` and `ACTIVE_NOT_CREATED` are reproduced
+  through the CLI; the archive bytes are unchanged across crash, report and
+  recovery; a second report changes nothing; the append after recovery continues
+  the sealed hash with `sequence` 3 and segment `2026-11-002`. A tampered archive
+  is refused by `--register-existing` (exit 1) with the manifest still absent; a
+  torn manifest tail is reported (exit 5) and neither recovery command changes a
+  byte.
+* **Rotation invariants** - a second rotation never rewrites the first archive,
+  the manifest stays prefix-stable, `manifest_sequence` is 1 then 2 and the
+  second entry chains to the first; recovery never creates a second archive; the
+  API never rotates, registers or repairs anything.
+* **Observation (no change)** - because `flush` precedes `fsync`, an unconfirmed
+  result may already be on disk when `AUDIT_RESULT_UNCERTAIN` is returned. That
+  is the documented uncertain state, not a defect; the tests assert the
+  certificate (503 plus uncertain semantics plus a verifiable journal) rather
+  than an exact line count.
+* **Verification** - `tests/test_audit_failure_regression.py` 18 passed; writer,
+  service and API-audit suites 155 passed; manifest, archive and rotation suites
+  282 passed + 1 skipped; verifier and rotation CLI suites 84 passed; complete
+  audit suite (14 files) 775 passed + 1 skipped; full backend suite 3866 passed,
+  33 skipped, exit 0 (292.95 s); `git diff --check` clean; `data/audit/` was not
+  created, read or accessed. These totals supersede those recorded in Step 71.
+
+
+
+  P5.5.8.4 NOTE (added after Step 72 closed): the audit suite now includes
+
+  tests/test_audit_concurrency_soak.py (5 tests, 47.12 s) and runs 780 passed /
+
+  1 skipped in 90.23 s; the full backend suite (250-file invocation) ran 3871
+
+  passed / 33 skipped in 365.59 s, exit 0. These are recorded under P5.5.8.4 /
+
+  P5.5.8.6 rather than rewritten into this Step 72 record.
+
+
+
+  P5.5.8.4 NOTE (added after Step 72 closed, since 8.4 did not exist when Step 72
+
+  was written): the audit suite now includes tests/test_audit_concurrency_soak.py
+
+  (5 tests, 47.12 s) and runs 780 passed / 1 skipped in 90.23 s; the full backend
+
+  suite (250-file invocation) ran 3871 passed / 33 skipped in 365.59 s, exit 0.
+
+  These are recorded under P5.5.8.4 / P5.5.8.6, not here, to avoid rewriting the
+
+  Step 72 record.
+* Changes are unstaged and uncommitted; P5.5.8.3 is not accepted, P5.5.8 is not
+  accepted, and P5.5.8.4-P5.5.8.6 are done but not yet accepted (see Steps 73-75).
+
+## Step 71 — Phase 5 P5.5.8.2: audit exclusion sweep harness (2026-11-18)
+
+**Test-only milestone: a deterministic, offline exclusion-sweep harness. No
+production module, schema, manifest field, event vocabulary, CLI contract, exit
+code, endpoint, database, frontend or deployment change; no Git operation by the
+assistant.**
+
+* **Baseline**: branch `main`, HEAD
+  `012ae31aff2a9d28e1808659bb92866e5fe4a986` (the owner committed the P5.5.7
+  implementation; the working tree was clean before this step). P5.5.7 remains
+  **awaiting independent review** and is not marked accepted here, and
+  P5.5.2-P5.5.5 keep their recorded "awaiting review" status.
+* **New file**: `tests/test_audit_exclusion.py` - 50 tests: a test-only scanner
+  plus seven artefact sweeps (positive control, active journal, manifest,
+  sealed archive, CLI stdout/stderr, logs and sanitized exceptions, complete
+  set).
+* **Scanner** - explicit artifacts only (`Artifact(name, bytes|str)`); no
+  recursive walk, no environment read, no `.env`, no PostgreSQL, no
+  `data/audit/`; failure messages name the artifact and the category and never
+  the matched value.
+* **Escape-aware matching (review fix)** - encoding is not a hiding place. A
+  raw byte search is defeated by JSON escaping: an embedded quote or backslash
+  is written backslash-escaped, and under `ensure_ascii=True` every non-ASCII
+  character becomes a hexadecimal escape. Each artifact is therefore searched
+  raw, as decoded text, and after one and two unescape passes, in UTF-8 and
+  UTF-16-LE. Two synthetic sentinels (non-ASCII password, quoted token) exist
+  only to prove this, and regression tests assert that the raw byte form is
+  genuinely absent while the escaped artifact is still detected. The key-level
+  pass reuses the same bounded depth (text, one unescape, two unescapes), so a
+  single- or double-escaped key name, including one in a torn line, is still
+  caught.
+* **Sentinels** - 17 synthetic `sentinel-*` values: plaintext password, password
+  hash, session token, token digest, cookie name, cookie value, DSN, API key,
+  secret environment value, face embedding, image path, camera frame, raw
+  request body, personal data and login username. No real secret, credential or
+  biometric value is used.
+* **Coverage** - representative records written through the real
+  `AuditService`/`AuditJournalWriter` (intent, applied result, failed result,
+  login success, login failure, logout, denial); manifest entries produced by
+  the real `RotationOperations` plus a retention decision through the manifest
+  store; a sealed archive produced by real rotation; `tools.audit_verify` and
+  `tools.audit_rotate` stdout and stderr captured separately; `caplog` warnings
+  and sanitized exception messages. The accepted 16-field manifest schema and
+  the 19-field event schema are restated independently, so an extra field fails
+  the suite.
+* **Policies re-asserted** - login failure keeps `target_type="account"` with
+  `target_id=null` and retains no username; denial metadata is the route
+  template, method and status only; `AuditUnavailableError` and
+  `AuditResultUncertainError` keep their fixed sentences and expose only the
+  writer exception class name; best-effort warnings carry action, request ID and
+  error class only.
+* **Observation (not changed)** - `RotationOperations.rotate()` renames into
+  `archive/` without creating that directory, so a first rotation on an
+  installation that has none fails with `RotationUnavailableError`. The harness
+  builds its synthetic layouts the way `install()` does (archive directory
+  present). Recorded for owner review as a P5.5.7 usability question; no
+  production behaviour was modified.
+* **Verification** - `tests/test_audit_exclusion.py` 50 passed; focused service,
+  API-audit, manifest-store, archive, rotation, rotation-CLI and
+  verify-history suites 244 passed + 1 skipped; complete audit suite 757 passed
+  + 1 skipped; full backend suite 3848 passed, 33 skipped, exit 0 (284.39 s);
+  `git diff --check` clean; `data/audit/` was not created, read or accessed.
+* Changes are unstaged and uncommitted; P5.5.8.2 is not accepted, P5.5.7 is not
+  accepted, and P5.5.8.3 has not started.
 
 ## Step 70 — Phase 5 P5.5.7: audit manifest, archive rotation, recovery and historical verification (2026-11-18)
 
@@ -5038,3 +5186,243 @@ Docker/deployment · Advanced liveness + optimization.
 * Physical-camera behavior (real device property negotiation, actual
   frame timing) can only be sanity-checked manually on target hardware;
   the suite is intentionally hardware-independent.
+
+## Step 73 — Phase 5 P5.5.8.4: bounded concurrency and rotation soak (2026-11-18)
+
+
+
+**Test-only milestone: a concurrency-capable reader combined with the concurrency
+
+model already implemented. Bounds: 20 threads × 50 appends (1000 total), 12
+
+rotation cycles, month-boundary clock injection, no sleeps, no timing assertions.
+
+No production code in src/ or tools/ changed; no multi-process / distributed /
+
+network-FS / production-load claim is made — the reader is multi-thread inside one
+
+process only.**
+
+
+
+* **Baseline** - branch `main`, HEAD `012ae31aff2a9d28e1808659bb92866e5fe4a986`, with
+
+  the uncommitted P5.5.8.2 and P5.5.8.3 work present. P5.5.7, P5.5.8.2, P5.5.8.3 all
+
+  remain **awaiting independent review** and are not marked accepted here.
+
+* **New file** - `tests/test_audit_concurrency_soak.py` - 5 tests, with helpers
+
+  `TickClock` (thread-safe wall-clock, single `MONTH_EDGE = 2026-11-30T22:00:00.123456Z`
+
+  with 1-hour steps), `build_service(root, clock, first_id=)`, `append_login`,
+
+  `verify` and `layout_of`. Each writer instance uses a distinct audit-id range via
+
+  `first_id` because audit ids are validated for uniqueness against verified history.
+
+* **Workload 1 — 20 threads, 1000 ordered appends** (`test_twenty_threads_append_one_
+
+  thousand_ordered_records`) - barrier before start, barrier after, equal-traffic
+
+  token queue. Asserts: sequence 1..1000 contiguous, all audit_ids unique (set size =
+
+  1000), all line bytes canonical, every line's prior hash present, `VerifyReport`
+
+  PASS, `link_chain` PASS via `ArchiveReader`, and a follow-up single append produces
+
+  sequence 1001. The writer's `threading.Lock` is what makes the order deterministic
+
+  inside one process.
+
+* **Workload 2 — poisoning does not duplicate** (`test_concurrent_appends_poison_the_
+
+  writer_once_and_never_duplicate`) - monkeypatch the low-level `_fsync_file` to fail
+
+  after 20 calls. Result: 20 successes, then 60 concurrent failures with
+
+  `AuditUnavailableError` whose `writer_error` is first `AuditJournalUnavailableError`
+
+  then `AuditJournalPoisonedError`. After the race the journal has either 20 or 21
+
+  contiguous records (the documented flush-after-fsync ambiguity is allowed, not a
+
+  defect), the verifier PASSes, and bytes on disk are unchanged by any later observer.
+
+  The bug we are defending against — concurrent writers corrupting one another — is
+
+  impossible because the module-level lock serialises them.
+
+* **Workload 3 — 12 rotations across a month boundary** (`test_twelve_rotations_across_
+
+  a_month_boundary`) - 12 sequential rotations with the clock advancing across the
+
+  boundary. Segment ids advance `2026-11-001` .. `2026-11-012`; the manifest `Next
+
+  sequence` advances 1..12; the entry hash chain is intact; each segment's start/stop
+
+  sequences are consistent; each archived segment is byte-identical to its predecessor
+
+  (no overwrite); no active segment remains when the next rotation begins; timestamps
+
+  span both November and December. Final state is `Records verified: 26` (2 preloaded +
+
+  24 sealed) and `Archived segments: 12`. Observed (not a defect): segment labels stay
+
+  `2026-11-NNN` successors even after record timestamps cross into December — by design
+
+  §9.7 these are allocation identifiers, not calendar months.
+
+* **Workload 4 — continuous soak after a documented recovery** (`test_rotation_soak_
+
+  continues_after_a_documented_recovery`) - inject a single `ManifestStoreError` mid-
+
+  cycle; the rotation CLI exits 5 (`EXIT_RECOVERY_REQUIRED`); the documented recovery
+
+  (`--register-existing` + `--create-active`) restores a correct manifest; the verifier
+
+  passes; the next rotation seals segment `2026-11-002` at `Next sequence` 4.
+
+* **Workload 5 — rotation refuses while a writer is active** (`test_rotation_refuses_
+
+  while_a_thread_is_appending`) - a worker thread holds the journal byte-0 lock for one
+
+  append while a rotation is started; the rotation raises `RotationContendedError`
+
+  (in-process, when the lock is visible) or `RotationUnavailableError` (OS-level byte-0
+
+  lock, Windows `msvcrt`, mandatory locks). Either way the history is untouched. The
+
+  exclusive-access and non-automatic-recovery claims from §5.x are supplied by this test,
+
+  not added to the bug list.
+
+* **Model documented for the first time in `docs/AUDIT_JOURNAL_DESIGN.md` §9.11**: module-
+
+  level `threading.Lock` serialises every append in one process; the OS byte-0 lock
+
+  (Windows `msvcrt`, POSIX `flock`) refuses a second writer process and poisons it;
+
+  rotation is exclusive (`LayoutLock` + journal lease). The soak verifies this **in one
+
+  process on a local filesystem only** — no multi-process, distributed, network-filesystem
+
+  or production-load guarantee.
+
+* **Verification** - `tests/test_audit_concurrency_soak.py` 5 passed; the 15-file audit
+
+  suite (this file added) runs 780 passed / 1 skipped in 90.23 s, exit 0; the full
+
+  backend suite (250-file invocation) runs 3871 passed / 33 skipped in 365.59 s, exit
+
+  0. `git diff --check` clean; `data/audit/` was not created, read or accessed.
+
+* **Runtime note** - the 1000-append test runs ~42.51 s; the 12-cycle soak ~2.67 s.
+
+* Changes are unstaged and uncommitted; P5.5.8.4 is **implemented, awaiting independent
+
+  review**; P5.5.8 is not accepted; P5.5.8.5 and P5.5.8.6 follow below.
+
+
+
+## Step 74 — Phase 5 P5.5.8.5: documentation reconciliation (2026-11-18)
+
+
+
+**Documentation-only milestone: reconcile exit-code, concurrency-model and milestone-
+
+table wording with the implemented behaviour. No production behaviour changed.**
+
+
+
+* **Baseline** - as for Step 73.
+
+* **Source of truth for exit codes** - `tools/audit_verify.py` and `tools/audit_rotate.py`
+
+  define the stable exit codes once: `EXIT_OK = 0`, `EXIT_INTEGRITY_FAILURE = 1`,
+
+  `EXIT_UNAVAILABLE = 2`, `EXIT_USAGE_ERROR = 3`, `EXIT_INTERNAL_ERROR = 4`,
+
+  `EXIT_RECOVERY_REQUIRED = 5`. `docs/AUDIT_JOURNAL_DESIGN.md` §11 already states this
+
+  exact table and was left untouched; it is the documented reference.
+
+* **Defect found and fixed (documentation, not runtime)** - three stale exit-code
+
+  statements were corrected: (1) `PHASE5_IMPLEMENTATION_PLAN.md` §9.2 verifier bullet
+
+  now lists `0` PASS, `1` integrity failure, `2` unavailable/changed during verification,
+
+  `3` usage error, `4` internal error, `5` recovery required; (2) `AUDIT_JOURNAL_DESIGN.md`
+
+  §12 CLI row now lists `0/0/1/1/2/2/3/5` and adds the documented recovery state as a
+
+  tested case; (3) `ARCHITECTURE.md` now says 'the stable exit codes 0/1/2/3/4/5 (5 =
+
+  recovery required)'. The S7 + E line that mentions `verify_schema_s8.py` (an unrelated
+
+  tool) was left untouched.
+
+* **Concurrency model documented** - `AUDIT_JOURNAL_DESIGN.md` §9.11 now carries the
+
+  concurrency paragraph established in Step 73, with the explicit boundary that this
+
+  applies to one process on a local filesystem only.
+
+* **Milestone tables made self-consistent** - §13 (design) and §9.7 (plan) both now carry
+
+  explicit rows for P5.5.8.2, P5.5.8.3, P5.5.8.4, P5.5.8.5 and P5.5.8.6.
+
+* **Scope clarified** - P5.5.8 is audit verification / acceptance preparation; P5.5.9 owns
+
+  final Phase 5 acceptance. P5.5.8 does not rehearse acceptance for other subsystems.
+
+* **Verification** - `git diff --check` passes; after the edits §11 still says 0/1/2/3/4/5,
+
+  §12 lists the recovery case, §9.2 bullet matches, `ARCHITECTURE.md` says the stable
+
+  0/1/2/3/4/5. No other stale exit-code statement found.
+
+* Changes are unstaged and uncommitted; P5.5.8.5 is **implemented, awaiting independent
+
+  review**.
+
+
+
+## Step 75 — Phase 5 P5.5.8.6: acceptance evidence pack (2026-11-18)
+
+
+
+**Evidence milestone: prepare the acceptance evidence pack for P5.5.8. Acceptance itself
+
+is the owner's decision and is not rehearsed here.**
+
+
+
+* **New file** - `docs/P5_5_AUDIT_ACCEPTANCE_EVIDENCE.md` (sections A-J).
+
+* **Numbers used are the recorded ones only** - audit suite (15 files): 780 passed / 1
+
+  skipped in 90.23 s, exit 0; full backend suite (250-file invocation): 3871 passed /
+
+  33 skipped in 365.59 s, exit 0 (recorded from `.freebuff/p558_456_full.log`); P5.5.8.4
+
+  soak: 5 tests, 47.12 s (the 1000-append test ~42.51 s; the 12-cycle soak ~2.67 s);
+
+  P5.5.8.2 50 tests; P5.5.8.3 18 tests; the P5.5.8.1/audit-regression coverage inside the
+
+  15-file audit suite is 346 tests.
+
+* **Honest status wording** - the pack states PASS / NOT TESTED / PENDING OWNER ACCEPTANCE
+
+  selectively; it does not change any status line to 'accepted'. The acceptance decision
+
+  itself belongs to P5.9 (and the owner), and is referenced, not taken.
+
+* **Verification** - `git diff --check` passes after writing the pack; the file exists and
+
+  is non-empty.
+
+* Changes are unstaged and uncommitted; P5.5.8.6 is **evidence prepared, awaiting
+
+  independent review and owner acceptance**.

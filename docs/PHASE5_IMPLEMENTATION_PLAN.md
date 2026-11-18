@@ -516,8 +516,9 @@ introducing an audit **table**.
   vocabulary, global and segment sequence continuity, previous-hash links across
   segment boundaries, and manifest/segment agreement, and it reports whether
   coverage is full-chain, segment/manifest continuity, or anchor-only. Exit
-  codes: `0` verified, `2` integrity failure, `3` invalid arguments, `4`
-  archive/manifest inconsistency.
+  codes: `0` PASS, `1` integrity failure, `2` unavailable or changed during
+  verification, `3` usage error, `4` internal error, `5` recovery required —
+  the same stable mapping as `docs/AUDIT_JOURNAL_DESIGN.md` §11.
 
 ### 9.3 Approved failure policy
 
@@ -627,6 +628,21 @@ introducing an audit **table**.
 The authoritative per-milestone scope, exclusions and exit criteria are in
 `docs/AUDIT_JOURNAL_DESIGN.md` §13; the sequence is fixed.
 
+| # | Scope | Status |
+| --- | --- | --- |
+| P5.5.8.2 | Exclusion sweep harness (escape-aware value and key scanner) — **implemented, awaiting review**: `tests/test_audit_exclusion.py` | 50 tests; positive control — done |
+| P5.5.8.3 | Failure and recovery regression (runtime poisoning, restricted mode, crash → recover cycles) — **implemented, awaiting review**: `tests/test_audit_failure_regression.py` | 18 tests — done |
+| P5.5.8.4 | Bounded concurrency and rotation soak — **implemented, awaiting review**: `tests/test_audit_concurrency_soak.py` | 5 tests: 20 × 50 appends, 12 rotations, month boundary — done |
+| P5.5.8.5 | Documentation reconciliation — **implemented, awaiting review** | `git diff --check` — done |
+| P5.5.8.6 | Acceptance evidence pack — **prepared, awaiting review**: `docs/P5_5_AUDIT_ACCEPTANCE_EVIDENCE.md` | Evidence complete; acceptance is the owner's decision |
+
+P5.5.8.5 corrects the stale exit-code statements that predated P5.5.7 (the
+architecture doc still said "exit codes 0/2/3/4" before this reconciliation;
+the implemented contract is 0/1/2/3/4/5 with 5 = recovery required), adds the
+concurrency-model boundary to design §9.11, and keeps the scope statements
+accurate (P5.5.8 is audit verification and acceptance preparation; P5.5.9 is final
+Phase 5 acceptance).
+
 | # | Scope | Prerequisites | Exclusions | Verification / exit |
 | --- | --- | --- | --- | --- |
 | P5.5.1 | Design and decision record (§9; `docs/AUDIT_JOURNAL_DESIGN.md`) | P5.4.10 accepted | Code | Owner review; no open contradiction |
@@ -634,10 +650,15 @@ The authoritative per-milestone scope, exclusions and exit criteria are in
 | P5.5.3 | Durable append-only writer: full verification before first write, process + OS lock, fsync, poisoning, typed errors; **no rotation** — **implemented, awaiting review**: `src/audit_writer.py` | P5.5.2 | Rotation, manifest writes, routes | Never appends to unverified journal; ambiguous failures poison — done (66 tests) |
 | P5.5.4 | Audit service, actor/request context, intent/result helpers, best-effort wrapper, safe logging — **implemented, awaiting review**: `src/audit_service.py` | P5.5.3 | Route changes | Actor/request-ID propagation; no secret in output — done (40 tests) |
 | P5.5.5 | Mandatory mutation and best-effort event integration, `AUDIT_UNAVAILABLE`/`AUDIT_RESULT_UNCERTAIN`, restricted mode — **implemented, awaiting review**: `src/api_audit.py`, `src/api.py`, `src/api_login.py`, `src/api_logout.py`, `src/authz.py` | P5.5.4 | User admin, frontend, new endpoints | No unaudited success; auth/authz behaviour unchanged — done (40 tests) |
-| P5.5.6 | Read-only active-journal verifier CLI, exit codes 0/1/2/3/4 — **accepted (committed `87c73e5`)**: `tools/audit_verify.py` | P5.5.3 | Repair, rotation, manifest/archive | Tamper matrix green; journal bytes unchanged; nothing created — done (38 tests) |
+| P5.5.6 | Read-only active-journal verifier CLI, exit codes 0/1/2/3/4 (meanings unchanged) — **accepted (committed `87c73e5`)**: `tools/audit_verify.py` | P5.5.3 | Repair, rotation, manifest/archive | Tamper matrix green; journal bytes unchanged; nothing created — done (38 tests) |
 | P5.5.7.2 | Manifest schema and integrity foundation: exact §9.2 field set, canonical hashing, manifest chain and continuity, archive-reference validation — **accepted**: `src/audit_manifest.py` | P5.5.6 accepted | Manifest file I/O, sealing, archives, rotation, recovery, CLI | Schema/hash/chain/path matrix; no filesystem access — done (163 tests) |
 | P5.5.7 | Retention, archive and operator-controlled rotation; manifest persistence; crash recovery; manifest-aware writer and verifier; runbook — **implemented, awaiting review**: `src/audit_manifest_store.py`, `src/audit_archive.py`, `src/audit_rotation.py`, `src/audit_layout.py`, `src/audit_locking.py`, `tools/audit_rotate.py`, `tools/audit_verify.py` | P5.5.6, P5.5.7.2 | Automatic deletion, automatic rotation, automatic repair | Rotation preserves chain; every crash state requires an explicit command; anchor-only coverage reported honestly — done (190 new tests) |
 | P5.5.8 | Security regression, fault injection, exclusion sweep, docs and acceptance | P5.5.1–P5.5.7 | P5.6 work | Full matrix + review; owner acceptance |
+| P5.5.8.2 | Exclusion sweep harness (escape-aware value and key scanner) — **implemented, awaiting review**: `tests/test_audit_exclusion.py` | P5.5.8.1 | Production code | 50 tests; positive control — done |
+| P5.5.8.3 | Failure and recovery regression (runtime poisoning, restricted mode, crash → recover cycles) — **implemented, awaiting review**: `tests/test_audit_failure_regression.py` | P5.5.8.1 | Production code | 18 tests — done |
+| P5.5.8.4 | Bounded concurrency and rotation soak — **implemented, awaiting review**: `tests/test_audit_concurrency_soak.py` | P5.5.8.3 | Multi-process claims | 5 tests — done |
+| P5.5.8.5 | Documentation reconciliation — **implemented, awaiting review** | P5.5.8.4 | Production behaviour | `git diff --check` — done |
+| P5.5.8.6 | Acceptance evidence pack — **prepared, awaiting review**: `docs/P5_5_AUDIT_ACCEPTANCE_EVIDENCE.md` | P5.5.8.5 | Acceptance itself | Owner review |
 
 ## 10. P5.6–P5.9 — subsequent milestones (not started)
 

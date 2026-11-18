@@ -1217,7 +1217,8 @@ the journal schema version (still 1), or the decision authority.
   exclusively locked, implemented in P5.5.7. A sealed segment is immutable; the
   separate append-only manifest (own SHA-256 chain) records sealed segments and
   retention dispositions, and the read-only `tools/audit_verify.py` reports
-  full-chain, segment/manifest or anchor-only coverage with exit codes 0/2/3/4.
+  full-chain, segment/manifest or anchor-only coverage with the stable exit codes
+  0/1/2/3/4/5 (5 = recovery required).
   Manifest anchors never claim that removed records were verified.
 * **Implemented so far (P5.5.2).** `src/audit_schema.py` provides the pure
   schema/hash/chain primitives: the closed vocabularies, the validated immutable
