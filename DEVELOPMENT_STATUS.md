@@ -11,7 +11,7 @@ Updated after every verified step — never ahead of implementation.
 | P5.2 | Identity data model and persistence | Completed (offline) |
 | P5.3 | Authentication primitives | Completed (offline) |
 | P5.4 | Authentication API: session service, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10) | Completed offline through P5.4.10 and accepted (committed through `b0583df`) |
-| P5.5 | Audit journal and security-event auditing | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer, P5.5.4 service and P5.5.5 route integration **implemented, awaiting review** (P5.5.5 committed in `4dcb154`); P5.5.6 verifier CLI **accepted (committed `87c73e5`)**; P5.5.7.2 manifest schema/integrity **implemented, awaiting review**; P5.5.7.3–P5.5.8 not started |
+| P5.5 | Audit journal and security-event auditing | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer, P5.5.4 service and P5.5.5 route integration **implemented, awaiting review** (P5.5.5 committed in `4dcb154`); P5.5.6 verifier CLI **accepted (committed `87c73e5`)**; P5.5.7.2 manifest schema/integrity **accepted (committed `c2871f3`)**; P5.5.7 manifest persistence, rotation, recovery, retention and manifest-aware verification **implemented, awaiting review**; P5.5.8 not started |
 | P5.6 | User administration and secure first-Admin provisioning | Not started |
 | P5.7 | Frontend authentication and session integration | Not started |
 | P5.8 | Role-aware UI and frontend security hardening | Not started |
@@ -25,6 +25,87 @@ sequence, and the scope formerly grouped as "P5.4.10+" is split into P5.5
 (audit), P5.6 (user administration), P5.7 (frontend authentication), P5.8
 (role-aware UI/hardening) and P5.9 (final review). The Step records below are
 preserved unchanged.
+
+## Step 70 — Phase 5 P5.5.7: audit manifest, archive rotation, recovery and historical verification (2026-11-18)
+
+**The complete P5.5.7 milestone: durable manifest persistence, immutable
+archives, operator-controlled rotation, explicit crash recovery, retention
+recording, manifest-aware writer startup and the three-mode read-only verifier.
+No automatic rotation, scheduler, background job, automatic deletion, automatic
+repair or chain reset; no database table, endpoint, frontend or deployment
+change; no Git operation by the assistant.**
+
+* **Baseline**: branch `main`, HEAD
+  `c2871f38a78575230a56a040a81d0bd5074ea407` (the owner committed the accepted
+  P5.5.7.2 work; the working tree was clean before this step). The accepted
+  `src/audit_manifest.py` and `tests/test_audit_manifest.py` were preserved
+  unchanged — its sixteen-field schema, canonical hashing, validation and chain
+  verification were only *used*, never altered.
+* **Layout and allocation** — `src/audit_layout.py`: `AuditLayout` (journal,
+  manifest, archive directory and `.rotation.lock` inside the journal's parent
+  directory) plus `allocation_month`, `successor_segment_id` and
+  `next_segment_id`. A new installation opens the current UTC month at `001`;
+  every later segment is the deterministic successor of the last sealed segment
+  (same allocation month, next ordinal), which is the only derivation that keeps
+  a restart, an interrupted rotation and a re-run in agreement. Ordinal `999` is
+  refused explicitly.
+* **Archive and history verification** — `src/audit_archive.py`: strict JSONL
+  parsing, full `AuditEvent` schema, every digest, predecessor links, global and
+  segment-local sequences, segment identity, record count, bounds, both hash
+  anchors, duplicate `audit_id` across segments, unregistered archives, stray
+  archive entries and the active journal's boundary against sealed history.
+  Symlinks are refused; each read is checked for size/mtime/identity changes.
+  Anchor-only coverage is available only for a missing archive that carries a
+  valid `archived_offsite` decision.
+* **Manifest persistence** — `src/audit_manifest_store.py`: append-only
+  canonical JSONL, re-read and re-verify the whole chain before every append,
+  validate the candidate entry with the chain in memory before writing, then
+  write/flush/`os.fsync`/confirm size and identity and only then advance state.
+  Failures poison the instance; nothing is truncated, rewritten or repaired.
+* **Rotation and recovery** — `src/audit_rotation.py` and
+  `tools/audit_rotate.py`: `--status`, `--dry-run`, rotation,
+  `--register-existing [PATH]`, `--create-active` and `--retention SEGMENT_ID`;
+  exit codes `0`/`1`/`2`/`3`/`4`/`5` (5 = recovery required). Rotation verifies
+  everything first, `os.replace`s the journal, attempts a directory fsync,
+  appends exactly one seal, marks the archive read-only where supported, and
+  creates the next empty active journal exclusively. `--dry-run` changes
+  nothing, not even the lock file.
+* **Writer integration** — `src/audit_writer.py` now verifies the manifest, every
+  declared archive and the active boundary before becoming ready, refuses
+  missing/unregistered/broken history, and derives the pending segment id from
+  the last sealed segment for an empty post-rotation journal. Append durability,
+  poisoning, path-identity checks and the existing lock behaviour are unchanged.
+  The deliberately temporary P5.5.3 refusal of *any* manifest/archive layout is
+  replaced by real verification (one P5.5.3 test was rewritten to assert the new,
+  stronger behaviour; no guarantee was weakened).
+* **Verifier** — `tools/audit_verify.py` gained manifest and archive coverage
+  without changing its command line, its existing categories or its meanings for
+  exit codes 0-4; exit code 5 is new and distinct. It reports manifest entries,
+  archived segments, active identity, total available records, first/last
+  sequence and segment, timestamps, final record and manifest hashes, the applied
+  coverage modes, anchor-only segments and segments not content-verified. It
+  still takes no lock and creates nothing.
+* **Tests** — `tests/test_audit_archive.py` (52 + 1 platform skip),
+  `tests/test_audit_manifest_store.py` (23), `tests/test_audit_rotation.py` (44),
+  `tests/test_audit_rotate_cli.py` (21), `tests/test_audit_verify_history.py`
+  (25), `tests/test_audit_layout.py` (14) and `tests/test_audit_writer.py` (+10,
+  now 76) — 190 new tests, all offline, all in `tmp_path`, with fault injection
+  at the filesystem and manifest-append boundaries.
+* **Docs** — design header, §9.3-§9.11 (implemented rotation, crash table with
+  exit 5, three coverage modes, manifest durability, allocation, retention,
+  CLI/exit codes, recovery runbook, filesystem limitations), §11 (CLI scope and
+  exit codes), §12 and §13; plan header, §2, §7 and §9; `ARCHITECTURE.md` D32
+  and new D33; `CHANGELOG.md`.
+* **Limitations** — no live PostgreSQL, camera, biometric, deployment or
+  production validation; locks are advisory; directory `fsync` is unavailable on
+  Windows; read-only marking is not immutability; the verifier is not a
+  filesystem snapshot. A torn manifest tail has no automated resolution.
+* **Verification** — focused suites, the complete audit suite (707 passed, 1
+  skipped for the platform-only symlink case), the full backend suite
+  (3798 passed, 33 skipped, exit 0 (284.01 s)) and `git diff --check` (clean); `data/audit/` was not created,
+  read or modified.
+* Changes are unstaged and uncommitted; P5.5.7 is not accepted and P5.5.8 has
+  not started.
 
 ## Step 69 — Phase 5 P5.5.7.2: audit manifest schema and integrity foundation (2026-11-17)
 

@@ -56,10 +56,18 @@ Storage contract
   holds no ``manifest.jsonl`` and no non-empty ``archive/``: historical evidence
   without an active journal means the history cannot be verified, so the writer
   refuses (``AuditJournalIntegrityError``) rather than creating a new genesis.
-* **Existing journal** → mandatory verification. If a manifest or archived
-  segments are present, verification of them is P5.5.7 scope, so P5.5.3 refuses
-  to become ready rather than claim a verification it did not perform
-  (documented limitation; fail-closed).
+* **Existing journal** → mandatory verification. When a manifest and/or
+  archived segments are present (P5.5.7), the writer verifies the manifest
+  chain, every declared archive and the active journal's boundary against the
+  sealed history before becoming ``ready``. It refuses readiness for a missing
+  declared archive, an unregistered archive, a duplicate segment, manifest
+  corruption, a broken link or an ambiguous recovery state, and it never
+  creates or repairs historical data.
+* **Rotation continuity.** After a rotation the journal is an empty file with no
+  identifier of its own: the next segment id is derived deterministically from
+  the last sealed segment (same allocation month, ordinal + 1) and the first
+  append links to the manifest's final record hash and continues the global
+  sequence. Repeated restarts derive the same id.
 * An **empty existing journal** is a valid empty chain (schema §15.3): the next
   append is the genesis record (sequence 1, ``previous_hash`` all zeroes) in a
   newly allocated ``YYYY-MM-NNN`` segment. A file truncated to zero is
@@ -90,10 +98,10 @@ The journal path is available as a property for trusted server-side
 diagnostics, and poisoning records one sanitized ``ERROR`` log line with the
 journal's file name and a reason class.
 
-Deferred (not implemented here): manifest creation/verification, segment
-sealing, archives, rotation, retention deletion, the read-only verifier CLI,
-intent/result or best-effort event integration, HTTP error mapping, and
-restricted-mode wiring. Those are P5.5.4–P5.5.7.
+Deferred (not implemented here): segment sealing, archives, rotation,
+retention recording and the read-only verifier CLI live in
+:mod:`src.audit_rotation`, :mod:`src.audit_archive` and :mod:`tools.audit_rotate`
+(P5.5.7). The writer never rotates and never writes a manifest entry.
 """
 
 from __future__ import annotations
@@ -107,6 +115,14 @@ from enum import Enum
 from pathlib import Path
 from typing import IO, Final, Mapping
 
+from src.audit_archive import (
+    LayoutProblem,
+    RecoveryProblem,
+    UnavailableProblem,
+    verify_active_journal,
+    verify_history,
+)
+from src.audit_layout import AuditLayout, SegmentAllocationError, next_segment_id
 from src.audit_schema import (
     AuditAction,
     AuditError,
@@ -417,7 +433,9 @@ class AuditJournalWriter:
                 # cannot be verified, so a new genesis journal is forbidden.
                 raise AuditJournalIntegrityError(
                     "audit history exists but the active journal is missing; "
-                    "refusing to initialize a new chain"
+                    "refusing to initialize a new chain (use "
+                    "tools.audit_rotate --create-active after verifying the "
+                    "installation)"
                 )
             try:
                 with _open_append_handle(path):
@@ -437,12 +455,77 @@ class AuditJournalWriter:
         if path.is_dir():
             raise AuditJournalUnavailableError(_MSG_UNAVAILABLE)
         if manifest.exists() or archive_has_files:
-            # P5.5.3 cannot verify sealed segments/manifest (P5.5.7 scope).
-            raise AuditJournalIntegrityError(
-                "sealed audit history is present but cannot be verified in "
-                "this milestone; refusing to append"
-            )
+            self._adopt_sealed_history()
+            return
         self._load_and_verify()
+
+    def _adopt_sealed_history(self) -> None:
+        """Verify sealed history and the active journal's boundary against it.
+
+        Raises a typed, sanitized error and leaves no ``ready`` writer when any
+        part of the history is missing, unregistered, duplicated or broken.
+        Nothing is created or repaired here.
+        """
+        layout = AuditLayout.from_journal(self._journal_path)
+        try:
+            history = verify_history(layout)
+            active = verify_active_journal(layout, history)
+        except LayoutProblem as problem:
+            raise self._map_layout_problem(problem) from None
+
+        try:
+            stat_result = os.stat(self._journal_path)
+        except OSError:
+            raise AuditJournalUnavailableError(_MSG_UNAVAILABLE) from None
+        self._expected_size = stat_result.st_size
+        self._expected_identity = self._identity(stat_result)
+        self._audit_ids = set(history.audit_ids)
+        if active.summary is not None:
+            self._audit_ids |= set(active.summary.audit_ids)
+
+        if active.events:
+            last = active.events[-1]
+            self._last_sequence = last.sequence
+            self._last_hash = last.record_hash
+            self._active_segment_id = last.segment_id
+            self._segment_sequence = last.segment_sequence
+            self._last_timestamp = last.timestamp
+            self._pending_segment_id = None
+            return
+
+        # Empty active journal after a rotation: derive the pending segment id
+        # from persisted state so every restart agrees.
+        seal = history.last_seal
+        if seal is not None:
+            self._last_sequence = seal.last_global_sequence
+            self._last_hash = seal.last_record_hash
+        try:
+            self._pending_segment_id = next_segment_id(
+                history.sealed_segment_ids, moment=self._clock()
+            )
+        except SegmentAllocationError:
+            raise AuditJournalIntegrityError(
+                "no further segment identifier can be allocated; an operator "
+                "decision is required",
+            ) from None
+        self._active_segment_id = None
+        self._segment_sequence = 0
+        self._last_timestamp = None
+
+    @staticmethod
+    def _map_layout_problem(problem: LayoutProblem) -> AuditJournalError:
+        if isinstance(problem, UnavailableProblem):
+            return AuditJournalUnavailableError(_MSG_UNAVAILABLE)
+        if isinstance(problem, RecoveryProblem):
+            return AuditJournalIntegrityError(
+                "sealed audit history requires explicit operator recovery "
+                f"({problem.category}); refusing to append",
+                sequence=None,
+            )
+        return AuditJournalIntegrityError(
+            "sealed audit history verification failed "
+            f"({problem.category}); refusing to append"
+        )
 
     def _prepare_empty(self) -> None:
         """State for an empty (new or zero-length) journal."""

@@ -4,6 +4,42 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5, P5.5.7: audit manifest, archive rotation, recovery and historical verification
+
+### Added
+
+* `src/audit_layout.py` — `AuditLayout` (journal, manifest, `archive/` and `.rotation.lock` derived from the journal's directory), plus deterministic `YYYY-MM-NNN` allocation: current UTC month at `001` for a new installation, otherwise the successor of the last sealed segment, with ordinal `999` refused.
+* `src/audit_archive.py` — file-level verification of the manifest and every declared archive: strict JSONL (torn tail, empty line, UTF-8, malformed JSON), full event schema, every digest, predecessor links, global and segment-local sequences, segment identity, record count, bounds, both hash anchors, duplicate audit ids across segments, unregistered/stray archives, symlink refusal, change-during-read detection, and the active journal's boundary against sealed history. Anchor-only coverage is available only for a missing archive with a valid `archived_offsite` decision.
+* `src/audit_manifest_store.py` — the only writer of `manifest.jsonl`: canonical append-only JSONL, whole-chain re-verification before every append, in-memory candidate validation before any byte is written, `flush`/`os.fsync`/size-and-identity confirmation, state advanced only after durable confirmation, permanent poisoning on ambiguity, and no truncation, rewrite or repair.
+* `src/audit_locking.py` — the advisory `.rotation.lock` layout lock and the writer's byte-0 journal lease, both non-blocking and fail-closed.
+* `src/audit_rotation.py` — operator rotation in the approved §9.3 order, the five documented crash states with explicit recovery, and retention recording (`archived_offsite`, seal anchors repeated exactly, nothing moved or deleted).
+* `tools/audit_rotate.py` — `--status`, `--dry-run`, rotation, `--register-existing [PATH]`, `--create-active`, `--retention SEGMENT_ID`; exit codes `0`/`1`/`2`/`3`/`4`/`5` (5 = recovery required) and sanitized output.
+* Tests — 190 new offline tests across `tests/test_audit_archive.py`, `tests/test_audit_manifest_store.py`, `tests/test_audit_rotation.py`, `tests/test_audit_rotate_cli.py`, `tests/test_audit_verify_history.py`, `tests/test_audit_layout.py` and `tests/test_audit_writer.py`, plus `tests/audit_support.py` for synthetic installations. Fault injection covers partial writes, flush/fsync failures, rename failure, directory-fsync and read-only failure, seal-append failure, active-creation failure, lock contention, file replacement and change-during-read.
+
+### Changed
+
+* `src/audit_writer.py` — verifies the manifest, every declared archive and the active journal boundary before becoming ready; refuses missing, unregistered, duplicated or broken history; derives the pending segment id from the last sealed segment for an empty post-rotation journal. Append durability, poisoning, path-identity checks and locking are unchanged.
+* `tools/audit_verify.py` — manifest-aware verification with unchanged command line and unchanged meanings for exit codes 0-4; new exit code 5 for documented recovery states; PASS output now reports manifest entries, archived segments, active identity, coverage modes, anchor-only segments and segments not content-verified.
+* `docs/AUDIT_JOURNAL_DESIGN.md` — header, §9.3-§9.11 (implemented rotation, crash table, coverage modes, manifest durability, allocation, retention, CLI/exit codes, recovery runbook, limitations), §11, §12 and §13.
+* `docs/PHASE5_IMPLEMENTATION_PLAN.md` — header, §2, §7 and §9.
+* `DEVELOPMENT_STATUS.md` (Step 70 and the P5.5 row), `ARCHITECTURE.md` (D32 accepted; new D33).
+
+### Notes
+
+* P5.5.7 is **implemented and awaiting independent review**; it is not marked accepted and P5.5.8 has not started.
+* Nothing rotates automatically: there is no scheduler, startup hook, request path or background thread. Nothing is deleted, repaired or truncated automatically, and retention recording never moves a file.
+* Archived segments are chained by the manifest and hash links, never by filename or label order.
+* Manifest verification proves the manifest chain and its statements only; archive contents are proven by re-reading them, and anchor-only coverage is reported as such.
+* No database table, endpoint, frontend, deployment or live-data change; no Git operation was performed by the assistant.
+
+### Verified
+
+* Focused suites: `tests/test_audit_archive.py` 52 passed + 1 skipped (symlinks unsupported on this platform), `tests/test_audit_manifest_store.py` 23 passed, `tests/test_audit_rotation.py` 44 passed, `tests/test_audit_rotate_cli.py` 21 passed, `tests/test_audit_verify_history.py` 25 passed, `tests/test_audit_layout.py` 14 passed, `tests/test_audit_writer.py` 76 passed.
+* Complete audit suite: 707 passed, 1 skipped.
+* Full backend suite: 3798 passed, 33 skipped, exit 0 (284.01 s).
+* `git diff --check`: clean.
+* `data/audit/` was not created, read or modified.
+
 ## [Unreleased] — Phase 5, P5.5.7.2: audit manifest schema and integrity foundation
 
 ### Added
@@ -24,7 +60,7 @@ as done. Format based on Keep a Changelog.
 
 ### Notes
 
-* P5.5.7.2 is **not accepted** and P5.5.7 is **not complete**: no manifest file, archive, sealing, rotation, retention disposal, recovery or CLI integration exists.
+* P5.5.7.2 was accepted by the owner and committed in `c2871f3`; the entries above are preserved as written at the time. P5.5.7 supersedes the "no manifest file, archive or rotation" limitation.
 * Manifest verification proves the manifest chain and its statements about segments only — never that an archive or segment exists or matches the declared anchors.
 * No Git operation was performed by the assistant; the changes are unstaged.
 

@@ -8,12 +8,17 @@ is applied (§16). P5.5.3 (the durable, verified, poisoning writer) is
 implemented in `src/audit_writer.py` (§17), P5.5.4 (the audit service layer) in
 `src/audit_service.py` (§18), P5.5.5 (route integration and restricted mode) in
 `src/api_audit.py`/`src/api.py` (§19) and P5.5.6 (the read-only verifier CLI) in
-`tools/audit_verify.py` (§11). **P5.5.6 is accepted by the project owner
-(committed in `87c73e5`); P5.5.2–P5.5.5 await review.** P5.5.7.2 (the manifest
-schema, canonical hashing, manifest-chain verification and archive-reference
-validation) is implemented in `src/audit_manifest.py` and awaits review. There
-is still no manifest file handling, no archive, no rotation, no retention
-disposal and no recovery tool.**
+`tools/audit_verify.py` (§11). **P5.5.6 and P5.5.7.2 are accepted by the project
+owner; P5.5.2–P5.5.5 await review.** P5.5.7.2 (the manifest schema, canonical
+hashing, manifest-chain verification and archive-reference validation) lives in
+`src/audit_manifest.py`. **P5.5.7 is implemented and awaits independent
+review**: durable manifest persistence (`src/audit_manifest_store.py`),
+file-level archive and history verification (`src/audit_archive.py`),
+operator-controlled rotation, crash recovery and retention recording
+(`src/audit_rotation.py`, `tools/audit_rotate.py`), manifest-aware writer startup
+(`src/audit_writer.py`) and the three-mode read-only verifier
+(`tools/audit_verify.py`). Nothing rotates automatically, nothing is deleted
+automatically, and no rotation has been run against a live deployment.**
 This document supersedes the first P5.5.1 design summary (which lived only in
 the review report), resolves the independent engineering review findings and
 records the owner's decisions (§14) plus the P5.5.2 implementation notes (§15).
@@ -404,7 +409,7 @@ invents no segment. All of this is in-memory and pure: P5.5.7.2 reads no file,
 so it proves the manifest's own chain and its statements about segments — never
 that segment or archive bytes exist or match them.
 
-### 9.3 Rotation steps (operator tool, P5.5.7)
+### 9.3 Rotation steps (operator tool — implemented in P5.5.7)
 
 1. Stop the application (or take the exclusive writer lock with the writer
    disabled); verify the full available chain; ensure the active file ends with
@@ -414,43 +419,196 @@ that segment or archive bytes exist or match them.
 3. Append the `segment_sealed` manifest entry with the segment's first/last
    global sequence, record count, `first_previous_hash`, `last_record_hash` and
    fsync; mark the archive file read-only where the OS allows.
-4. Create the new empty active journal under a fresh `YYYY-MM-NNN` id (the next
-   ordinal for its allocation month, `001` when the month has none); its first
-   record links to the sealed segment's `last_record_hash` and continues the
-   global sequence. No `audit.rotate` event is written to the event journal.
+4. Create the new empty active journal under a fresh `YYYY-MM-NNN` id (the
+   deterministic successor of the sealed segment); its first record links to the
+   sealed segment's `last_record_hash` and continues the global sequence. No
+   `audit.rotate` event is written to the event journal.
+
+**Implemented** in `src/audit_rotation.py`, driven only by
+`tools/audit_rotate.py`. Every precondition is checked before anything changes:
+
+* the application is stopped, and the tool additionally takes the writer's own
+  non-blocking byte-0 lock on `audit.jsonl`, refusing on contention. On Windows
+  that lock is mandatory for other handles, so a live writer makes verification
+  fail closed rather than race;
+* the exclusive `data/audit/.rotation.lock` is held, which also serialises
+  manifest appends;
+* the manifest chain and every declared archive verify, and no unregistered
+  archive, stray archive entry or recovery state is present;
+* the active journal verifies against the sealed history, ends with a newline,
+  and contains exactly one non-empty segment that is not already sealed;
+* the destination `archive/audit-<first>-<last>.jsonl` does not exist.
+
+`--dry-run` performs exactly the same verification and prints the plan without
+changing anything — it does not even create the lock file. The real run
+re-verifies under the lock, re-checks that the journal's size, mtime and
+identity still match the plan, `os.replace`s the journal, attempts a directory
+`fsync` (best effort; reported as supported or not), appends exactly one
+`segment_sealed` entry and confirms it durably, marks the archive read-only
+where the OS allows it (reported, never fatal), and creates the next active
+journal empty and exclusively. A failure after the rename reports **recovery
+required** with the command to run and never renames anything back.
 
 ### 9.4 Rotation crash recovery
 
-| Crash point | Saved state | Required behaviour |
+| Crash point | Saved state | Behaviour and operator action |
 |---|---|---|
-| During step 1 | Nothing changed | Re-run rotation; no journal change |
-| After rename, before manifest entry | Archive present, manifest lacks the segment | Verifier exits 4; the tool offers an explicit `--register-existing` that re-verifies the archive's full chain before appending the manifest entry. Never silent; never a second seal |
-| After manifest entry, before new active file | Manifest declares the segment, active file absent | Writer/verifier treat as "segment sealed, active missing": a new active file may be created with a fresh `YYYY-MM-NNN` id, linked to the manifest's `last_record_hash` (defined, non-destructive recovery) |
-| After new active file, before first record | Empty active file | Normal: the id is derived deterministically from the sealed predecessor (same allocation month, ordinal + 1) so restarts agree; first append uses the manifest's last hash as `previous_hash` |
-| Crash mid-manifest append | Torn manifest tail | Verifier exits 4; writer refuses; operator resolves with the verifier — no automatic repair |
+| During step 1 | Nothing changed | Re-run rotation; no journal change. Verifier still passes. |
+| After rename, before manifest entry | Archive present, manifest lacks the segment | The verifier exits **5** (`ARCHIVE_UNREGISTERED`). Run `python -m tools.audit_rotate --register-existing [PATH]`, which re-verifies the archive's schema, digests, sequence continuity, segment identity, bounds and anchors against the existing manifest and the remaining active journal before appending exactly one seal. Never silent, never a second seal. |
+| After manifest entry, before new active file | Manifest declares the segment, active journal absent | The verifier exits **5** (`ACTIVE_SEGMENT_MISSING`) and the writer refuses to start. Run `python -m tools.audit_rotate --create-active`, which verifies the whole history first, then creates an empty active journal and never overwrites one. |
+| After new active file, before first record | Empty active file | Normal. The next segment id is derived from the sealed predecessor (same allocation month, ordinal + 1), so every restart agrees; the first append links to the manifest's final record hash and continues the global sequence. |
+| Crash mid-manifest append | Torn manifest tail | The verifier exits **5** (`MANIFEST_TORN_TAIL`) and the writer refuses. No truncation or reconstruction exists: investigate, then resolve with the verifier's evidence. |
 
 A crash may never produce silent loss, duplicate acceptance of one segment, or a
 chain reset; an inconsistent state is detected and reported, never "fixed".
+Exit code 4 remains "unexpected internal error" and is **not** used for
+recovery states (§11).
 
-### 9.5 Verification coverage (three distinct modes)
+### 9.5 Verification coverage (three distinct modes — implemented in P5.5.7)
 
-1. **Full historical record-chain verification** — every record of every
-   available segment, all digests, sequences and links (including boundaries).
-2. **Segment/manifest continuity** — manifest chain intact, each declared
-   segment present, counts and hash anchors matching the segment contents.
-3. **Anchor continuity only** — when a segment's contents are no longer
-   available after an owner-approved retention disposition: the manifest anchor
-   is verified against its own chain and the surrounding link, and the run is
-   reported as **anchor-only coverage**. This is never described as proof that
-   the removed records were verified.
+1. **Full historical record-chain verification** (`full-record-chain`) — every
+   record of every available segment, all digests, sequences, predecessor links
+   and segment boundaries, including the active journal.
+2. **Segment/manifest continuity** (`segment-manifest-continuity`) — the
+   manifest chain, every declared archive's presence, and each archive's record
+   count, global bounds and both hash anchors matched against the declaration.
+3. **Anchor-only** (`anchor-only`) — a segment whose archive is absent after a
+   valid owner-approved `archived_offsite` retention decision. Its manifest
+   entry, anchors and continuity are verified; its records are **not**
+   content-verified. The report says so explicitly and never calls the run a
+   full historical verification.
 
-P5.5.7.2 implements the in-memory half of mode 2 only: the manifest chain and
-its segment/sequence statements. Modes 1 and 3, and the file-level comparison of
-manifest anchors with segment contents, require the archive/rotation work of
-P5.5.7.3+; no coverage mode is reported by any tool yet.
+The read-only verifier always prints the applied modes, every anchor-only
+segment, and `Segments not content-verified`. A missing archive **without** a
+retention decision is an integrity failure; a missing archive **with** one is
+anchor-only coverage; a restored archive under an offsite decision is
+content-verified again.
 
-The CLI always states which modes applied and which parts of history were not
-covered by content verification.
+### 9.6 Manifest persistence and durability
+
+`src/audit_manifest_store.py` is the only writer of `manifest.jsonl`:
+
+* one canonical entry per line, UTF-8, `\n` terminated, append only;
+* the whole existing manifest is re-read and its chain verified before every
+  append, so an idle process cannot append onto stale state and fork the chain;
+* the candidate entry is validated together with the existing chain **in
+  memory** before a byte is written, so a rejected seal or retention decision
+  never reaches the file;
+* the write is `canonical_json_text(entry) + "\n"`, then `flush`, then
+  `os.fsync`, then a size/identity/path confirmation; the in-memory state
+  advances only afterwards;
+* a failed or ambiguous write poisons the instance for the rest of its life,
+  exactly like the journal writer;
+* there is no truncate, rewrite, repair, normalisation or automatic recovery.
+
+A verified manifest proves its own chain and its statements about segments. It
+never proves that an archive exists or matches; only re-reading the archive
+does (§9.5).
+
+### 9.7 Segment allocation
+
+Segment identifiers are `<UTC allocation month>-<ordinal>` with ordinal
+`001`-`999` (design §16). Implemented in `src/audit_layout.py`:
+
+* a brand-new installation (no sealed segment) opens the current UTC month with
+  ordinal `001`;
+* every later segment is the **successor of the last sealed segment** — same
+  allocation month, next ordinal. An empty active journal stores no identifier
+  of its own, so this derivation from persisted state is the only rule that
+  makes a restart, an interrupted rotation and a re-run agree (§9.4 rows 3-4);
+  the month is an allocation label and is never compared with event timestamps;
+* ordinal `999` raises an explicit error and requires an operator decision; no
+  identifier is ever reused, renamed or wrapped around;
+* ordering is never derived from the label — never lexically sorted.
+
+### 9.8 Retention decisions
+
+Retention is archive-only, at least 365 days, with no automatic deletion, no
+deletion schedule, no background job and no automatic offsite movement. The only
+implemented retention action is the explicit operator record:
+
+```
+python -m tools.audit_rotate --retention <SEGMENT_ID>
+```
+
+It requires an existing seal, refuses a second decision for the same segment,
+re-verifies the archive contents first, and appends a `retention_decision` entry
+with `disposition=archived_offsite`, `segment_file=null` and the seal's exact
+bounds, count and anchors. It never moves, deletes or blesses the removal of a
+file, and a decision never proves that contents were verified after removal.
+
+### 9.9 Operator CLI
+
+```
+python -m tools.audit_rotate --status
+python -m tools.audit_rotate --dry-run
+python -m tools.audit_rotate
+python -m tools.audit_rotate --register-existing [PATH]
+python -m tools.audit_rotate --create-active
+python -m tools.audit_rotate --retention SEGMENT_ID
+```
+
+`--audit-dir PATH` or `--journal PATH` selects the installation (default
+`PROJECT_ROOT/data/audit`). Exit codes: `0` success, `1` integrity failure with
+nothing changed, `2` unavailable or contended, `3` usage error, `4` unexpected
+internal error, `5` recovery required. Output is sanitized: no record bodies,
+identifiers from records, metadata values, credentials, OS error text or stack
+traces.
+
+### 9.10 Recovery runbook
+
+1. **Stop audited writes.** Stop the application (or confirm it is stopped).
+   Do not delete, truncate, rename or recreate any audit file by hand.
+2. **Establish the state.** `python -m tools.audit_verify` — note the exit code
+   and category. `0` needs no recovery; `5` means one of the documented crash
+   states below; `1` is corruption/data loss and must be investigated before
+   anything else; `2` means a file could not be read reliably (permissions, a
+   live writer, or a file changing during the read).
+3. **`ARCHIVE_UNREGISTERED`.** An archive exists without a seal. Confirm the file
+   is the one produced by the interrupted rotation, then run
+   `python -m tools.audit_rotate --register-existing archive/audit-<first>-<last>.jsonl`.
+   The command refuses a torn, tampered, misnamed, non-contiguous, already-sealed
+   or ambiguous archive. Re-run the verifier afterwards.
+4. **`ACTIVE_SEGMENT_MISSING`.** A segment is sealed and the active journal is
+   gone. Run `python -m tools.audit_rotate --create-active`; it verifies the whole
+   history first and refuses to replace any existing file. Re-run the verifier.
+5. **`MANIFEST_TORN_TAIL`.** A manifest append was interrupted. Nothing
+   reconstructs or truncates it. Preserve the file, record its exact size and the
+   verifier output, and decide explicitly whether the incomplete entry is the
+   operation you were performing. There is no automated repair, and this milestone
+   provides none.
+6. **`ARCHIVE_MISSING` / `ARCHIVE_HASH_MISMATCH` / `ARCHIVE_COUNT_MISMATCH`.**
+   Historical data is missing or does not match the manifest. Do not create a new
+   chain and do not register a substitute. Treat it as a data-loss incident; the
+   writer stays restricted until the state verifies.
+7. **Restart.** Start the application only after the verifier exits `0`. The
+   writer re-verifies the manifest, every archive and the active boundary before
+   becoming ready and refuses otherwise.
+8. **Retention.** Record an offsite decision *before* moving media, with the
+   archive still present and verified (`--retention`). Afterwards the verifier
+   reports that segment as anchor-only until the archive is restored.
+
+### 9.11 Filesystem limitations and what is validated
+
+* Locks are **advisory** and non-blocking. They defend against an accidental
+  second process; they do not stop a non-cooperating process or a privileged
+  adversary. Windows byte locks are mandatory for other handles, while POSIX
+  `flock` is advisory — the two platforms therefore do not behave identically.
+* Directory `fsync` is not available on Windows and is attempted best-effort on
+  POSIX; the rotation report states which happened.
+* Read-only marking uses `chmod` and is not an immutability guarantee on either
+  platform (Windows in particular does not prevent deletion or rename).
+* Each file is read whole into memory, as the P5.5.6 verifier already did for the
+  active journal. A very large segment is therefore bounded by available
+  memory; streaming verification is not implemented and is not claimed.
+* The verifier takes no lock and promises no filesystem snapshot: it detects a
+  file changing during its own read and refuses PASS, but it cannot prove
+  cross-file atomicity.
+* Verified offline: schema, hashing, manifest chain, archive contents, rotation
+  ordering, every crash stage above, retention/anchor-only reporting and the
+  CLI. **Not** validated: a live PostgreSQL deployment, a running FastAPI
+  process rotating under real load, camera/biometric data, network filesystems,
+  distributed writers, or any production deployment.
 
 ---
 
@@ -508,11 +666,12 @@ business operation failed.
 
 ## 11. Verification CLI (`tools/audit_verify.py`) — P5.5.6 implemented
 
-**Status: implemented and awaiting independent review (38 tests).** Scope is the
-active journal only; manifest, archive, rotation, retention and repair remain
-P5.5.7. This section supersedes the earlier broader CLI sketch: P5.5.7 will add
-manifest/archive checks and their own distinct exit codes rather than reusing
-the codes below (the earlier "exit 4" references in §9.4 are superseded).
+**Status: P5.5.6 accepted by the owner (committed in `87c73e5`); P5.5.7 extends
+it to the manifest and archives and awaits independent review.** The command
+line is unchanged (`--journal PATH`), and the installation is the journal's
+parent directory, so the same invocation verifies the active journal, the
+manifest and every declared archive. The earlier "exit 4" wording for recovery
+states is superseded by exit code 5 below.
 
 Read-only: the only filesystem operations are `os.stat` and one binary
 read-only open. The tool never creates a missing journal or directory, appends,
@@ -546,20 +705,28 @@ Exit codes (stable):
 
 | Code | Meaning |
 |---|---|
-| 0 | PASS — the active journal verified |
-| 1 | FAIL — integrity, corruption or schema failure |
-| 2 | FAIL — missing, not a regular file, unreadable, or changed during verification |
+| 0 | PASS |
+| 1 | FAIL — integrity, corruption, schema or history-content failure |
+| 2 | FAIL — a required file is missing, not a regular file, unreadable, or changed during verification (no reliable verification was possible) |
 | 3 | usage error (invalid command line arguments) |
 | 4 | unexpected internal error (verification incomplete) |
+| 5 | FAIL — RECOVERY REQUIRED: a documented crash state (torn manifest tail, unregistered archive, sealed segment with a missing active journal) needs an explicit operator action (§9.10) |
 
-Output: PASS report (journal path, record count, first/last global sequence,
-segment count and first/last ids in journal order, first/last timestamp, final
-record hash). An empty journal is reported as a valid empty chain with no
-invented record or segment. FAIL report: stable category, line when available,
-one fixed sanitized explanation, and the next step "stop audited writes and
-investigate using the approved operator procedure". Output never contains
-record bodies, metadata values, identifiers from records, usernames, tokens,
-cookies, biometric data, raw OS exception text or stack traces.
+Exit 5 is deliberately distinct from both an ordinary integrity failure (1) and
+an internal error (4); P5.5.6's meanings for 0-4 are unchanged.
+
+Output: PASS report — journal path, manifest entry count, archived segment
+count, active segment identity, total available record count, first/last global
+sequence, first/last segment ids in **chain order**, first/last timestamp where
+available, final record hash, final manifest hash, the applied coverage modes,
+the segments not content-verified and any anchor-only retention coverage. An
+empty installation is reported as a valid empty chain and remains
+distinguishable from an incomplete historical installation. FAIL report: stable
+category, segment id and line when available, one fixed sanitized explanation,
+and the next step (the recovery runbook for exit 5, otherwise "stop audited
+writes and investigate"). Output never contains record bodies, metadata values,
+identifiers from records, usernames, tokens, cookies, biometric data, raw OS
+exception text or stack traces.
 
 Concurrency: no lock is taken, so the verifier cannot block or interfere with
 the writer's non-blocking exclusive append lock. It reads through one handle
@@ -586,7 +753,7 @@ run it while audited writes are stopped when a stable snapshot is required
 | Best-effort | login success/failure/429, logout, 403 write failures | response unchanged, warning logged, no identity or secret logged |
 | Propagation | actor/role, request ID, correlation IDs, `source` | exact values; nulls only where allowed |
 | Exclusion | password/hash/token/cookie/DSN/embedding/body in any field | rejected or absent; sweep finds nothing |
-| Rotation/retention | seal/rename/manifest/next-active, missing segment with retention entry, offsite disposition | chain continuity preserved; coverage reported honestly; exit 4 on inconsistency |
+| Rotation/retention | seal/rename/manifest/next-active, missing segment with retention entry, offsite disposition | chain continuity preserved; coverage reported honestly; exit 5 for a documented recovery state |
 | CLI | healthy, empty, tampered, torn, unreadable, changed during read, bad args | exit 0/0/1/1/2/2/3; no file modification or creation |
 
 All tests use temporary directories, injected clocks and monkeypatched I/O; no
@@ -604,8 +771,8 @@ PostgreSQL and no biometric data are required.
 | **P5.5.4** | `AuditService`: actor/request-ID binding, action/reason API, intent/result helpers, best-effort wrapper, safe logging — **implemented, awaiting review**: `src/audit_service.py` | P5.5.3 | Route behavior changes | Unit tests for actor/request propagation, intent/result pairing, logging redaction (40 tests) | Service can emit every event type; no secret in any output |
 | **P5.5.5** | Route integration: mandatory intent→mutate→result for the four mutations, best-effort login/logout/403, `AUDIT_UNAVAILABLE`/`AUDIT_RESULT_UNCERTAIN` handlers, startup restricted mode — **implemented, awaiting review**: `src/api_audit.py`, `src/api.py`, `src/api_login.py`, `src/api_logout.py`, `src/authz.py` | P5.5.4 | User admin, frontend, new endpoints | Endpoint tests for applied/not-applied/unknown, fail-closed, best-effort (40 tests) | No unaudited success possible; existing auth/authz behavior unchanged |
 | **P5.5.6** | Read-only active-journal verifier CLI — **accepted by the owner, committed in `87c73e5`**: `tools/audit_verify.py` | P5.5.3 | Rotation, deletion, manifest/archive verification | CLI tests: tamper matrix, journal bytes unchanged, no creation (38 tests) | Exit 0/1/2/3/4 correct; never writes |
-| **P5.5.7.2** | Manifest schema and integrity foundation: `ManifestEntry`, canonical hashing, manifest-chain verification, archive-reference validation — **implemented, awaiting review**: `src/audit_manifest.py` | P5.5.6 accepted | Manifest file I/O, sealing, archives, rotation, recovery, CLI | Schema/hash/chain/path matrix, no filesystem access (163 tests) | Exact §9.2 field set; chain and continuity rules enforced; no file read or write |
-| **P5.5.7** | Rotation, manifest, archives, retention documentation, operator runbook; monthly cadence | P5.5.6 | Automatic deletion/schedule | Four crash-stage tests, manifest continuity, immutability, retention entries | Rotation preserves chain; crash states detected; no silent mutation of history |
+| **P5.5.7.2** | Manifest schema and integrity foundation: `ManifestEntry`, canonical hashing, manifest-chain verification, archive-reference validation — **accepted by the owner**: `src/audit_manifest.py` | P5.5.6 accepted | Manifest file I/O, sealing, archives, rotation, recovery, CLI | Schema/hash/chain/path matrix, no filesystem access (163 tests) | Exact §9.2 field set; chain and continuity rules enforced; no file read or write |
+| **P5.5.7** | Durable manifest persistence, archive/history verification, operator rotation, explicit crash recovery, retention recording, manifest-aware writer startup and three-mode verifier; runbook — **implemented, awaiting review**: `src/audit_manifest_store.py`, `src/audit_archive.py`, `src/audit_rotation.py`, `src/audit_layout.py`, `src/audit_locking.py`, `tools/audit_rotate.py`, `tools/audit_verify.py`, `src/audit_writer.py` | P5.5.6, P5.5.7.2 | Automatic rotation scheduler, automatic deletion, automatic repair, database audit tables | Focused, fault-injection and regression suites: 190 new tests (rotation stages, recovery commands, retention/anchor-only, manifest persistence, verifier modes) | Rotation preserves chain; every crash state detected and requires an explicit command; no silent mutation, deletion or repair of history |
 | **P5.5.8** | Security regression, fault injection, exclusion sweep, docs and acceptance | P5.5.1–P5.5.7 | P5.6 work | Full matrix + soak + review | All criteria met; owner acceptance |
 
 Rotation is deliberately **P5.5.7**; P5.5.3 implements only the single active

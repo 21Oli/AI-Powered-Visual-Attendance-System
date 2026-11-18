@@ -1,50 +1,82 @@
 #!/usr/bin/env python
-"""Read-only audit journal verification CLI (P5.5.6).
+"""Read-only audit installation verification CLI (P5.5.6/P5.5.7).
 
-Verifies the complete active journal ``data/audit/audit.jsonl`` using the
-approved schema and chain primitives from :mod:`src.audit_schema`. It never
-creates, appends, truncates, rewrites, repairs, re-locks or deletes anything:
-the only filesystem operations are ``os.stat`` and a binary read-only open.
+Verifies the active journal ``audit.jsonl``, the manifest ``manifest.jsonl`` and
+every sealed archive under ``archive/`` using the approved schema, manifest and
+chain primitives. It never creates, appends, truncates, rewrites, repairs,
+renames, chmods, registers, deletes or locks anything: the only filesystem
+operations are ``os.stat``/``os.open(O_RDONLY)`` reads.
 
 What is checked
 ===============
-* the path exists and is a regular, readable file;
+
+Active journal (P5.5.6, unchanged)
+
+* the path exists and is a regular readable file;
 * UTF-8 decoding, JSON syntax per line, no empty lines and a final newline;
 * every record passes the full :class:`~src.audit_schema.AuditEvent` schema;
 * genesis predecessor, every predecessor link and every canonical SHA-256
   digest (the schema's own constant-time verification);
-* global sequence from 1, contiguous; segment-local sequence from 1,
-  contiguous; a segment id never reappears after a transition;
+* global sequence contiguity; segment-local sequence from 1, contiguous; a
+  segment id never reappears;
 * ``segment_id`` uses the accepted ``YYYY-MM-NNN`` allocation form;
 * timestamps use the fixed UTC microsecond form and are non-decreasing within
-  each segment (the segment allocation month is never compared to the event
-  month);
-* no duplicate ``audit_id`` anywhere in the journal.
+  each segment (the allocation month is never compared with event stamps);
+* no duplicate ``audit_id`` in the file or against sealed history.
+
+Manifest and archives (P5.5.7)
+
+* the manifest is canonical JSONL, newline terminated, with a valid,
+  contiguous hash chain from the ``"0"*64`` genesis;
+* every ``segment_sealed`` entry's archive exists as a regular file (symlinks
+  are refused), parses, and matches the declaration exactly: segment id,
+  record count, global bounds, ``first_previous_hash`` and
+  ``last_record_hash``;
+* every record's digest, predecessor link and sequence is verified, the
+  segment starts at ``segment_sequence`` 1 and every record belongs to the
+  declared segment;
+* the active journal continues the sealed chain (sequence and predecessor);
+* archives that exist but are not declared, stray archive entries, duplicate
+  audit ids across segments and invalid retention decisions are reported.
+
+Three coverage modes (design §9.5)
+==================================
+
+1. **full-record-chain** — every available record of every segment.
+2. **segment-manifest-continuity** — manifest chain plus each declared
+   archive's contents matched against its declaration.
+3. **anchor-only** — only when a segment's archive is absent after a valid
+   owner-approved ``archived_offsite`` retention decision. Its anchors and
+   their continuity are verified; its records were **not** content-verified and
+   the run says so explicitly. Anchor-only coverage is never described as full
+   historical verification.
 
 Concurrency
 ===========
-No lock is taken: a shared/read lock could interfere with the writer's
-non-blocking exclusive append lock, and this tool must not block audited
-writes. The journal is read through one handle; its size, mtime and file
-identity are compared before and after the read, and the path is re-statted
-after the close. If anything changed, the run is not reported as PASS and no
-snapshot consistency is claimed.
+
+No lock is taken: a shared lock could interfere with the writer's non-blocking
+exclusive append lock. Each file is read through one handle and its size, mtime
+and identity are compared before/after the read and against a fresh ``stat`` of
+the path; if anything changed the run is not reported as PASS. This is not a
+filesystem snapshot and no cross-file atomicity is claimed.
 
 Exit codes (stable)
 =================== ======================================================
-0                    PASS - the active journal verified
+0                    PASS
 1                    FAIL - integrity, corruption or schema failure
-2                    FAIL - journal missing, not a regular file, unreadable,
-                     or changed during verification
-3                    usage error (invalid command line arguments)
-4                    unexpected internal error (verification incomplete)
+2                    FAIL - file missing/unreadable/changed where content is
+                     required, i.e. no reliable verification was possible
+3                    usage error
+4                    unexpected internal error
+5                    FAIL - RECOVERY REQUIRED: a documented crash state
+                     (torn manifest tail, unregistered archive, sealed
+                     segment with a missing active journal) needs an explicit
+                     operator action
 =================== ======================================================
 
 Output never contains record bodies, metadata values, usernames, tokens,
-cookies, biometric data, raw OS exception text or stack traces.
-
-Manifest, archive, rotation and retention verification are P5.5.7 scope and
-are deliberately absent. There is no repair mode of any kind.
+cookies, biometric data, raw OS exception text or stack traces. There is no
+repair mode of any kind.
 """
 
 from __future__ import annotations
@@ -62,7 +94,59 @@ PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.audit_schema import (  # noqa: E402 - after the sys.path bootstrap
+from src.audit_archive import (  # noqa: E402 - after the sys.path bootstrap
+    ACTIVE_SEGMENT_MISSING,
+    ARCHIVE_ANCHOR_MISMATCH,
+    ARCHIVE_BOUNDS_MISMATCH,
+    ARCHIVE_CHANGED,
+    ARCHIVE_COUNT_MISMATCH,
+    ARCHIVE_DUPLICATE_AUDIT_ID,
+    ARCHIVE_HASH_MISMATCH,
+    ARCHIVE_INVALID_GENESIS,
+    ARCHIVE_INVALID_UTF8,
+    ARCHIVE_MALFORMED_JSON,
+    ARCHIVE_MISSING,
+    ARCHIVE_NOT_REGULAR_FILE,
+    ARCHIVE_SCHEMA_INVALID,
+    ARCHIVE_SEGMENT_INVALID,
+    ARCHIVE_SEQUENCE_INVALID,
+    ARCHIVE_TORN_TAIL,
+    ARCHIVE_UNEXPECTED_FILE,
+    ARCHIVE_UNREADABLE,
+    ARCHIVE_UNREGISTERED,
+    BROKEN_PREDECESSOR,
+    DUPLICATE_AUDIT_ID,
+    EMPTY_LINE,
+    HASH_MISMATCH,
+    INVALID_GENESIS,
+    INVALID_UTF8,
+    JOURNAL_CHANGED,
+    JOURNAL_MISSING,
+    JOURNAL_NOT_REGULAR_FILE,
+    JOURNAL_UNREADABLE,
+    LayoutProblem,
+    MALFORMED_JSON,
+    MANIFEST_BROKEN_CHAIN,
+    MANIFEST_CORRUPT,
+    MANIFEST_DUPLICATE,
+    MANIFEST_HASH_MISMATCH,
+    MANIFEST_INTEGRITY,
+    MANIFEST_REFERENCE_INVALID,
+    MANIFEST_SCHEMA_INVALID,
+    MANIFEST_SEQUENCE_INVALID,
+    MANIFEST_TORN_TAIL,
+    MANIFEST_UNREADABLE,
+    SCHEMA_INVALID,
+    SEGMENT_INVALID,
+    SEQUENCE_INVALID,
+    TIMESTAMP_REGRESSION,
+    TORN_TAIL,
+    HistoryState,
+    verify_history,
+)
+from src.audit_layout import AuditLayout  # noqa: E402
+from src.audit_schema import (  # noqa: E402
+    GENESIS_PREVIOUS_HASH,
     AuditChainError,
     AuditError,
     AuditEvent,
@@ -79,6 +163,7 @@ __all__ = [
     "EXIT_INTERNAL_ERROR",
     "EXIT_INTEGRITY_FAILURE",
     "EXIT_OK",
+    "EXIT_RECOVERY_REQUIRED",
     "EXIT_UNAVAILABLE",
     "EXIT_USAGE_ERROR",
     "main",
@@ -95,34 +180,14 @@ EXIT_INTEGRITY_FAILURE: Final[int] = 1
 EXIT_UNAVAILABLE: Final[int] = 2
 EXIT_USAGE_ERROR: Final[int] = 3
 EXIT_INTERNAL_ERROR: Final[int] = 4
+EXIT_RECOVERY_REQUIRED: Final[int] = 5
 
-# Stable failure categories. The CLI prints exactly one per failed run.
-JOURNAL_MISSING: Final[str] = "JOURNAL_MISSING"
-JOURNAL_NOT_REGULAR_FILE: Final[str] = "JOURNAL_NOT_REGULAR_FILE"
-JOURNAL_UNREADABLE: Final[str] = "JOURNAL_UNREADABLE"
-JOURNAL_CHANGED: Final[str] = "JOURNAL_CHANGED"
-INVALID_UTF8: Final[str] = "INVALID_UTF8"
-EMPTY_LINE: Final[str] = "EMPTY_LINE"
-TORN_TAIL: Final[str] = "TORN_TAIL"
-MALFORMED_JSON: Final[str] = "MALFORMED_JSON"
-SCHEMA_INVALID: Final[str] = "SCHEMA_INVALID"
-HASH_MISMATCH: Final[str] = "HASH_MISMATCH"
-INVALID_GENESIS: Final[str] = "INVALID_GENESIS"
-BROKEN_PREDECESSOR: Final[str] = "BROKEN_PREDECESSOR"
-SEQUENCE_INVALID: Final[str] = "SEQUENCE_INVALID"
-SEGMENT_INVALID: Final[str] = "SEGMENT_INVALID"
-DUPLICATE_AUDIT_ID: Final[str] = "DUPLICATE_AUDIT_ID"
-TIMESTAMP_REGRESSION: Final[str] = "TIMESTAMP_REGRESSION"
 INVALID_ARGUMENTS: Final[str] = "INVALID_ARGUMENTS"
 INTERNAL_ERROR: Final[str] = "INTERNAL_ERROR"
 
 _EXPLANATIONS: Final[dict[str, str]] = {
-    JOURNAL_MISSING: (
-        "The audit journal does not exist; no journal was created."
-    ),
-    JOURNAL_NOT_REGULAR_FILE: (
-        "The journal path is not a regular file."
-    ),
+    JOURNAL_MISSING: "The audit journal does not exist; no journal was created.",
+    JOURNAL_NOT_REGULAR_FILE: "The journal path is not a regular file.",
     JOURNAL_UNREADABLE: (
         "The audit journal could not be read (permission or I/O failure)."
     ),
@@ -134,28 +199,100 @@ _EXPLANATIONS: Final[dict[str, str]] = {
     EMPTY_LINE: "The audit journal contains an empty line.",
     TORN_TAIL: "The audit journal ends with an incomplete record.",
     MALFORMED_JSON: "A journal line is not valid JSON.",
-    SCHEMA_INVALID: (
-        "A record does not satisfy the approved audit event schema."
-    ),
-    HASH_MISMATCH: (
-        "A record's stored digest does not match its canonical body."
-    ),
+    SCHEMA_INVALID: "A record does not satisfy the approved audit event schema.",
+    HASH_MISMATCH: "A record's stored digest does not match its canonical body.",
     INVALID_GENESIS: (
         "The first record does not carry the expected genesis predecessor."
     ),
     BROKEN_PREDECESSOR: (
         "A record does not link to its immediate predecessor's hash."
     ),
-    SEQUENCE_INVALID: (
-        "The global or segment-local sequence is not contiguous."
-    ),
+    SEQUENCE_INVALID: "The global or segment-local sequence is not contiguous.",
     SEGMENT_INVALID: (
         "A segment boundary or identity rule is violated; a segment id may "
-        "have repeated."
+        "have repeated or a sealed id was reused."
     ),
-    DUPLICATE_AUDIT_ID: "The audit journal contains a duplicate audit id.",
-    TIMESTAMP_REGRESSION: (
-        "Timestamps are not non-decreasing within a segment."
+    DUPLICATE_AUDIT_ID: "The audit history contains a duplicate audit id.",
+    TIMESTAMP_REGRESSION: "Timestamps are not non-decreasing within a segment.",
+    MANIFEST_UNREADABLE: "The audit manifest could not be read.",
+    MANIFEST_TORN_TAIL: (
+        "The manifest ends with an incomplete entry. This is a documented "
+        "crash state: do not truncate it; investigate and follow the recovery "
+        "runbook."
+    ),
+    MANIFEST_CORRUPT: (
+        "The manifest is not valid JSONL (malformed line or empty line)."
+    ),
+    MANIFEST_SCHEMA_INVALID: (
+        "A manifest entry does not satisfy the approved manifest schema."
+    ),
+    MANIFEST_HASH_MISMATCH: (
+        "A manifest entry hash does not match its canonical body."
+    ),
+    MANIFEST_BROKEN_CHAIN: (
+        "The manifest's predecessor link or segment continuity is broken."
+    ),
+    MANIFEST_SEQUENCE_INVALID: (
+        "The manifest sequence is not contiguous from 1."
+    ),
+    MANIFEST_DUPLICATE: (
+        "A segment is sealed twice, an archive is declared twice, or a "
+        "segment carries two retention decisions."
+    ),
+    MANIFEST_REFERENCE_INVALID: (
+        "A retention decision does not correctly reference an existing seal."
+    ),
+    MANIFEST_INTEGRITY: "The manifest chain could not be verified.",
+    ARCHIVE_MISSING: (
+        "A sealed segment's archive is missing and no approved offsite "
+        "retention decision explains it."
+    ),
+    ARCHIVE_NOT_REGULAR_FILE: (
+        "An archive path is not a regular file (symlinks are refused)."
+    ),
+    ARCHIVE_UNREADABLE: "An archive or the archive directory could not be read.",
+    ARCHIVE_CHANGED: "An archive changed while it was being read.",
+    ARCHIVE_INVALID_UTF8: "An archive is not valid UTF-8.",
+    ARCHIVE_MALFORMED_JSON: "An archive line is not valid JSON.",
+    ARCHIVE_TORN_TAIL: "An archive ends with an incomplete record.",
+    ARCHIVE_SCHEMA_INVALID: (
+        "An archived record does not satisfy the approved event schema."
+    ),
+    ARCHIVE_HASH_MISMATCH: (
+        "An archived record's digest does not match its canonical body."
+    ),
+    ARCHIVE_INVALID_GENESIS: (
+        "The first archived record does not link to the expected predecessor."
+    ),
+    ARCHIVE_SEQUENCE_INVALID: (
+        "An archive's sequence continuity is broken."
+    ),
+    ARCHIVE_SEGMENT_INVALID: (
+        "An archive's record belongs to a different segment than declared."
+    ),
+    ARCHIVE_DUPLICATE_AUDIT_ID: (
+        "The audit history contains a duplicate audit id."
+    ),
+    ARCHIVE_COUNT_MISMATCH: (
+        "An archive's record count does not match the manifest."
+    ),
+    ARCHIVE_BOUNDS_MISMATCH: (
+        "An archive's sequence bounds do not match the manifest."
+    ),
+    ARCHIVE_ANCHOR_MISMATCH: (
+        "An archive's hash anchors do not match the manifest."
+    ),
+    ARCHIVE_UNREGISTERED: (
+        "An archive file exists that the manifest does not declare, or "
+        "archives exist without a manifest. This is a documented interrupted-"
+        "rotation state: register it explicitly or investigate."
+    ),
+    ARCHIVE_UNEXPECTED_FILE: (
+        "The archive directory contains an entry that is not an audit archive."
+    ),
+    ACTIVE_SEGMENT_MISSING: (
+        "A segment is sealed but the active journal is missing. This is a "
+        "documented crash state: recreate it with --create-active."
     ),
     INVALID_ARGUMENTS: "The command line arguments are not valid.",
     INTERNAL_ERROR: (
@@ -169,11 +306,19 @@ _UNAVAILABLE_CATEGORIES: Final[frozenset[str]] = frozenset(
         JOURNAL_NOT_REGULAR_FILE,
         JOURNAL_UNREADABLE,
         JOURNAL_CHANGED,
+        ARCHIVE_UNREADABLE,
+        ARCHIVE_CHANGED,
+        MANIFEST_UNREADABLE,
     }
 )
 
 _NEXT_STEP = (
     "Stop audited writes and investigate using the approved operator procedure."
+)
+_NEXT_STEP_RECOVERY = (
+    "Stop audited writes and follow the recovery runbook in "
+    "docs/AUDIT_JOURNAL_DESIGN.md §9.4; do not delete, truncate or "
+    "re-initialize audit files."
 )
 
 
@@ -204,10 +349,14 @@ class VerificationFailure(Exception):
         category: str,
         *,
         line: int | None = None,
+        segment_id: str | None = None,
+        recovery: bool = False,
     ) -> None:
         super().__init__(category)
         self.category = category
         self.line = line
+        self.segment_id = segment_id
+        self.recovery = recovery
 
 
 @dataclass(frozen=True)
@@ -222,6 +371,13 @@ class JournalSummary:
     first_timestamp: str | None
     last_timestamp: str | None
     last_record_hash: str | None
+    manifest_entries: int = 0
+    archived_segments: int = 0
+    active_segment_id: str | None = None
+    final_manifest_hash: str | None = None
+    anchor_only_segment_ids: tuple[str, ...] = ()
+    content_verified_segments: int = 0
+    coverage: tuple[str, ...] = ()
 
 
 def _read_snapshot(path: Path) -> bytes:
@@ -295,9 +451,7 @@ def _read_snapshot(path: Path) -> bytes:
 def _parse_records(raw: bytes) -> list[AuditEvent]:
     """Parse JSONL with exactly the writer's structural rules."""
     if raw and not raw.endswith(b"\n"):
-        raise VerificationFailure(
-            TORN_TAIL, line=raw.count(b"\n") + 1
-        )
+        raise VerificationFailure(TORN_TAIL, line=raw.count(b"\n") + 1)
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -322,31 +476,36 @@ def _parse_records(raw: bytes) -> list[AuditEvent]:
     return events
 
 
-def _verify_chain(events: list[AuditEvent]) -> None:
+def _verify_chain(
+    events: list[AuditEvent],
+    *,
+    expected_previous_hash: str = GENESIS_PREVIOUS_HASH,
+    expected_next_sequence: int = 1,
+) -> None:
     """Run the schema chain verifier and map its typed errors."""
     try:
-        verify_chain(events)
+        verify_chain(
+            events,
+            expected_previous_hash=expected_previous_hash,
+            expected_next_sequence=expected_next_sequence,
+        )
     except AuditPreviousHashMismatchError as exc:
-        category = INVALID_GENESIS if exc.position == 0 else BROKEN_PREDECESSOR
-        raise VerificationFailure(
-            category, line=_line(exc.position)
-        ) from None
+        category = (
+            INVALID_GENESIS
+            if exc.position == 0 and expected_next_sequence == 1
+            else BROKEN_PREDECESSOR
+        )
+        raise VerificationFailure(category, line=_line(exc.position)) from None
     except AuditHashMismatchError as exc:
-        raise VerificationFailure(
-            HASH_MISMATCH, line=_line(exc.position)
-        ) from None
+        raise VerificationFailure(HASH_MISMATCH, line=_line(exc.position)) from None
     except AuditSequenceError as exc:
         raise VerificationFailure(
             SEQUENCE_INVALID, line=_line(exc.position)
         ) from None
     except AuditSegmentError as exc:
-        raise VerificationFailure(
-            SEGMENT_INVALID, line=_line(exc.position)
-        ) from None
+        raise VerificationFailure(SEGMENT_INVALID, line=_line(exc.position)) from None
     except AuditSchemaError as exc:
-        raise VerificationFailure(
-            SCHEMA_INVALID, line=_line(exc.position)
-        ) from None
+        raise VerificationFailure(SCHEMA_INVALID, line=_line(exc.position)) from None
     except AuditChainError:
         raise VerificationFailure(SCHEMA_INVALID) from None
     except AuditError:
@@ -357,16 +516,26 @@ def _line(position: int | None) -> int | None:
     return None if position is None else position + 1
 
 
-def _verify_journal_invariants(events: list[AuditEvent]) -> None:
-    """Duplicate ids and per-segment timestamp monotonicity."""
-    seen_ids: set[str] = set()
+def _verify_journal_invariants(
+    events: list[AuditEvent],
+    *,
+    sealed_segment_ids: Sequence[str] = (),
+    known_audit_ids: frozenset[str] = frozenset(),
+) -> None:
+    """Sealed-id reuse, duplicate ids and per-segment timestamp monotonicity."""
+    sealed = set(sealed_segment_ids)
+    seen_ids: set[str] = set(known_audit_ids)
     segment_id: str | None = None
     previous_timestamp: str | None = None
     for index, event in enumerate(events):
-        if event.audit_id in seen_ids:
+        if event.segment_id in sealed:
             raise VerificationFailure(
-                DUPLICATE_AUDIT_ID, line=index + 1
+                SEGMENT_INVALID,
+                line=index + 1,
+                segment_id=event.segment_id,
             )
+        if event.audit_id in seen_ids:
+            raise VerificationFailure(DUPLICATE_AUDIT_ID, line=index + 1)
         seen_ids.add(event.audit_id)
         if event.segment_id != segment_id:
             segment_id = event.segment_id
@@ -375,43 +544,140 @@ def _verify_journal_invariants(events: list[AuditEvent]) -> None:
             previous_timestamp is not None
             and event.timestamp < previous_timestamp
         ):
-            raise VerificationFailure(
-                TIMESTAMP_REGRESSION, line=index + 1
-            )
+            raise VerificationFailure(TIMESTAMP_REGRESSION, line=index + 1)
         previous_timestamp = event.timestamp
 
 
+def _history_failure(problem: LayoutProblem) -> VerificationFailure:
+    return VerificationFailure(
+        problem.category,
+        line=problem.line,
+        segment_id=problem.segment_id,
+        recovery=problem.recovery,
+    )
+
+
 def verify_journal(path: Path | str = DEFAULT_JOURNAL_PATH) -> JournalSummary:
-    """Verify ``path`` read-only; raise :class:`VerificationFailure` on any defect."""
+    """Verify the installation that owns ``path`` read-only.
+
+    Raises :class:`VerificationFailure` on any defect; never creates, repairs
+    or modifies anything.
+    """
     journal_path = Path(path)
+    layout = AuditLayout.from_journal(journal_path)
+
+    try:
+        history: HistoryState = verify_history(layout)
+    except LayoutProblem as problem:
+        raise _history_failure(problem) from None
+
+    if not os.path.lexists(journal_path):
+        if history.seals:
+            raise VerificationFailure(
+                ACTIVE_SEGMENT_MISSING, recovery=True
+            )
+        raise VerificationFailure(JOURNAL_MISSING)
+
     raw = _read_snapshot(journal_path)
     events = _parse_records(raw)
-    _verify_chain(events)
-    _verify_journal_invariants(events)
+    _verify_chain(
+        events,
+        expected_previous_hash=history.expected_previous_hash,
+        expected_next_sequence=history.expected_next_sequence,
+    )
+    _verify_journal_invariants(
+        events,
+        sealed_segment_ids=history.sealed_segment_ids,
+        known_audit_ids=history.audit_ids,
+    )
+
+    archived_ids = tuple(
+        summary.segment_id for summary in history.segments
+    )
+    active_ids = tuple(dict.fromkeys(event.segment_id for event in events))
+    segment_ids = archived_ids + active_ids
+
+    available = tuple(
+        summary for summary in history.segments if not summary.anchor_only
+    )
 
     if not events:
         return JournalSummary(
             path=journal_path,
-            record_count=0,
-            first_global_sequence=None,
-            last_global_sequence=None,
-            segment_ids=(),
-            first_timestamp=None,
-            last_timestamp=None,
-            last_record_hash=None,
+            record_count=history.total_records,
+            first_global_sequence=(
+                history.segments[0].first_global_sequence
+                if history.segments
+                else None
+            ),
+            last_global_sequence=(
+                history.segments[-1].last_global_sequence
+                if history.segments
+                else None
+            ),
+            segment_ids=segment_ids,
+            first_timestamp=(
+                available[0].first_timestamp if available else None
+            ),
+            last_timestamp=(
+                available[-1].last_timestamp if available else None
+            ),
+            last_record_hash=(
+                history.segments[-1].last_record_hash
+                if history.segments
+                else None
+            ),
+            manifest_entries=len(history.manifest_entries),
+            archived_segments=len(history.segments),
+            active_segment_id=None,
+            final_manifest_hash=history.last_manifest_hash,
+            anchor_only_segment_ids=history.anchor_only_segment_ids,
+            content_verified_segments=len(history.segments)
+            - len(history.anchor_only_segment_ids),
+            coverage=_coverage(history, has_active=False),
         )
 
-    segment_ids = tuple(dict.fromkeys(event.segment_id for event in events))
+    total = history.total_records + len(events)
+    first_sequence = (
+        history.segments[0].first_global_sequence
+        if history.segments
+        else events[0].sequence
+    )
+    first_timestamp = (
+        available[0].first_timestamp if available else events[0].timestamp
+    )
     return JournalSummary(
         path=journal_path,
-        record_count=len(events),
-        first_global_sequence=events[0].sequence,
+        record_count=total,
+        first_global_sequence=first_sequence,
         last_global_sequence=events[-1].sequence,
         segment_ids=segment_ids,
-        first_timestamp=events[0].timestamp,
+        first_timestamp=first_timestamp,
         last_timestamp=events[-1].timestamp,
         last_record_hash=events[-1].record_hash,
+        manifest_entries=len(history.manifest_entries),
+        archived_segments=len(history.segments),
+        active_segment_id=events[-1].segment_id,
+        final_manifest_hash=history.last_manifest_hash,
+        anchor_only_segment_ids=history.anchor_only_segment_ids,
+        content_verified_segments=len(history.segments)
+        - len(history.anchor_only_segment_ids)
+        + len(active_ids),
+        coverage=_coverage(history, has_active=True),
     )
+
+
+def _coverage(history: HistoryState, *, has_active: bool) -> tuple[str, ...]:
+    modes: list[str] = []
+    if history.anchor_only:
+        modes.append("anchor-only")
+    else:
+        modes.append("full-record-chain")
+    if history.manifest_entries:
+        modes.append("segment-manifest-continuity")
+    if not history.manifest_entries and not has_active:
+        modes.append("empty-installation")
+    return tuple(modes)
 
 
 # ---------------------------------------------------------------------------
@@ -432,8 +698,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = _Parser(
         prog="python -m tools.audit_verify",
         description=(
-            "Read-only verification of the active audit JSONL journal. "
-            "Never creates, repairs or modifies the journal."
+            "Read-only verification of the audit JSONL installation: active "
+            "journal, manifest and sealed archives. Never creates, repairs or "
+            "modifies anything."
         ),
     )
     parser.add_argument(
@@ -441,42 +708,71 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         default=None,
         help=(
-            "journal to verify (default: "
-            "PROJECT_ROOT/data/audit/audit.jsonl)"
+            "active journal to verify; its directory is the audit installation "
+            "(default: PROJECT_ROOT/data/audit/audit.jsonl)"
         ),
     )
     return parser
 
 
-def _failure_report(category: str, line: int | None) -> None:
+def _failure_report(failure: VerificationFailure) -> None:
     print("Audit journal verification: FAIL")
-    print(f"Category: {category}")
-    if line is not None:
-        print(f"Line: {line}")
-    print(f"Detail: {_EXPLANATIONS[category]}")
-    print(f"Next step: {_NEXT_STEP}")
+    print(f"Category: {failure.category}")
+    if failure.segment_id is not None:
+        print(f"Segment: {failure.segment_id}")
+    if failure.line is not None:
+        print(f"Line: {failure.line}")
+    detail = _EXPLANATIONS.get(failure.category, _EXPLANATIONS[INTERNAL_ERROR])
+    print(f"Detail: {detail}")
+    next_step = _NEXT_STEP_RECOVERY if failure.recovery else _NEXT_STEP
+    print(f"Next step: {next_step}")
 
 
 def _pass_report(summary: JournalSummary) -> None:
     print("Audit journal verification: PASS")
     print(f"Journal: {summary.path.resolve()}")
+    print(f"Manifest entries: {summary.manifest_entries}")
+    print(f"Archived segments: {summary.archived_segments}")
+    print(
+        "Active segment: "
+        + (summary.active_segment_id or "none (empty active journal)")
+    )
     if summary.record_count == 0:
         print("Chain: valid empty chain (0 records)")
         print("Segments: 0")
-        print("Read-only: the journal was not created, modified or repaired.")
-        return
-    print(f"Records verified: {summary.record_count}")
+    else:
+        print(f"Records verified: {summary.record_count}")
+        print(
+            "Global sequence: "
+            f"{summary.first_global_sequence}..{summary.last_global_sequence}"
+        )
+        print(f"Segments: {len(summary.segment_ids)}")
+        print(f"First segment: {summary.segment_ids[0]}")
+        print(f"Last segment: {summary.segment_ids[-1]}")
+        if summary.first_timestamp:
+            print(f"First timestamp: {summary.first_timestamp}")
+        if summary.last_timestamp:
+            print(f"Last timestamp: {summary.last_timestamp}")
+        if summary.last_record_hash:
+            print(f"Final record hash: {summary.last_record_hash}")
+    print(f"Final manifest hash: {summary.final_manifest_hash or 'none'}")
+    print("Coverage modes: " + ", ".join(summary.coverage))
     print(
-        "Global sequence: "
-        f"{summary.first_global_sequence}..{summary.last_global_sequence}"
+        "Anchor-only segments: "
+        + (", ".join(summary.anchor_only_segment_ids) or "(none)")
     )
-    print(f"Segments: {len(summary.segment_ids)}")
-    print(f"First segment: {summary.segment_ids[0]}")
-    print(f"Last segment: {summary.segment_ids[-1]}")
-    print(f"First timestamp: {summary.first_timestamp}")
-    print(f"Last timestamp: {summary.last_timestamp}")
-    print(f"Final record hash: {summary.last_record_hash}")
-    print("Read-only: the journal was not modified or repaired.")
+    print(
+        "Segments not content-verified: "
+        + (", ".join(summary.anchor_only_segment_ids) or "(none)")
+    )
+    if summary.anchor_only_segment_ids:
+        print(
+            "Coverage note: anchor-only segments were verified through their "
+            "manifest anchors and chain continuity only; their records were "
+            "NOT content-verified and this run is not a full historical "
+            "verification."
+        )
+    print("Read-only: no journal, manifest or archive was modified or repaired.")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -484,19 +780,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = parser.parse_args(argv)
     except _UsageError:
-        _failure_report(INVALID_ARGUMENTS, None)
+        _failure_report(VerificationFailure(INVALID_ARGUMENTS))
         return EXIT_USAGE_ERROR
 
     path = Path(args.journal) if args.journal else DEFAULT_JOURNAL_PATH
     try:
         summary = verify_journal(path)
     except VerificationFailure as failure:
-        _failure_report(failure.category, failure.line)
+        _failure_report(failure)
         if failure.category in _UNAVAILABLE_CATEGORIES:
             return EXIT_UNAVAILABLE
+        if failure.recovery:
+            return EXIT_RECOVERY_REQUIRED
         return EXIT_INTEGRITY_FAILURE
     except Exception:  # pragma: no cover - defensive, sanitized
-        _failure_report(INTERNAL_ERROR, None)
+        _failure_report(VerificationFailure(INTERNAL_ERROR))
         return EXIT_INTERNAL_ERROR
 
     _pass_report(summary)

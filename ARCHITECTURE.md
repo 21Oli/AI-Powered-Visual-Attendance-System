@@ -1357,7 +1357,7 @@ the journal schema version (still 1), or the decision authority.
 * **Deferred.** Manifest/archive verification, rotation, retention, repair,
   machine-readable output and an audit read API remain P5.5.7+.
 
-### D32 — Audit manifest is a separate schema with its own chain (Phase 5 — P5.5.7.2 implemented, awaiting review)
+### D32 — Audit manifest is a separate schema with its own chain (Phase 5 — P5.5.7.2 accepted)
 
 * **Separate format, separate chain.** `src/audit_manifest.py` defines the
   manifest record as `ManifestEntry`: `manifest_version` 1, contiguous
@@ -1393,6 +1393,57 @@ the journal schema version (still 1), or the decision authority.
 * **What verification proves.** The manifest chain and its statements about
   segments. Not that a segment or archive exists, is complete, or matches the
   declared anchors — that needs the content verification of P5.5.7.3+.
-* **Not implemented.** Manifest file reading/appending, sealing, archive
-  movement, rotation, retention disposal, recovery, verifier integration and
-  any scheduler.
+* **Implemented in P5.5.7** (see D33): manifest file reading/appending, seal
+  creation, archive movement, operator rotation, retention recording, explicit
+  recovery and verifier integration. There is still **no** scheduler, no
+  automatic deletion and no automatic repair.
+
+### D33 — Audit rotation is an explicit operator operation over an append-only manifest (Phase 5 — P5.5.7 implemented, awaiting review)
+
+* **Layout is one installation.** `data/audit/` holds the active `audit.jsonl`,
+  the append-only `manifest.jsonl`, `archive/audit-<first>-<last>.jsonl` and the
+  `.rotation.lock`. `src/audit_layout.py` derives every path from the journal's
+  parent directory, so `--journal PATH` and the default path describe the same
+  installation and a manifest can never be read from a different directory.
+* **Rotation order.** Verify everything (manifest chain, every declared archive,
+  the active journal's boundary, newline termination, destination absent,
+  segment not already sealed) → `os.replace` the journal into the archive →
+  best-effort directory fsync → append and durably confirm exactly one
+  `segment_sealed` entry → mark the archive read-only where supported → create
+  the next empty active journal exclusively. No `audit.rotate` event is written
+  to the event journal and no historical byte is rewritten.
+* **Durability.** `src/audit_manifest_store.py` re-reads and re-verifies the
+  whole manifest before every append, validates the candidate entry in memory
+  against the existing chain, then writes canonical JSONL + `\n`, flushes,
+  `os.fsync`s, confirms size/identity/path and only then advances state. An
+  ambiguous failure poisons the instance. There is no truncate, rewrite, repair
+  or normalisation.
+* **Locking is advisory.** `.rotation.lock` serialises rotation, recovery and
+  manifest appends; the writer's own byte-0 journal lock is taken to prove that
+  no writer is appending. Contention fails closed. Neither lock is a
+  multi-process guarantee against a non-cooperating process, and Windows byte
+  locks (mandatory for other handles) and POSIX `flock` (advisory) do not behave
+  identically.
+* **Recovery is explicit and documented.** The five design crash states map to
+  distinct, non-destructive operator commands: re-run rotation (nothing
+  changed), `--register-existing` (archive present, seal missing),
+  `--create-active` (sealed, journal missing), deterministic id derivation
+  (empty active file) and "refuse and investigate" (torn manifest tail, no
+  repair). Each command re-verifies before writing and refuses ambiguity.
+* **Writer integration.** `AuditJournalWriter` verifies the manifest, every
+  declared archive and the active boundary before becoming `ready`, derives the
+  pending segment id from the last sealed segment for an empty post-rotation
+  journal, and continues to refuse on any missing, unregistered, duplicated or
+  broken history. Append durability and poisoning semantics are unchanged.
+* **Verification modes are reported, never inferred.** The read-only verifier
+  states which of full-record-chain, segment-manifest-continuity or anchor-only
+  coverage applied, lists anchor-only segments and lists segments not
+  content-verified. Anchor-only is never presented as full historical
+  verification, and a manifest entry never proves its archive's contents.
+* **No automation.** No scheduler, startup hook, request path or background
+  thread can rotate, delete, repair or register anything; retention is a
+  recorded decision, not a deletion.
+* **Validated offline only.** Rotation ordering, every crash stage, manifest
+  durability, archive tampering, report honesty and the CLI are covered by
+  temporary-directory tests. No live database, running deployment, network
+  filesystem, distributed writer, camera or biometric input was exercised.

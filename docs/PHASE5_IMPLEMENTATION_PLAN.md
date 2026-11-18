@@ -8,11 +8,13 @@ implemented and awaiting review, P5.5.4 (the policy-checking audit service) is
 implemented in `src/audit_service.py`, P5.5.5 (route integration and restricted
 mode) in `src/api_audit.py`/`src/api.py`, and P5.5.6 (the read-only active-
 journal verifier CLI) in `tools/audit_verify.py`. **P5.5.6 is accepted by the
-owner (committed in `87c73e5`); P5.5.2–P5.5.5 await review.** P5.5.7.2 (manifest
-schema, canonical hashing, manifest-chain verification and archive-reference
-validation) is implemented in `src/audit_manifest.py` and awaits review; the
-manifest file, archives, rotation, retention disposal and recovery remain
-P5.5.7.3+. Phase 5 is not complete.**
+owner (committed in `87c73e5`) and P5.5.7.2 is accepted; P5.5.2–P5.5.5 await
+review.** **P5.5.7 is implemented and awaits independent review**: manifest
+persistence (`src/audit_manifest_store.py`), archive/history verification
+(`src/audit_archive.py`), operator rotation, crash recovery and retention
+recording (`src/audit_rotation.py`, `tools/audit_rotate.py`), manifest-aware
+writer startup (`src/audit_writer.py`) and the three-mode read-only verifier
+(`tools/audit_verify.py`). P5.5.8 has not started. Phase 5 is not complete.**
 
 Phase 5 adds operator accounts, sessions and role-based access to the
 attendance system. It is delivered as small, separately reviewable steps. This
@@ -46,7 +48,7 @@ relational table), and does not introduce biometric storage of any kind.
 | P5.2 | Identity data model and persistence: `V002__security.sql`, user/session models and repositories, offline tests | Completed (offline) |
 | P5.3 | Authentication primitives: Argon2id hashing, opaque session tokens, session lifecycle | Completed (offline) |
 | P5.4 | Authentication API: session service integration, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10, §8) | Completed offline through P5.4.10 and accepted (committed in `b0583df`) |
-| P5.5 | Audit journal and security-event auditing (§9, `docs/AUDIT_JOURNAL_DESIGN.md`) | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer, P5.5.4 service and P5.5.5 route integration **implemented, awaiting review**; P5.5.6 verifier CLI **accepted (committed `87c73e5`)**; P5.5.7.2 manifest schema/integrity **implemented, awaiting review**; P5.5.7.3+ not started |
+| P5.5 | Audit journal and security-event auditing (§9, `docs/AUDIT_JOURNAL_DESIGN.md`) | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer, P5.5.4 service and P5.5.5 route integration **implemented, awaiting review**; P5.5.6 verifier CLI **accepted (committed `87c73e5`)**; P5.5.7.2 manifest schema/integrity **accepted**; P5.5.7 manifest persistence, rotation, recovery, retention and manifest-aware verification **implemented, awaiting review**; P5.5.8 not started |
 | P5.6 | User administration and secure first-Admin provisioning (§10) | Not started |
 | P5.7 | Frontend authentication and session integration (§10) | Not started |
 | P5.8 | Role-aware UI and frontend security hardening (§10) | Not started |
@@ -267,10 +269,15 @@ application (`src/api_audit.py`, `src/api.py`, `src/api_login.py`,
 `src/api_logout.py`, `src/authz.py`) with fail-closed mutations, best-effort
 security events and restricted mode, and **P5.5.6** adds the read-only
 active-journal verifier CLI (`tools/audit_verify.py`), which the owner has
-accepted (committed in `87c73e5`). **P5.5.7.2** adds the manifest schema and
-integrity foundation (`src/audit_manifest.py`) and awaits review. The next
-implementation steps are **P5.5.7.3+** — manifest persistence, archive sealing
-and operator-controlled rotation. No manifest file, archive or rotation exists.
+accepted (committed in `87c73e5`) and **P5.5.7.2** (the manifest schema and
+integrity foundation, `src/audit_manifest.py`) is accepted. **P5.5.7** is now
+implemented and awaits review: durable manifest persistence, archive and
+historical chain verification, operator-controlled rotation
+(`tools/audit_rotate.py`), the five documented crash states with explicit
+recovery commands, retention recording with anchor-only reporting, manifest-aware
+writer startup and the three-mode read-only verifier. The next milestone is
+**P5.5.8** (security regression, fault injection, exclusion sweep and Phase 5
+acceptance); it has not started.
 
 ## 8. P5.4 authentication API — sub-milestone status
 
@@ -425,7 +432,7 @@ outside business RBAC. `audit:read` and `users:manage` are policy definitions
 only: no audit journal, audit hash chain, user-management API, first-Admin
 provisioning, frontend authentication or route guards exist yet.
 
-## 9. P5.5 — Audit journal and security-event auditing (P5.5.5 implemented)
+## 9. P5.5 — Audit journal and security-event auditing (P5.5.7 implemented, awaiting review)
 
 P5.5.1 (design) is approved; P5.5.2 (schema and hash-chain primitives,
 `src/audit_schema.py`, 172 tests), P5.5.3 (durable verified writer,
@@ -433,9 +440,11 @@ P5.5.1 (design) is approved; P5.5.2 (schema and hash-chain primitives,
 `src/audit_service.py`, 39 tests) and P5.5.5 (route integration and restricted
 mode, 40 tests) are implemented and awaiting review; P5.5.6 (read-only verifier
 CLI, 38 tests) is accepted (committed in `87c73e5`). P5.5.7.2 (manifest schema
-and integrity foundation, 163 tests, `src/audit_manifest.py`) is implemented and
-awaiting review; there is still **no** manifest file, archive, rotation,
-retention disposal or audit read API. This section summarises the approved design; the
+and integrity foundation, 163 tests, `src/audit_manifest.py`) is accepted.
+P5.5.7 (manifest persistence, archive/history verification, operator rotation,
+crash recovery, retention recording, manifest-aware writer startup and the
+three-mode verifier) is implemented and awaiting review; there is still **no**
+audit read API, no deletion, no scheduler and no database audit table. This section summarises the approved design; the
 authoritative record is **`docs/AUDIT_JOURNAL_DESIGN.md`** (P5.5.1 design plus
 §15 P5.5.2, §17 P5.5.3, §18 P5.5.4 and §19 P5.5.5 implementation notes), which
 governs whenever the summary and the design record differ.
@@ -626,8 +635,8 @@ The authoritative per-milestone scope, exclusions and exit criteria are in
 | P5.5.4 | Audit service, actor/request context, intent/result helpers, best-effort wrapper, safe logging — **implemented, awaiting review**: `src/audit_service.py` | P5.5.3 | Route changes | Actor/request-ID propagation; no secret in output — done (40 tests) |
 | P5.5.5 | Mandatory mutation and best-effort event integration, `AUDIT_UNAVAILABLE`/`AUDIT_RESULT_UNCERTAIN`, restricted mode — **implemented, awaiting review**: `src/api_audit.py`, `src/api.py`, `src/api_login.py`, `src/api_logout.py`, `src/authz.py` | P5.5.4 | User admin, frontend, new endpoints | No unaudited success; auth/authz behaviour unchanged — done (40 tests) |
 | P5.5.6 | Read-only active-journal verifier CLI, exit codes 0/1/2/3/4 — **accepted (committed `87c73e5`)**: `tools/audit_verify.py` | P5.5.3 | Repair, rotation, manifest/archive | Tamper matrix green; journal bytes unchanged; nothing created — done (38 tests) |
-| P5.5.7.2 | Manifest schema and integrity foundation: exact §9.2 field set, canonical hashing, manifest chain and continuity, archive-reference validation — **implemented, awaiting review**: `src/audit_manifest.py` | P5.5.6 accepted | Manifest file I/O, sealing, archives, rotation, recovery, CLI | Schema/hash/chain/path matrix; no filesystem access — done (163 tests) |
-| P5.5.7 | Retention, archive and operator-controlled monthly rotation; manifest; crash recovery; runbook | P5.5.6 | Automatic deletion or schedule | Rotation preserves chain; crash states detected, never silent |
+| P5.5.7.2 | Manifest schema and integrity foundation: exact §9.2 field set, canonical hashing, manifest chain and continuity, archive-reference validation — **accepted**: `src/audit_manifest.py` | P5.5.6 accepted | Manifest file I/O, sealing, archives, rotation, recovery, CLI | Schema/hash/chain/path matrix; no filesystem access — done (163 tests) |
+| P5.5.7 | Retention, archive and operator-controlled rotation; manifest persistence; crash recovery; manifest-aware writer and verifier; runbook — **implemented, awaiting review**: `src/audit_manifest_store.py`, `src/audit_archive.py`, `src/audit_rotation.py`, `src/audit_layout.py`, `src/audit_locking.py`, `tools/audit_rotate.py`, `tools/audit_verify.py` | P5.5.6, P5.5.7.2 | Automatic deletion, automatic rotation, automatic repair | Rotation preserves chain; every crash state requires an explicit command; anchor-only coverage reported honestly — done (190 new tests) |
 | P5.5.8 | Security regression, fault injection, exclusion sweep, docs and acceptance | P5.5.1–P5.5.7 | P5.6 work | Full matrix + review; owner acceptance |
 
 ## 10. P5.6–P5.9 — subsequent milestones (not started)

@@ -224,10 +224,50 @@ def test_archive_path_that_is_not_a_directory_refuses(tmp_path: Path) -> None:
         open_writer(tmp_path)
 
 
-def test_existing_journal_with_sealed_manifest_refuses(tmp_path: Path) -> None:
+def test_existing_journal_with_an_empty_manifest_is_accepted(
+    tmp_path: Path,
+) -> None:
+    """P5.5.7 replaces the P5.5.3 "manifest present" refusal.
+
+    An empty manifest is a verified, empty history, so the writer adopts the
+    active journal exactly as before. A manifest that *declares* a segment the
+    writer cannot verify still refuses (next test).
+    """
     path = journal_path(tmp_path)
-    write_journal(path, build_events(["2026-11-001"]))
+    events = build_events(["2026-11-001"])
+    write_journal(path, events)
     (path.parent / "manifest.jsonl").write_text("", encoding="utf-8")
+    writer = open_writer(tmp_path)
+    assert writer.state is WriterState.READY
+    assert writer.last_sequence == 1
+    assert writer.active_segment_id == "2026-11-001"
+
+
+def test_manifest_declaring_a_missing_archive_refuses(tmp_path: Path) -> None:
+    from src.audit_manifest import GENESIS_MANIFEST_HASH, ManifestEntry
+
+    path = journal_path(tmp_path)
+    events = build_events(["2026-11-001"])
+    write_journal(path, events)
+    entry = ManifestEntry.create(
+        manifest_sequence=1,
+        entry_type="segment_sealed",
+        segment_id="2026-11-001",
+        disposition="archived",
+        segment_file="archive/audit-1-1.jsonl",
+        first_global_sequence=1,
+        last_global_sequence=1,
+        record_count=1,
+        first_previous_hash=GENESIS_PREVIOUS_HASH,
+        last_record_hash=events[0].record_hash,
+        sealed_at="2026-11-16T12:00:00.000000Z",
+        tool="audit_rotate",
+        tool_version="5.5.7",
+        previous_manifest_hash=GENESIS_MANIFEST_HASH,
+    )
+    (path.parent / "manifest.jsonl").write_bytes(
+        entry.to_json_line().encode("utf-8") + b"\n"
+    )
     with pytest.raises(AuditJournalIntegrityError):
         open_writer(tmp_path)
 
@@ -1085,3 +1125,119 @@ def test_concurrent_appends_keep_hashes_and_sequences_consistent(
         current.previous_hash == previous.record_hash
         for previous, current in zip(events, events[1:])
     )
+
+
+# ---------------------------------------------------------------------------
+# P5.5.7: sealed history integration
+# ---------------------------------------------------------------------------
+
+
+def test_writer_adopts_verified_sealed_history(tmp_path: Path) -> None:
+    from tests.audit_support import install
+
+    installation = install(tmp_path, sealed=[2], active=1)
+    writer = open_writer(tmp_path)
+    assert writer.state is WriterState.READY
+    assert writer.last_sequence == 3
+    assert writer.active_segment_id == "2026-11-002"
+    assert writer.last_record_hash == installation.active[-1].record_hash
+
+
+def test_writer_derives_the_next_segment_for_an_empty_active(
+    tmp_path: Path,
+) -> None:
+    from tests.audit_support import install
+
+    installation = install(tmp_path, sealed=[2], active=0)
+    writer = open_writer(tmp_path)
+    event = append_mutation(writer)
+    assert event.sequence == 3
+    assert event.segment_id == "2026-11-002"
+    assert event.segment_sequence == 1
+    assert event.previous_hash == installation.manifest[0].last_record_hash
+
+
+def test_writer_restart_derives_the_same_pending_segment(
+    tmp_path: Path,
+) -> None:
+    from tests.audit_support import install
+
+    install(tmp_path, sealed=[2], active=0)
+    first = open_writer(tmp_path)
+    event = append_mutation(first)
+    second = open_writer(tmp_path)
+    follow_up = append_denied_login(second, timestamp=LATER_TS)
+    assert follow_up.segment_id == event.segment_id == "2026-11-002"
+    assert follow_up.sequence == 4
+
+
+def test_writer_refuses_a_missing_declared_archive(tmp_path: Path) -> None:
+    from tests.audit_support import install
+
+    installation = install(tmp_path, sealed=[2], active=1)
+    installation.archive_path(0).unlink()
+    with pytest.raises(AuditJournalIntegrityError):
+        open_writer(tmp_path)
+
+
+def test_writer_refuses_an_unregistered_archive(tmp_path: Path) -> None:
+    from tests.audit_support import build_events as support_events
+    from tests.audit_support import install, write_events
+
+    installation = install(tmp_path, sealed=[1], active=1)
+    write_events(
+        installation.layout.archive_path(3, 4),
+        support_events([("2026-11-004", 2)]),
+    )
+    with pytest.raises(AuditJournalIntegrityError):
+        open_writer(tmp_path)
+
+
+def test_writer_refuses_a_torn_manifest(tmp_path: Path) -> None:
+    from tests.audit_support import install
+
+    installation = install(tmp_path, sealed=[1], active=1)
+    raw = installation.layout.manifest.read_bytes()
+    installation.layout.manifest.write_bytes(raw[:-2])
+    with pytest.raises(AuditJournalIntegrityError):
+        open_writer(tmp_path)
+
+
+def test_writer_refuses_a_missing_active_journal_after_a_seal(
+    tmp_path: Path,
+) -> None:
+    from tests.audit_support import install
+
+    installation = install(tmp_path, sealed=[2], active=0)
+    installation.layout.journal.unlink()
+    with pytest.raises(AuditJournalIntegrityError):
+        open_writer(tmp_path)
+    assert not installation.layout.journal.exists()
+
+
+def test_writer_refuses_a_corrupt_archive(tmp_path: Path) -> None:
+    from tests.audit_support import install
+
+    installation = install(tmp_path, sealed=[2], active=0)
+    installation.archive_path(0).write_bytes(b"{broken\n")
+    with pytest.raises(AuditJournalIntegrityError):
+        open_writer(tmp_path)
+
+
+def test_writer_continues_after_a_completed_rotation(tmp_path: Path) -> None:
+    from src.audit_layout import AuditLayout
+    from src.audit_rotation import RotationOperations
+    from tests.audit_support import install_events
+
+    install_events(
+        tmp_path, segments=[], active=("2026-11-001", 2), manifest=False
+    )
+    layout = AuditLayout.for_directory(tmp_path / "audit")
+    plan = RotationOperations(
+        layout, clock=lambda: FIXED_TS
+    ).rotate()
+    writer = open_writer(tmp_path)
+    event = append_mutation(writer)
+    assert event.sequence == 3
+    assert event.previous_hash == plan.last_record_hash
+    assert event.segment_id == "2026-11-002"
