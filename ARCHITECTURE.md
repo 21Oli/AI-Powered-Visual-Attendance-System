@@ -1120,9 +1120,9 @@ the journal schema version (still 1), or the decision authority.
   permission is the sanitized `403 PERMISSION_DENIED` (fixed message, no role,
   permission, username or account, plus the existing `X-Request-ID`); a storage
   failure during session validation stays the existing `503` and an unexpected
-  fault the sanitized `500`. `audit:read` and `users:manage` are policy only —
-  no endpoint consumes them yet, and no audit journal, user-management API or
-  first-Admin provisioning exists.
+  fault the sanitized `500`. At P5.4.10 `audit:read` and `users:manage` were
+  policy only; since P5.6 the four user-administration routes consume
+  `users:manage` (D34), while `audit:read` still guards no endpoint.
 * **Logout (P5.4.6).** `POST /api/v1/auth/logout` (`src/api_logout.py`) reads
   the raw token **only** from the configured `va_session` cookie (no query or
   body token exists), calls the existing
@@ -1448,3 +1448,85 @@ the journal schema version (still 1), or the decision authority.
   durability, archive tampering, report honesty and the CLI are covered by
   temporary-directory tests. No live database, running deployment, network
   filesystem, distributed writer, camera or biometric input was exercised.
+
+### D34 — User administration and first-Admin provisioning (Phase 5 — P5.6 implemented, awaiting review)
+
+* **Endpoints.** `src/api_user.py` registers exactly four Admin-only routes
+  under `/api/v1`: `GET /users` (keyset page with an optional `after` and a
+  positive integer `limit`; a non-positive limit is `400 INVALID_LIMIT`),
+  `POST /users` (`201`), `PATCH /users/{user_id}/role` (`200`) and
+  `POST /users/{user_id}/deactivate` (`200`). There is no user-detail route, no
+  password-reset route and no public registration or bootstrap endpoint.
+  Requests are `extra="forbid"` models; responses are explicit models carrying
+  `user_id`, `username`, `role`, `is_active` and timestamps only. Errors are
+  fixed sanitized codes (`LAST_ADMIN_PROTECTED`, `SELF_ROLE_CHANGE`,
+  `SELF_DEACTIVATION`, `USER_ALREADY_EXISTS`, `USER_NOT_FOUND`, `INVALID_ROLE`,
+  `PASSWORD_TOO_SHORT`, `ADMIN_ALREADY_EXISTS`, `FORBIDDEN`, and
+  `503 SESSION_REVOCATION_FAILED`) and never echo input, a hash, a token or a
+  database message.
+* **Authorization and composition.** Every route depends on
+  `permission_dependency(Permission.USERS_MANAGE, principal_resolver)`, so the
+  identity still comes only from the validated `va_session` cookie row; an
+  anonymous request is `401 AUTHENTICATION_REQUIRED`, an authenticated
+  non-Admin `403 PERMISSION_DENIED`. `register_user_routes` receives the
+  application's cached `get_user_service` and `get_session_service` getters —
+  no private attribute is read and no service, audit writer or journal is
+  built per request. `create_app` resolves one `UserService` lazily through
+  `_resolve_user_service`, wiring the app-owned `AuditService` and
+  `SessionService`; a restricted audit subsystem fails closed with the existing
+  `503 AUDIT_UNAVAILABLE` before any repository call.
+* **Last-active-Admin invariant is database-serialised, at an enforced
+  isolation level.** Admin creation, first-Admin provisioning, demotion and
+  deactivation all use one repository section: `SET TRANSACTION ISOLATION
+  LEVEL READ COMMITTED`, then `pg_advisory_xact_lock` on one fixed key, then
+  (only when the target is an active Admin losing that status) the count, then
+  the write — in the same transaction. The isolation level is set, not assumed:
+  under `REPEATABLE READ`/`SERIALIZABLE` a waiter's snapshot would predate the
+  winner's commit and it could take a stale decision. This needs the
+  one-connection-per-operation model, because `SET TRANSACTION` is only valid
+  before the transaction's first query. Non-Admin creation/updates cannot
+  reduce the count and take no lock, and a non-Admin operation is never refused
+  because only one active Admin exists. Limits: only cooperating operations
+  are serialised (no database constraint enforces the invariant), the global
+  key serialises these operations with each other, and correctness is asserted
+  for `READ COMMITTED` only. A unique violation is always translated to a
+  typed error.
+* **Session revocation is mandatory.** `UserService` requires a session service
+  (`sessions` has no default and no `None` bypass), and a successful
+  deactivation always calls `revoke_all_for_user(target)`; a repeated request
+  for an already-inactive user still revokes (idempotent, no new state, no
+  second audit intent). `SessionService.validate_session` also refuses an
+  inactive account, so a deactivated user cannot authenticate even before the
+  revocation rows land. A revocation failure after the update is recorded as
+  `DATABASE_OUTCOME_UNKNOWN` and answered `503 SESSION_REVOCATION_FAILED`
+  ("deactivated, sessions not revoked, do not retry blindly") — never success
+  and never a definite failure.
+* **Audit.** Each mutation begins a durable intent before the write
+  (`user.create`, `user.role_change`, `user.deactivate`,
+  `first_admin.provision`) and records a correlated result afterwards; an audit
+  failure before the write aborts the operation, and an uncertain database
+  outcome is recorded as uncertain. Audit records carry actor, target, source
+  (`api` or `cli`) and reason codes — never a password or hash.
+* **First-Admin provisioning is operator-only.** `src/user_provision.py`
+  (`python -m src.user_provision`) prompts for the account ID, username and a
+  confirmed password (`getpass`, so it is absent from process listings and
+  shell history), hashes it before the insert, refuses when an active Admin
+  already exists, prints identity fields only, and exits `1` on
+  refusal/failure and `2` on usage errors. It has no HTTP surface, no default
+  credentials and no logging of secrets.
+* **Verified offline only; database concurrency BLOCKED.** Service, API,
+  repository and CLI behaviour are covered by fake/offline tests plus tests
+  against the real `create_app`. `tests/test_tier2_user_concurrency.py` has
+  seven genuine PostgreSQL scenarios (independent connections, a barrier,
+  final-state assertions) but reports **BLOCKED**: the dedicated guarded test
+  database is reachable and passes the guard, yet is still V001 and the
+  configured DSN authenticates as `attendance_tier2_runtime`, a least-privilege
+  role with no `CREATE` on schema `public` and no ownership of the existing
+  tables. An attempt through `migrate()`/`PsycopgMigrationExecutor` was refused
+  with `InsufficientPrivilege` and committed nothing. The suite detects the
+  missing schema and skips with that exact reason; it never creates schema and
+  no fake-only test is presented as concurrency verification. The owner must
+  apply `migrations/V002__security.sql` with a privileged role, record its
+  ledger checksum and grant the runtime role access (runbook in
+  `docs/PHASE5_IMPLEMENTATION_PLAN.md` §10.1) before the race-safety claim can
+  be verified.

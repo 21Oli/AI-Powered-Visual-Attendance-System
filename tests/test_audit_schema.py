@@ -132,6 +132,10 @@ def test_action_vocabulary_is_closed_and_exact() -> None:
         "auth.login",
         "auth.logout",
         "authz.denied",
+        "user.create",
+        "user.role_change",
+        "user.deactivate",
+        "first_admin.provision",
     }
     assert "audit.verify" not in {action.value for action in AuditAction}
     assert "audit.rotate" not in {action.value for action in AuditAction}
@@ -198,6 +202,7 @@ def test_metadata_allowlist_is_exact() -> None:
             "journal_event_id",
             "prior_role",
             "new_role",
+            "target_user_id",
         }
     )
 

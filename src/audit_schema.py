@@ -164,6 +164,7 @@ METADATA_ALLOWED_KEYS: Final[frozenset[str]] = frozenset(
         "journal_event_id",
         "prior_role",
         "new_role",
+        "target_user_id",
     }
 )
 
@@ -204,6 +205,10 @@ class AuditAction(str, Enum):
     AUTH_LOGIN = "auth.login"
     AUTH_LOGOUT = "auth.logout"
     AUTHZ_DENIED = "authz.denied"
+    USER_CREATE = "user.create"
+    USER_ROLE_CHANGE = "user.role_change"
+    USER_DEACTIVATE = "user.deactivate"
+    FIRST_ADMIN_PROVISION = "first_admin.provision"
 
 
 class AuditOutcome(str, Enum):
@@ -270,6 +275,16 @@ _STANDALONE_ACTIONS: Final[frozenset[AuditAction]] = frozenset(
 # Actions with a null actor are limited to pre-session login/logout events.
 _NULL_ACTOR_ACTIONS: Final[frozenset[AuditAction]] = frozenset(
     {AuditAction.AUTH_LOGIN, AuditAction.AUTH_LOGOUT}
+)
+
+#: P5.6 user-management mutation actions.
+USER_MANAGEMENT_ACTIONS: Final[frozenset[AuditAction]] = frozenset(
+    {
+        AuditAction.USER_CREATE,
+        AuditAction.USER_ROLE_CHANGE,
+        AuditAction.USER_DEACTIVATE,
+        AuditAction.FIRST_ADMIN_PROVISION,
+    }
 )
 
 #: Reason codes that describe a deliberately not-applied operation.
@@ -624,6 +639,9 @@ _METADATA_RULES: Final[Mapping[str, Any]] = MappingProxyType(
         ),
         "new_role": lambda value: _validate_role_value(
             value, "metadata[new_role]"
+        ),
+        "target_user_id": lambda value: _validate_short_identifier(
+            value, "metadata[target_user_id]"
         ),
     }
 )

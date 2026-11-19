@@ -94,6 +94,43 @@ EXPECTED_MUTATION_RESULTS: dict[AuditAction, set[tuple[AuditOutcome, AuditReason
         (AuditOutcome.UNCERTAIN, AuditReasonCode.DATABASE_OUTCOME_UNKNOWN),
         (AuditOutcome.UNCERTAIN, AuditReasonCode.PERSISTENCE_UNCONFIRMED),
     },
+    # P5.6 user administration. User mutations have no
+    # PERSISTENCE_UNCONFIRMED case (that code remains checkout-only), and a
+    # deactivated account reuses EMPLOYEE_INACTIVE for the "already inactive"
+    # rejection.
+    AuditAction.USER_CREATE: {
+        (AuditOutcome.SUCCESS, AuditReasonCode.OK),
+        (AuditOutcome.ERROR, AuditReasonCode.EMPLOYEE_EXISTS),
+        (AuditOutcome.ERROR, AuditReasonCode.VALIDATION_FAILED),
+        (AuditOutcome.ERROR, AuditReasonCode.DATABASE_UNAVAILABLE),
+        (AuditOutcome.ERROR, AuditReasonCode.INTERNAL_ERROR),
+        (AuditOutcome.UNCERTAIN, AuditReasonCode.DATABASE_OUTCOME_UNKNOWN),
+    },
+    AuditAction.USER_ROLE_CHANGE: {
+        (AuditOutcome.SUCCESS, AuditReasonCode.OK),
+        (AuditOutcome.ERROR, AuditReasonCode.EMPLOYEE_NOT_FOUND),
+        (AuditOutcome.ERROR, AuditReasonCode.VALIDATION_FAILED),
+        (AuditOutcome.ERROR, AuditReasonCode.DATABASE_UNAVAILABLE),
+        (AuditOutcome.ERROR, AuditReasonCode.INTERNAL_ERROR),
+        (AuditOutcome.UNCERTAIN, AuditReasonCode.DATABASE_OUTCOME_UNKNOWN),
+    },
+    AuditAction.USER_DEACTIVATE: {
+        (AuditOutcome.SUCCESS, AuditReasonCode.OK),
+        (AuditOutcome.ERROR, AuditReasonCode.EMPLOYEE_NOT_FOUND),
+        (AuditOutcome.ERROR, AuditReasonCode.EMPLOYEE_INACTIVE),
+        (AuditOutcome.ERROR, AuditReasonCode.VALIDATION_FAILED),
+        (AuditOutcome.ERROR, AuditReasonCode.DATABASE_UNAVAILABLE),
+        (AuditOutcome.ERROR, AuditReasonCode.INTERNAL_ERROR),
+        (AuditOutcome.UNCERTAIN, AuditReasonCode.DATABASE_OUTCOME_UNKNOWN),
+    },
+    AuditAction.FIRST_ADMIN_PROVISION: {
+        (AuditOutcome.SUCCESS, AuditReasonCode.OK),
+        (AuditOutcome.ERROR, AuditReasonCode.EMPLOYEE_EXISTS),
+        (AuditOutcome.ERROR, AuditReasonCode.VALIDATION_FAILED),
+        (AuditOutcome.ERROR, AuditReasonCode.DATABASE_UNAVAILABLE),
+        (AuditOutcome.ERROR, AuditReasonCode.INTERNAL_ERROR),
+        (AuditOutcome.UNCERTAIN, AuditReasonCode.DATABASE_OUTCOME_UNKNOWN),
+    },
 }
 
 EXPECTED_LOGIN_RESULTS: set[tuple[AuditOutcome, AuditReasonCode]] = {
@@ -271,6 +308,33 @@ def test_begin_mutation_rejects_standalone_actions(tmp_path: Path) -> None:
                 action=action, target_id="E1", context=context()
             )
     assert journal_path(tmp_path).read_bytes() == b""
+
+
+def test_user_management_intents_target_the_account(tmp_path: Path) -> None:
+    """P5.6 actions identify the managed account, not an employee."""
+    service, _ = build_service(tmp_path)
+    for action in (
+        AuditAction.USER_CREATE,
+        AuditAction.USER_ROLE_CHANGE,
+        AuditAction.USER_DEACTIVATE,
+        AuditAction.FIRST_ADMIN_PROVISION,
+    ):
+        mutation = service.begin_mutation(
+            action=action,
+            target_id="account-7",
+            context=context(),
+            source=(
+                AuditSource.CLI
+                if action is AuditAction.FIRST_ADMIN_PROVISION
+                else AuditSource.API
+            ),
+        )
+        assert mutation.event.target_type is AuditTargetType.ACCOUNT
+        assert mutation.event.target_id == "account-7"
+        result = service.record_applied(mutation)
+        assert result.correlation_id == mutation.event.audit_id
+        assert result.target_type is AuditTargetType.ACCOUNT
+        assert result.target_id == "account-7"
 
 
 def test_begin_mutation_requires_actor_and_target(tmp_path: Path) -> None:

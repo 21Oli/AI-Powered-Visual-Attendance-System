@@ -69,7 +69,9 @@ def test_duplicate_identity_maps_to_a_typed_error_only_for_sqlstate_23505() -> N
     server, repository = build()
     server.error = FakeDriverError("23505")
     with pytest.raises(UserAlreadyExists) as excinfo:
-        repository.create(make_user())
+        # Operator creation takes no invariant lock, so the scripted driver
+        # failure lands on the INSERT itself.
+        repository.create(make_user(role=Role.OPERATOR))
     # The driver message is never surfaced.
     assert "driver detail leak" not in str(excinfo.value)
     assert isinstance(excinfo.value.__cause__, FakeDriverError)
@@ -79,7 +81,7 @@ def test_other_sqlstates_propagate_unchanged() -> None:
     server, repository = build()
     server.error = FakeDriverError("42P01")
     with pytest.raises(FakeDriverError):
-        repository.create(make_user())
+        repository.create(make_user(role=Role.OPERATOR))
 
 
 def test_create_requires_a_validated_user() -> None:
@@ -334,3 +336,119 @@ def test_update_password_hash_rejects_an_empty_hash_before_any_query() -> None:
         with pytest.raises(UserValidationError):
             repository.update_password_hash("u_0001", bad)  # type: ignore[arg-type]
     assert server.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Admin-invariant synchronization (every invariant operation, one section)
+# ---------------------------------------------------------------------------
+
+
+def _invariant_prefix(server: FakeServer) -> list[tuple[str, tuple[object, ...]]]:
+    """The two statements that must open every invariant transaction."""
+    return server.calls[:2]
+
+
+def test_admin_creation_takes_the_shared_invariant_lock_first() -> None:
+    from src.user_repository import _ADMIN_INVARIANT_LOCK_KEY
+
+    server, repository = build()
+    repository.create(make_user(role=Role.ADMIN))
+
+    prefix = _invariant_prefix(server)
+    assert prefix[0] == ("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+    assert prefix[1] == (
+        "SELECT pg_advisory_xact_lock(%s)",
+        (_ADMIN_INVARIANT_LOCK_KEY,),
+    )
+    assert "INSERT INTO app_user" in server.calls[2][0]
+    assert server.connections[0].committed is True
+
+
+def test_non_admin_creation_takes_no_invariant_lock() -> None:
+    for role in (Role.HR_MANAGER, Role.OPERATOR, Role.AUDITOR):
+        server, repository = build()
+        repository.create(make_user(role=role))
+        assert len(server.calls) == 1
+        assert "INSERT INTO app_user" in server.calls[0][0]
+
+
+def test_first_admin_provisioning_uses_the_shared_invariant_section() -> None:
+    from src.user_repository import _ADMIN_INVARIANT_LOCK_KEY
+
+    server, repository = build(rows=[(False,)])
+    user = repository.provision_first_admin(make_user(role=Role.ADMIN), updated_at=CREATED)
+
+    assert user.role is Role.ADMIN
+    prefix = _invariant_prefix(server)
+    assert prefix[0] == ("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+    assert prefix[1] == (
+        "SELECT pg_advisory_xact_lock(%s)",
+        (_ADMIN_INVARIANT_LOCK_KEY,),
+    )
+    assert "SELECT EXISTS" in server.calls[2][0]
+    assert "INSERT INTO app_user" in server.calls[3][0]
+    assert server.connections[0].committed is True
+
+
+def test_first_admin_provisioning_refuses_when_an_admin_exists() -> None:
+    from src.user_repository import LastAdminProtectionError
+
+    server, repository = build(rows=[(True,)])
+    with pytest.raises(LastAdminProtectionError):
+        repository.provision_first_admin(make_user(role=Role.ADMIN), updated_at=CREATED)
+    assert "INSERT INTO app_user" not in "".join(sql for sql, _ in server.calls)
+    assert server.connections[0].committed is False
+
+
+def test_first_admin_provisioning_translates_duplicate_identity() -> None:
+    server, repository = build(rows=[(False,)])
+
+    original = server.connect
+
+    class _InsertFailureConnection:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, params):
+            if "INSERT INTO app_user" in sql:
+                raise FakeDriverError("23505")
+            return self._inner.execute(sql, params)
+
+        def commit(self):
+            return self._inner.commit()
+
+        def rollback(self):
+            return self._inner.rollback()
+
+        def close(self):
+            return self._inner.close()
+
+    repository = open_user_repository(
+        connection_opener=lambda dsn=None: _InsertFailureConnection(original(dsn))
+    )
+    with pytest.raises(UserAlreadyExists):
+        repository.provision_first_admin(make_user(role=Role.ADMIN), updated_at=CREATED)
+
+
+def test_role_change_lock_is_taken_before_the_target_is_read() -> None:
+    # Non-Admin target: no invariant count is needed, but the operation still
+    # runs inside the shared section and the lock still precedes the read.
+    server, repository = build([user_row(role="Operator")])
+    repository.update_role_with_admin_check(
+        "u_0001", Role.AUDITOR, updated_at=CREATED
+    )
+    sqls = [sql for sql, _ in server.calls]
+    assert sqls[0] == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+    assert sqls[1].startswith("SELECT pg_advisory_xact_lock")
+    assert sqls[2].startswith("SELECT user_id, username")
+
+
+def test_deactivation_lock_is_taken_before_the_target_is_read() -> None:
+    server, repository = build([user_row(role="Operator")])
+    repository.update_active_with_admin_check(
+        "u_0001", False, updated_at=CREATED
+    )
+    sqls = [sql for sql, _ in server.calls]
+    assert sqls[0] == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+    assert sqls[1].startswith("SELECT pg_advisory_xact_lock")
+    assert sqls[2].startswith("SELECT user_id, username")

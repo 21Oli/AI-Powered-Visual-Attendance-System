@@ -116,16 +116,16 @@ def _inventory(app) -> list[tuple[str, str]]:
     return pairs
 
 
-def test_route_inventory_is_exactly_the_approved_eight() -> None:
+def test_route_inventory_is_exactly_the_approved_inventory() -> None:
     app = create_app()
     inventory = _inventory(app)
     expected = sorted(
         (f"{API_PREFIX}{path}", method) for path, method in APPROVED_ROUTES
     )
     assert sorted(inventory) == expected
-    assert len(expected) == 11, (
-        "eight business routes plus P5.4.5 login, P5.4.6 logout and "
-        "P5.4.7 me"
+    assert len(expected) == 15, (
+        "eight business routes plus P5.4.5 login, P5.4.6 logout, "
+        "P5.4.7 me and the four P5.6 user-administration routes"
     )
 
 

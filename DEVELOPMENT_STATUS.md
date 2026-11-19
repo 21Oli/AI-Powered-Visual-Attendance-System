@@ -12,7 +12,7 @@ Updated after every verified step — never ahead of implementation.
 | P5.3 | Authentication primitives | Completed (offline) |
 | P5.4 | Authentication API: session service, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10) | Completed offline through P5.4.10 and accepted (committed through `b0583df`) |
 | P5.5 | Audit journal and security-event auditing | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer, P5.5.4 service and P5.5.5 route integration **implemented, awaiting review** (P5.5.5 committed in `4dcb154`); P5.5.6 verifier CLI **accepted (committed `87c73e5`)**; P5.5.7.2 manifest schema/integrity **accepted (committed `c2871f3`)**; P5.5.7 manifest persistence, rotation, recovery, retention and manifest-aware verification **implemented, awaiting review**; P5.5.8 in progress: P5.5.8.2, P5.5.8.3 and P5.5.8.4 **implemented, awaiting review** (68 + 5 tests); P5.5.8.5 documentation reconciliation done; P5.5.8.6 evidence pack prepared — all awaiting independent review |
-| P5.6 | User administration and secure first-Admin provisioning | Not started |
+| P5.6 | User administration and secure first-Admin provisioning | **Implemented, awaiting independent review**; real-PostgreSQL concurrency scenarios **blocked** (dedicated test database has no `app_user`/`user_session` schema) |
 | P5.7 | Frontend authentication and session integration | Not started |
 | P5.8 | Role-aware UI and frontend security hardening | Not started |
 | P5.9 | Final security regression, integration review and Phase 5 acceptance | Not started |
@@ -25,6 +25,119 @@ sequence, and the scope formerly grouped as "P5.4.10+" is split into P5.5
 (audit), P5.6 (user administration), P5.7 (frontend authentication), P5.8
 (role-aware UI/hardening) and P5.9 (final review). The Step records below are
 preserved unchanged.
+
+## Step 73 — Phase 5 P5.6: user administration and first-Admin provisioning (2026-11-19)
+
+**Implemented, awaiting independent review. No Git operation by the assistant; no
+migration was added or executed; no live PostgreSQL or real credentials used.**
+
+* **API dependency flow.** `src/api_user.py` now owns route definitions only.
+  `register_user_routes` requires the application's *cached*
+  `get_user_service` and `get_session_service` getters; it no longer reads
+  `session_service._users` (private attribute) and no longer constructs a
+  `UserService`, `AuditJournalWriter` or audit service per request. The new
+  `build_user_service(settings, *, sessions, audit)` mirrors
+  `build_login_service` (DSN check before repository/driver imports).
+* **Production wiring.** `src/api.py` imports and registers the four routes
+  under `API_PREFIX`, adds `_resolve_user_service` (one service per app,
+  `503 AUDIT_UNAVAILABLE` when the audit subsystem is restricted), extends
+  `ApprovedRoute` inventory from 11 to 15, and accepts a `user_service` test
+  seam. Previously the four endpoints existed only in the module and were never
+  served.
+* **CLI.** `src/user_provision.py` was not runnable (`UserService()` was called
+  without the now-required `sessions`, and `UserAlreadyExistsError` was never
+  imported). It now composes a real `SessionService`, reuses
+  `AuditSubsystem(production_audit_builder(settings))` and reports sanitized
+  failures. Verified with `python -m src.user_provision --help` (exit 0) and
+  `import src.user_provision`.
+* **Review fix — no paginated last-admin pre-check.** `UserService` no longer
+  counts active Admins with `_active_admin_count()` / `_assert_not_last_admin()`
+  before a demotion. `UserRepository.list` is keyset-paginated (default page
+  size 50), so that count could see one page only and both refuse a safe
+  demotion and allow an unsafe one. The invariant is decided solely by the
+  repository's advisory-lock-guarded `update_role_with_admin_check` /
+  `update_active_with_admin_check`; the service translates their
+  `LastAdminProtectionError` into `LastAdminProtectedError`. Three regression
+  tests pin this: role change and deactivation never call `list`, and a lone
+  Admin among 120 non-Admin users is still refused.
+* **Final correction — one invariant strategy for every operation.** Admin
+  creation now takes the same lock as provisioning, demotion and deactivation:
+  `UserRepository.create` runs the Admin insert inside
+  `_begin_admin_invariant_transaction`, which issues
+  `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` and then
+  `pg_advisory_xact_lock(_ADMIN_INVARIANT_LOCK_KEY)` before any read or write.
+  The count is read only when the target is an active Admin losing that status,
+  so non-Admin operations are never refused because one active Admin exists.
+  The module docstring's "works under all isolation levels" claim was removed:
+  the lock serialises the decision, and the enforced `READ COMMITTED` snapshot
+  is what makes the waiter see the winner's commit. Stated limits: cooperating
+  operations only, single global key, no database constraint for the invariant.
+  Dead constants (`_PROVISION_FIRST_ADMIN_SQL` with its contradictory
+  "no separate lock needed" comment) were removed; provisioning now checks and
+  inserts under the lock with the ordinary unique-violation translation.
+* **Final correction — accurate audit and session outcomes.** Untyped mutation
+  failures are recorded `DATABASE_OUTCOME_UNKNOWN` instead of leaving an
+  intent without a result; a successful mutation whose result write fails keeps
+  the `AUDIT_RESULT_UNCERTAIN` contract; a session-revocation failure after an
+  applied deactivation is recorded uncertain and answered
+  `503 SESSION_REVOCATION_FAILED` (the message says the account is deactivated
+  and not to retry blindly); retrying an already-inactive account still revokes
+  its sessions. `_require_admin` now raises `ActorNotAdminError`
+  (`403 FORBIDDEN`) and provisioning an existing Admin raises
+  `AdminAlreadyExistsError`, replacing the misleading `NO_ACTIVE_ADMIN` on both
+  paths. API error mapping is status-aware (400/403/503) and still fixed-text.
+* **Final correction — production app-scoped service.** `_resolve_user_service`
+  now builds the single `UserService` under a lock, so two overlapping first
+  requests cannot create two instances.
+* **Repository review fixes.** Removed the unused
+  `create_admin_with_invariant_check` (dead code whose "requires another active
+  Admin" rule does not match creation semantics), removed the unused
+  `actor_user_id` parameters from the two invariant-checking update methods, and
+  translated a SQLSTATE 23505 raised during `provision_first_admin` into
+  `UserAlreadyExists` instead of letting a driver error escape.
+* **Tests.** New `tests/test_user_provision.py` (6 CLI tests).
+  `tests/test_api_user.py` now builds its routes through `register_user_routes`
+  and adds four tests against the real `create_app` (route inventory,
+  authentication, `users:manage`, Admin happy path). Removed the unused
+  `FakeSessionRepository` double (it referenced an unimported
+  `dataclasses.replace`) and unused imports. `tests/test_api.py`,
+  `tests/test_api_me.py` and `tests/test_api_rbac.py` were updated for the
+  11 → 15 route inventory; the RBAC test keeps the seven-route authorization
+  matrix and asserts the four user routes are in the protected set.
+* **Blocked — genuine PostgreSQL concurrency.** `tests/test_tier2_user_concurrency.py`
+  now contains seven real scenarios with independent connections, a
+  `threading.Barrier` and final committed-state assertions: two simultaneous
+  first-Admin provisions; two Admins deactivating each other; two Admins
+  demoting each other; concurrent Admin creation and Admin demotion; safe
+  non-Admin deactivation and safe non-Admin role change with exactly one active
+  Admin; and the enforced `READ COMMITTED` proven against a `REPEATABLE READ`
+  session default. Every scenario refuses to touch foreign Admin rows and
+  deletes only its own `T2-UC-*` rows and sessions. The guarded database
+  `visual_attendance_tier2_test` passes the tier2 guard but is still V001
+  (`employee`, `schema_version`, `_phase3_test_guard` only). **Cause verified:**
+  the configured DSN authenticates as `attendance_tier2_runtime`
+  (`rolsuper=false`, `has_schema_privilege(...,'public','CREATE')=false`), and
+  the existing tables are owned by `postgres`. Applying V002 through
+  `src.db_migrate.migrate` + `PsycopgMigrationExecutor` was refused by the
+  server (`InsufficientPrivilege: permission denied for schema public`), rolled
+  back completely, and left the database at version 1 — no schema changed. Each
+  scenario skips with the explicit BLOCKED reason naming the privilege
+  requirement. The owner runbook (privileged apply, ledger checksum
+  `35bc00cd…82d3`, runtime grants, rerun) is in
+  `docs/PHASE5_IMPLEMENTATION_PLAN.md` §10.1. Reported **BLOCKED**, not passed;
+  no fake-only substitute claims concurrency verification.
+* **Verification (final).** Full backend suite
+  (`.venv/Scripts/python.exe -m pytest -q`): **3958 passed, 40 skipped, exit 0**
+  (332.01 s). Focused: `tests/test_user_repository.py` 45 passed;
+  `tests/test_user_service.py` 38 passed; `tests/test_api_user.py` 28 passed;
+  `tests/test_user_provision.py` 7 passed; `tests/test_audit_schema.py` +
+  `tests/test_audit_service.py` 212 passed; `tests/test_session_service.py` +
+  `tests/test_api_auth.py` 66 passed. `ATTENDANCE_TIER2_OPT_IN=1
+  .venv/Scripts/python.exe -m pytest tests/test_tier2_user_concurrency.py -q`:
+  **7 skipped** with the explicit BLOCKED reason (no `app_user`/
+  `user_session`; the runtime DSN cannot create them). Static checks: `python -m compileall -q
+  src tests` exit 0; `git diff --check` clean (LF→CRLF warnings only). No lint or
+  type checker is configured in this project.
 
 ## Step 72 — Phase 5 P5.5.8.3: audit failure and recovery regression (2026-11-18)
 

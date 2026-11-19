@@ -29,6 +29,56 @@ Uniqueness
 surfaces as SQLSTATE ``23505`` and is translated to
 :class:`UserAlreadyExists` (psycopg 3's ``sqlstate`` attribute, duck-typed —
 no driver import; any other SQLSTATE propagates untouched).
+
+Concurrency control for admin-invariant operations
+--------------------------------------------------
+
+Operations that can change the active-Admin count use **one** strategy:
+
+1. the transaction is explicitly set to ``READ COMMITTED``;
+2. the transaction-level advisory lock :data:`_ADMIN_INVARIANT_LOCK_KEY` is
+   acquired with ``pg_advisory_xact_lock``;
+3. only then is the invariant checked and the row changed, in the same
+   transaction.
+
+All four invariant-affecting operations use
+:func:`_begin_admin_invariant_transaction`: ordinary Admin creation
+(:meth:`UserRepository.create` when ``role is Role.ADMIN``), first-Admin
+provisioning (:meth:`UserRepository.provision_first_admin`), Admin demotion
+(:meth:`UserRepository.update_role_with_admin_check`) and Admin deactivation
+(:meth:`UserRepository.update_active_with_admin_check`). Non-Admin creation
+and non-Admin updates cannot change the active-Admin count, so they take no
+lock.
+
+Why ``READ COMMITTED`` is required and enforced
+-----------------------------------------------
+
+The advisory lock serializes the *decision*, but the decision reads committed
+rows. Under ``READ COMMITTED`` each statement takes a fresh snapshot, so the
+transaction that waited for the lock sees the winner's committed update. Under
+``REPEATABLE READ`` or ``SERIALIZABLE`` the transaction's snapshot is fixed at
+its first statement, so the waiter would still see the pre-update state and
+could take a stale decision (zero Admins left, or a needless refusal).
+Therefore each invariant transaction issues
+``SET TRANSACTION ISOLATION LEVEL READ COMMITTED`` as its first statement,
+overriding a stricter server/role/session default, before acquiring the lock.
+This is why fresh connections (one operation = one connection) are required:
+``SET TRANSACTION`` is only accepted before the transaction's first query.
+
+Limitations
+-----------
+
+* The invariant is enforced only between operations that cooperate with this
+  lock. Direct SQL, another application, or a repository method that does not
+  take the lock can still break it; the database has no constraint for "at
+  least one active Admin".
+* The lock is a single global key, so invariant operations serialize with each
+  other (a deliberate availability trade-off for a rarely used admin path).
+* Correctness is asserted for ``READ COMMITTED`` only. The isolation level is
+  set per transaction rather than assumed from server configuration.
+* ``SET TRANSACTION`` fails if a caller hands in a connection whose transaction
+  already executed a statement; the repository therefore never reuses a
+  connection across operations.
 """
 
 from __future__ import annotations
@@ -55,6 +105,11 @@ class UserAlreadyExists(RuntimeError):
 
 class UserNotFound(RuntimeError):
     """An update found no user for the given ``user_id``."""
+
+
+class LastAdminProtectionError(RuntimeError):
+    """An operation would leave the system without an active administrator."""
+
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +161,34 @@ _UPDATE_PASSWORD_HASH_SQL: Final[str] = (
 #: exception object — no driver import needed for detection).
 _UNIQUE_VIOLATION_SQLSTATE: Final[str] = "23505"
 
+#: SQL to count active admins (used for last-admin protection).
+_COUNT_ACTIVE_ADMINS_SQL: Final[str] = (
+    "SELECT COUNT(*) FROM app_user WHERE role = 'Admin' AND is_active = TRUE"
+)
+
+#: PostgreSQL transaction-level advisory lock key for admin-invariant operations.
+#: This is a fixed, application-chosen 64-bit integer. Transaction-level locks
+#: (pg_advisory_xact_lock) are used so the lock auto-releases at commit/rollback.
+_ADMIN_INVARIANT_LOCK_KEY: Final[int] = 0x41444D494E560001  # "ADMININV" + padding
+
+#: Enforced isolation for every admin-invariant transaction. The decision reads
+#: committed rows *after* the lock is granted, which is only correct with a
+#: fresh snapshot per statement; see the module docstring for the full proof
+#: obligation and its limits.
+_SET_READ_COMMITTED_SQL: Final[str] = (
+    "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+)
+
+#: SQL to acquire the admin-invariant advisory lock (transaction-scoped).
+_ACQUIRE_ADMIN_LOCK_SQL: Final[str] = (
+    "SELECT pg_advisory_xact_lock(%s)"
+)
+
+#: SQL to check if any active admin exists (for first-admin provisioning guard).
+_COUNT_ACTIVE_ADMINS_EXISTS_SQL: Final[str] = (
+    "SELECT EXISTS(SELECT 1 FROM app_user WHERE role = 'Admin' AND is_active = TRUE)"
+)
+
 _ROW_COLUMNS: Final[tuple[str, ...]] = (
     "user_id",
     "username",
@@ -116,6 +199,19 @@ _ROW_COLUMNS: Final[tuple[str, ...]] = (
     "created_at",
     "updated_at",
 )
+
+
+def _begin_admin_invariant_transaction(connection: object) -> None:
+    """Start the shared admin-invariant transaction section.
+
+    Must run before any other statement in the transaction: it pins
+    ``READ COMMITTED`` and then blocks on the application-wide advisory lock.
+    The caller must already hold the connection that owns the transaction.
+    """
+    connection.execute(_SET_READ_COMMITTED_SQL, ())  # type: ignore[attr-defined]
+    connection.execute(  # type: ignore[attr-defined]
+        _ACQUIRE_ADMIN_LOCK_SQL, (_ADMIN_INVARIANT_LOCK_KEY,)
+    )
 
 
 def _row_to_user(row: Iterable[object]) -> User:
@@ -180,31 +276,35 @@ class UserRepository:
         with self._connection_factory() as connection:
             return connection.execute(sql, params)  # type: ignore[attr-defined]
 
+    def _execute_insert(self, connection: object, user: User) -> None:
+        """Insert on an existing connection, translating only SQLSTATE 23505."""
+        try:
+            connection.execute(  # type: ignore[attr-defined]
+                _INSERT_SQL,
+                (
+                    user.user_id,
+                    user.username,
+                    user.username_key,
+                    user.password_hash,
+                    user.role.value,
+                    user.is_active,
+                    user.created_at,
+                    user.updated_at,
+                ),
+            )
+        except UserAlreadyExists:
+            raise
+        except Exception as exc:
+            if getattr(exc, "sqlstate", None) == _UNIQUE_VIOLATION_SQLSTATE:
+                raise UserAlreadyExists(
+                    "a user already exists for the requested id or username"
+                ) from exc
+            raise
+
     def _run_insert(self, user: User) -> None:
-        """Insert, translating **only** a unique violation to a typed error."""
+        """Insert on a plain connection (no invariant lock)."""
         with self._connection_factory() as connection:
-            try:
-                connection.execute(  # type: ignore[attr-defined]
-                    _INSERT_SQL,
-                    (
-                        user.user_id,
-                        user.username,
-                        user.username_key,
-                        user.password_hash,
-                        user.role.value,
-                        user.is_active,
-                        user.created_at,
-                        user.updated_at,
-                    ),
-                )
-            except UserAlreadyExists:
-                raise
-            except Exception as exc:
-                if getattr(exc, "sqlstate", None) == _UNIQUE_VIOLATION_SQLSTATE:
-                    raise UserAlreadyExists(
-                        "a user already exists for the requested id or username"
-                    ) from exc
-                raise
+            self._execute_insert(connection, user)
 
     # -- approved operations ------------------------------------------------
 
@@ -220,6 +320,15 @@ class UserRepository:
                 "create expects an already-validated User instance, got "
                 f"{type(user).__name__}"
             )
+        if user.role is Role.ADMIN:
+            # Ordinary Admin creation participates in the shared invariant lock:
+            # it only increases the active-Admin count, but every operation that
+            # touches that count must serialize through the same section so a
+            # concurrent demotion/deactivation cannot decide on a stale count.
+            with self._connection_factory() as connection:
+                _begin_admin_invariant_transaction(connection)
+                self._execute_insert(connection, user)
+            return user
         self._run_insert(user)
         return user
 
@@ -329,6 +438,213 @@ class UserRepository:
                 "no user was updated because the requested user does not exist"
             )
         return _row_to_user(row)
+
+    def update_active_with_admin_check(
+        self,
+        target_user_id: str,
+        is_active: bool,
+        *,
+        updated_at: datetime,
+    ) -> User:
+        """Atomically deactivate a user while protecting the last-admin invariant.
+
+        This method performs the admin-count check and the update in a single
+        connection/transaction to prevent TOCTOU races. Raises
+        :class:`LastAdminProtectionError` if the operation would leave no active
+        admin.
+
+        Parameters
+        ----------
+        target_user_id:
+            The user to deactivate.
+        is_active:
+            The new active state (typically False for deactivation).
+        updated_at:
+            The application-authored timestamp.
+
+        Returns
+        -------
+        User
+            The updated user row.
+
+        Raises
+        ------
+        LastAdminProtectionError
+            If deactivating this user would leave zero active admins.
+        UserNotFound
+            If the target user does not exist.
+        """
+        if not isinstance(is_active, bool):
+            raise UserValidationError(
+                f"is_active must be a bool, got {type(is_active).__name__}"
+            )
+        user, updated = _validated_update_args(target_user_id, updated_at)
+
+        with self._connection_factory() as connection:
+            _begin_admin_invariant_transaction(connection)
+
+            target_row = connection.execute(_GET_SQL, (user,)).fetchone()
+            if target_row is None:
+                raise UserNotFound(
+                    "no user was updated because the requested user does not exist"
+                )
+            target = _row_to_user(target_row)
+
+            # Only an active Admin losing active status can reduce the count.
+            # Every other case (reactivation, non-Admin, already inactive) is
+            # allowed even when exactly one active Admin exists.
+            affects_invariant = (
+                target.role is Role.ADMIN
+                and target.is_active is True
+                and is_active is False
+            )
+            if affects_invariant:
+                cursor = connection.execute(_COUNT_ACTIVE_ADMINS_SQL, ())
+                count_row = cursor.fetchone()
+                active_admin_count = int(count_row[0]) if count_row else 0
+                if active_admin_count < 2:
+                    raise LastAdminProtectionError(
+                        "the last active administrator cannot be deactivated"
+                    )
+
+            row = connection.execute(
+                _UPDATE_ACTIVE_SQL, (is_active, updated, user)
+            ).fetchone()  # type: ignore[attr-defined]
+            if row is None:
+                raise UserNotFound(
+                    "no user was updated because the requested user does not exist"
+                )
+            return _row_to_user(row)
+
+    def provision_first_admin(
+        self,
+        user: User,
+        *,
+        updated_at: datetime,
+    ) -> User:
+        """Create the first Admin account in the shared invariant transaction.
+
+        Runs in the same enforced-``READ COMMITTED`` advisory-lock section as
+        every other invariant-affecting operation. Concurrent attempts serialize:
+        the waiter re-reads the committed state after the winner releases the
+        lock and refuses with :class:`LastAdminProtectionError`. The
+        ``username_key`` / ``user_id`` unique constraints remain the final
+        authority for duplicate identity.
+
+        Parameters
+        ----------
+        user:
+            The validated Admin user to create (must be the first Admin).
+        updated_at:
+            The application-authored timestamp.
+
+        Returns
+        -------
+        User
+            The created user.
+
+        Raises
+        ------
+        UserAlreadyExists
+            If another Admin was created concurrently, or the user_id/username
+            is already taken.
+        """
+        if not isinstance(user, User):
+            raise UserValidationError(
+                "create expects an already-validated User instance, got "
+                f"{type(user).__name__}"
+            )
+        if user.role is not Role.ADMIN:
+            raise UserValidationError("provision_first_admin requires an Admin role")
+
+        with self._connection_factory() as connection:
+            _begin_admin_invariant_transaction(connection)
+
+            # Under the lock, a fresh READ COMMITTED snapshot shows whether a
+            # concurrent attempt has already committed an Admin.
+            cursor = connection.execute(_COUNT_ACTIVE_ADMINS_EXISTS_SQL, ())
+            row = cursor.fetchone()
+            admin_exists = bool(row[0]) if row else False
+            if admin_exists:
+                raise LastAdminProtectionError(
+                    "an active administrator already exists; provisioning refused"
+                )
+
+            self._execute_insert(connection, user)
+            return user
+
+    def update_role_with_admin_check(
+        self,
+        target_user_id: str,
+        new_role: Role,
+        *,
+        updated_at: datetime,
+    ) -> User:
+        """Atomically change a user's role while protecting the last-admin invariant.
+
+        Used when demoting an Admin. Acquires the admin-invariant advisory lock
+        before checking that the demotion would not leave zero active admins.
+
+        Parameters
+        ----------
+        target_user_id:
+            The user whose role is being changed.
+        new_role:
+            The new role.
+        updated_at:
+            The application-authored timestamp.
+
+        Returns
+        -------
+        User
+            The updated user row.
+
+        Raises
+        ------
+        LastAdminProtectionError
+            If demoting this admin would leave zero active admins.
+        UserNotFound
+            If the target user does not exist.
+        """
+        if not isinstance(new_role, Role):
+            raise UserValidationError(
+                f"role must be a Role member, got {type(new_role).__name__}"
+            )
+        user, updated = _validated_update_args(target_user_id, updated_at)
+
+        with self._connection_factory() as connection:
+            _begin_admin_invariant_transaction(connection)
+
+            target_row = connection.execute(_GET_SQL, (user,)).fetchone()
+            if target_row is None:
+                raise UserNotFound(
+                    "no user was updated because the requested user does not exist"
+                )
+            target = _row_to_user(target_row)
+
+            # Only demoting an active Admin can reduce the count.
+            affects_invariant = (
+                target.role is Role.ADMIN
+                and target.is_active is True
+                and new_role is not Role.ADMIN
+            )
+            if affects_invariant:
+                cursor = connection.execute(_COUNT_ACTIVE_ADMINS_SQL, ())
+                count_row = cursor.fetchone()
+                active_admin_count = int(count_row[0]) if count_row else 0
+                if active_admin_count < 2:
+                    raise LastAdminProtectionError(
+                        "the last active administrator cannot be demoted"
+                    )
+
+            row = connection.execute(
+                _UPDATE_ROLE_SQL, (new_role.value, updated, user)
+            ).fetchone()  # type: ignore[attr-defined]
+            if row is None:
+                raise UserNotFound(
+                    "no user was updated because the requested user does not exist"
+                )
+            return _row_to_user(row)
 
     def update_password_hash(self, user_id: str, password_hash: str) -> None:
         """Replace one user's stored password hash (P5.4.5 rehash persistence).

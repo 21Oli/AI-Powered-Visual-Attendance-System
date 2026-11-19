@@ -68,6 +68,7 @@ from src.audit_schema import (
     AuditSchemaError,
     AuditSource,
     AuditTargetType,
+    USER_MANAGEMENT_ACTIONS,
 )
 from src.audit_writer import AuditJournalError, AuditJournalWriter
 from src.clock import Clock, utc_now
@@ -85,6 +86,7 @@ __all__ = [
     "AuditUnavailableError",
     "MUTATION_ACTIONS",
     "MutationIntent",
+    "USER_MANAGEMENT_ACTIONS",
 ]
 
 #: Stable machine code for "the operation was not attempted because it could
@@ -94,12 +96,16 @@ AUDIT_UNAVAILABLE_CODE: Final[str] = "AUDIT_UNAVAILABLE"
 #: not be recorded" (design §10.1). HTTP mapping is P5.5.5.
 AUDIT_RESULT_UNCERTAIN_CODE: Final[str] = "AUDIT_RESULT_UNCERTAIN"
 
-#: The four mutation actions, in the order used by the design record.
+#: The mutation actions, in the order used by the design record.
 MUTATION_ACTIONS: Final[tuple[AuditAction, ...]] = (
     AuditAction.EMPLOYEE_CREATE,
     AuditAction.EMPLOYEE_UPDATE,
     AuditAction.EMPLOYEE_DEACTIVATE,
     AuditAction.ATTENDANCE_CHECKOUT,
+    AuditAction.USER_CREATE,
+    AuditAction.USER_ROLE_CHANGE,
+    AuditAction.USER_DEACTIVATE,
+    AuditAction.FIRST_ADMIN_PROVISION,
 )
 
 _STANDALONE_ACTIONS: Final[frozenset[AuditAction]] = frozenset(
@@ -305,6 +311,59 @@ _MUTATION_RESULTS: Final[dict[AuditAction, frozenset[_ResultKey]]] = {
             (AuditOutcome.UNCERTAIN, AuditReasonCode.PERSISTENCE_UNCONFIRMED),
         }
     ),
+    AuditAction.USER_CREATE: frozenset(
+        {
+            (AuditOutcome.SUCCESS, AuditReasonCode.OK),
+            (AuditOutcome.ERROR, AuditReasonCode.EMPLOYEE_EXISTS),
+            (AuditOutcome.ERROR, AuditReasonCode.VALIDATION_FAILED),
+            (AuditOutcome.ERROR, AuditReasonCode.DATABASE_UNAVAILABLE),
+            (AuditOutcome.ERROR, AuditReasonCode.INTERNAL_ERROR),
+            (
+                AuditOutcome.UNCERTAIN,
+                AuditReasonCode.DATABASE_OUTCOME_UNKNOWN,
+            ),
+        }
+    ),
+    AuditAction.USER_ROLE_CHANGE: frozenset(
+        {
+            (AuditOutcome.SUCCESS, AuditReasonCode.OK),
+            (AuditOutcome.ERROR, AuditReasonCode.EMPLOYEE_NOT_FOUND),
+            (AuditOutcome.ERROR, AuditReasonCode.VALIDATION_FAILED),
+            (AuditOutcome.ERROR, AuditReasonCode.DATABASE_UNAVAILABLE),
+            (AuditOutcome.ERROR, AuditReasonCode.INTERNAL_ERROR),
+            (
+                AuditOutcome.UNCERTAIN,
+                AuditReasonCode.DATABASE_OUTCOME_UNKNOWN,
+            ),
+        }
+    ),
+    AuditAction.USER_DEACTIVATE: frozenset(
+        {
+            (AuditOutcome.SUCCESS, AuditReasonCode.OK),
+            (AuditOutcome.ERROR, AuditReasonCode.EMPLOYEE_NOT_FOUND),
+            (AuditOutcome.ERROR, AuditReasonCode.EMPLOYEE_INACTIVE),
+            (AuditOutcome.ERROR, AuditReasonCode.VALIDATION_FAILED),
+            (AuditOutcome.ERROR, AuditReasonCode.DATABASE_UNAVAILABLE),
+            (AuditOutcome.ERROR, AuditReasonCode.INTERNAL_ERROR),
+            (
+                AuditOutcome.UNCERTAIN,
+                AuditReasonCode.DATABASE_OUTCOME_UNKNOWN,
+            ),
+        }
+    ),
+    AuditAction.FIRST_ADMIN_PROVISION: frozenset(
+        {
+            (AuditOutcome.SUCCESS, AuditReasonCode.OK),
+            (AuditOutcome.ERROR, AuditReasonCode.EMPLOYEE_EXISTS),
+            (AuditOutcome.ERROR, AuditReasonCode.VALIDATION_FAILED),
+            (AuditOutcome.ERROR, AuditReasonCode.DATABASE_UNAVAILABLE),
+            (AuditOutcome.ERROR, AuditReasonCode.INTERNAL_ERROR),
+            (
+                AuditOutcome.UNCERTAIN,
+                AuditReasonCode.DATABASE_OUTCOME_UNKNOWN,
+            ),
+        }
+    ),
 }
 
 _LOGIN_RESULTS: Final[frozenset[_ResultKey]] = frozenset(
@@ -475,13 +534,19 @@ class AuditService:
         clean_metadata = _validate_metadata(metadata)
         source = self._require_source(source)
 
+        # User management actions target ACCOUNT, not EMPLOYEE.
+        target_type: AuditTargetType = (
+            AuditTargetType.ACCOUNT
+            if action in USER_MANAGEMENT_ACTIONS
+            else AuditTargetType.EMPLOYEE
+        )
         event = self._append_or_unavailable(
             action=action,
             outcome=AuditOutcome.UNCERTAIN,
             reason_code=AuditReasonCode.AWAITING_RESULT,
             source=source,
             actor=context.actor,
-            target_type=AuditTargetType.EMPLOYEE,
+            target_type=target_type,
             target_id=target,
             correlation_id=None,
             request_id=context.request_id,
@@ -527,6 +592,12 @@ class AuditService:
             self._results_recorded.add(issued.audit_id)
 
         resolved_outcome, resolved_reason = pair
+        # User management actions target ACCOUNT, not EMPLOYEE.
+        target_type: AuditTargetType = (
+            AuditTargetType.ACCOUNT
+            if issued.action in USER_MANAGEMENT_ACTIONS
+            else AuditTargetType.EMPLOYEE
+        )
         try:
             event = self._append(
                 action=issued.action,
@@ -534,7 +605,7 @@ class AuditService:
                 reason_code=resolved_reason,
                 source=issued.source,
                 actor=issued.actor,
-                target_type=AuditTargetType.EMPLOYEE,
+                target_type=target_type,
                 target_id=issued.target_id,
                 correlation_id=issued.audit_id,
                 request_id=issued.event.request_id,
@@ -613,6 +684,88 @@ class AuditService:
             outcome=AuditOutcome.UNCERTAIN,
             reason_code=reason_code,
             metadata=metadata,
+        )
+
+    # -- user management helpers (P5.6) ------------------------------------
+
+    def begin_user_create(
+        self,
+        *,
+        target_id: str,
+        context: AuditContext,
+        metadata: Mapping[str, str | int | bool] | None = None,
+        source: AuditSource = AuditSource.API,
+    ) -> MutationIntent:
+        """Begin auditing a user creation (P5.6).
+
+        ``target_id`` is the new user's ``user_id``.
+        """
+        return self.begin_mutation(
+            action=AuditAction.USER_CREATE,
+            target_id=target_id,
+            context=context,
+            metadata=metadata,
+            source=source,
+        )
+
+    def begin_user_role_change(
+        self,
+        *,
+        target_id: str,
+        context: AuditContext,
+        metadata: Mapping[str, str | int | bool] | None = None,
+        source: AuditSource = AuditSource.API,
+    ) -> MutationIntent:
+        """Begin auditing a user role change (P5.6).
+
+        ``target_id`` is the user whose role is being changed.
+        """
+        return self.begin_mutation(
+            action=AuditAction.USER_ROLE_CHANGE,
+            target_id=target_id,
+            context=context,
+            metadata=metadata,
+            source=source,
+        )
+
+    def begin_user_deactivate(
+        self,
+        *,
+        target_id: str,
+        context: AuditContext,
+        metadata: Mapping[str, str | int | bool] | None = None,
+        source: AuditSource = AuditSource.API,
+    ) -> MutationIntent:
+        """Begin auditing a user deactivation (P5.6).
+
+        ``target_id`` is the user being deactivated.
+        """
+        return self.begin_mutation(
+            action=AuditAction.USER_DEACTIVATE,
+            target_id=target_id,
+            context=context,
+            metadata=metadata,
+            source=source,
+        )
+
+    def begin_first_admin_provision(
+        self,
+        *,
+        target_id: str,
+        context: AuditContext,
+        metadata: Mapping[str, str | int | bool] | None = None,
+        source: AuditSource = AuditSource.CLI,
+    ) -> MutationIntent:
+        """Begin auditing first-Admin provisioning (P5.6).
+
+        ``target_id`` is the Admin account being created.
+        """
+        return self.begin_mutation(
+            action=AuditAction.FIRST_ADMIN_PROVISION,
+            target_id=target_id,
+            context=context,
+            metadata=metadata,
+            source=source,
         )
 
     # -- standalone events --------------------------------------------------

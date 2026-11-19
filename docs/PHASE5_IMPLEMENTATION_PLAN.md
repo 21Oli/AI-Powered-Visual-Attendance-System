@@ -14,7 +14,13 @@ persistence (`src/audit_manifest_store.py`), archive/history verification
 (`src/audit_archive.py`), operator rotation, crash recovery and retention
 recording (`src/audit_rotation.py`, `tools/audit_rotate.py`), manifest-aware
 writer startup (`src/audit_writer.py`) and the three-mode read-only verifier
-(`tools/audit_verify.py`). P5.5.8 has not started. Phase 5 is not complete.**
+(`tools/audit_verify.py`). P5.5.8 has not started. **P5.6 (user administration and
+first-Admin provisioning) is implemented and awaits independent review**: the
+service/repository invariants, the four Admin-only endpoints, the CLI
+provisioner and the offline test suites exist, but the PostgreSQL concurrency
+suite is **blocked** because the dedicated test database does not contain the
+`app_user` table (migrations were deliberately not executed). Phase 5 is not
+complete.**
 
 Phase 5 adds operator accounts, sessions and role-based access to the
 attendance system. It is delivered as small, separately reviewable steps. This
@@ -32,7 +38,8 @@ Phase 5 covers:
 * the same-origin BFF transport and process-local login throttling;
 * role-based authorization for the existing attendance and employee APIs;
 * an append-only audit journal for security events (P5.5, not started);
-* user administration with secure first-Admin provisioning (P5.6, not started);
+* user administration with secure first-Admin provisioning (P5.6, implemented
+  and awaiting review);
 * the frontend sign-in flow and role-aware UI (P5.7–P5.8, not started);
 * the final Phase 5 security review and acceptance (P5.9, not started).
 
@@ -49,7 +56,7 @@ relational table), and does not introduce biometric storage of any kind.
 | P5.3 | Authentication primitives: Argon2id hashing, opaque session tokens, session lifecycle | Completed (offline) |
 | P5.4 | Authentication API: session service integration, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10, §8) | Completed offline through P5.4.10 and accepted (committed in `b0583df`) |
 | P5.5 | Audit journal and security-event auditing (§9, `docs/AUDIT_JOURNAL_DESIGN.md`) | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer, P5.5.4 service and P5.5.5 route integration **implemented, awaiting review**; P5.5.6 verifier CLI **accepted (committed `87c73e5`)**; P5.5.7.2 manifest schema/integrity **accepted**; P5.5.7 manifest persistence, rotation, recovery, retention and manifest-aware verification **implemented, awaiting review**; P5.5.8 not started |
-| P5.6 | User administration and secure first-Admin provisioning (§10) | Not started |
+| P5.6 | User administration and secure first-Admin provisioning (§10) | **Implemented, awaiting independent review**; real-PostgreSQL concurrency scenarios **blocked** (test database lacks `app_user`/`user_session`) |
 | P5.7 | Frontend authentication and session integration (§10) | Not started |
 | P5.8 | Role-aware UI and frontend security hardening (§10) | Not started |
 | P5.9 | Final security regression, integration review and Phase 5 acceptance (§10) | Not started |
@@ -660,17 +667,250 @@ Phase 5 acceptance).
 | P5.5.8.5 | Documentation reconciliation — **implemented, awaiting review** | P5.5.8.4 | Production behaviour | `git diff --check` — done |
 | P5.5.8.6 | Acceptance evidence pack — **prepared, awaiting review**: `docs/P5_5_AUDIT_ACCEPTANCE_EVIDENCE.md` | P5.5.8.5 | Acceptance itself | Owner review |
 
-## 10. P5.6–P5.9 — subsequent milestones (not started)
+## 10. P5.6–P5.9 — subsequent milestones
 
-None of these is started, and none may be pulled forward without a separate
-owner instruction.
+P5.6 is implemented and awaiting independent review. P5.7–P5.9 are not started,
+and none may be pulled forward without a separate owner instruction.
 
-**P5.6 — User administration and secure first-Admin provisioning.** Admin-only
-user management (`users:manage`): create, list, change role and deactivate
-users, with a documented one-time first-Admin provisioning path that has no
-default credentials and is itself audited. Last-active-Admin protection, no
-self-role change and no self-deactivation. Audit integration is required (P5.5
-failure policy applies), and no audit table is added.
+### 10.1 P5.6 — User administration and secure first-Admin provisioning (implemented, awaiting review)
+
+**Scope delivered**
+
+* `src/user_service.py` — `UserService` with `list_users`, `create_user`,
+  `change_user_role`, `deactivate_user` and `provision_first_admin`. It refuses
+  non-Admin actors (defence in depth behind the route guard), self-role-change
+  and self-deactivation, hashes passwords with the existing Argon2id service,
+  and never returns a hash or credential. `sessions` is a **required**
+  constructor argument, so deactivation always calls
+  `SessionService.revoke_all_for_user`; there is no "skip revocation" path.
+* `src/user_repository.py` — the last-active-Admin invariant is enforced in
+  one database transaction, not by a read-then-write in Python. Every operation
+  that can change the active-Admin count uses the same private section helper
+  (`_begin_admin_invariant_transaction`):
+
+  1. `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` (first statement);
+  2. `pg_advisory_xact_lock(_ADMIN_INVARIANT_LOCK_KEY)`;
+  3. check the target's current role/active state, then count, then write —
+     all in that same transaction.
+
+  Participants: ordinary **Admin creation** (`create` with `role is Admin`),
+  **first-Admin provisioning** (`provision_first_admin`, which also refuses
+  when an active Admin exists), **demotion**
+  (`update_role_with_admin_check`) and **deactivation**
+  (`update_active_with_admin_check`). Non-Admin creation and non-Admin updates
+  cannot reduce the count and take no lock. The count is only read when the
+  target is an active Admin losing that status, so a non-Admin operation is
+  never refused merely because one active Admin exists. A unique violation is
+  still translated to `UserAlreadyExists`. There is deliberately **no**
+  service-side count: a Python pre-check would read a single paginated page
+  (`UserRepository.list` defaults to 50 rows) and both refuse safe demotions
+  and allow unsafe ones; `UserService` only translates
+  `LastAdminProtectionError` into `LastAdminProtectedError`.
+
+  **Isolation is enforced, not assumed.** The advisory lock serialises the
+  decision, but the decision reads committed rows. Under `READ COMMITTED` each
+  statement takes a fresh snapshot, so the waiter sees the winner's commit.
+  Under `REPEATABLE READ`/`SERIALIZABLE` the waiter's snapshot is fixed at its
+  first statement and could take a stale decision, so each invariant
+  transaction pins `READ COMMITTED` before the lock. This requires the
+  documented one-connection-per-operation model (`SET TRANSACTION` is only
+  valid before the transaction's first query). Limitations: only cooperating
+  application operations are serialised (direct SQL or another writer can
+  still break the invariant; there is no database constraint for "at least one
+  active Admin"), the single global key serialises invariant operations with
+  each other, and correctness is asserted for `READ COMMITTED` only.
+* `src/api_user.py` — the four Admin-only endpoints (`GET /api/v1/users`,
+  `POST /api/v1/users`, `PATCH /api/v1/users/{user_id}/role`,
+  `POST /api/v1/users/{user_id}/deactivate`) guarded by `users:manage` through
+  the existing `permission_dependency` → `make_session_dependency` chain. The
+  module owns route definitions only: `register_user_routes` receives the
+  application's **cached** `get_user_service` and `get_session_service`
+  getters, so it reads no private attribute and builds no service, writer or
+  journal per request. `build_user_service` mirrors `build_login_service`
+  (DSN check before repository/driver imports, no connection at build time).
+* `src/api.py` — registers the four routes (inventory `APPROVED_ROUTES` grows
+  from 11 to 15), builds **one** `UserService` on first use via
+  `_resolve_user_service` over the application's audit subsystem and session
+  service, and fails closed with `503 AUDIT_UNAVAILABLE` when the audit
+  subsystem is restricted. `create_app` accepts a `user_service` seam for
+  offline tests.
+* `src/user_provision.py` — the operator-only CLI
+  (`python -m src.user_provision`): no HTTP route, no default credentials,
+  username/ID from prompts or explicit arguments, password via `getpass` plus
+  confirmation, hashed before the single insert, output limited to identity
+  fields, exit `1` on refusal/failure and `2` on usage errors. It composes the
+  application's own `AuditSubsystem`/`production_audit_builder` and a real
+  `SessionService`, so the intent/result protocol and `source=cli` apply.
+* **Audit** — every mutation writes a durable intent before the write and a
+  correlated result afterwards (`begin_user_create`,
+  `begin_user_role_change`, `begin_user_deactivate`,
+  `begin_first_admin_provision` + `record_applied` / `record_not_applied` /
+  `record_unknown`). An unavailable audit subsystem aborts before the mutation
+  (`AUDIT_UNAVAILABLE`); any failure other than the typed, provably-not-applied
+  errors is recorded as `DATABASE_OUTCOME_UNKNOWN`; a failed result write after
+  a successful mutation surfaces the existing `AUDIT_RESULT_UNCERTAIN`
+  contract, and no mutation is retried. A failed session revocation after an
+  applied deactivation is recorded as `DATABASE_OUTCOME_UNKNOWN` and answered
+  as `503 SESSION_REVOCATION_FAILED`, never as success or a definite failure.
+  No password or hash is ever placed in an audit record.
+* **No schema change by this milestone.** `migrations/V002__security.sql`
+  (P5.2) already defines `app_user` and `user_session` (the latter supports
+  user-scoped revocation). P5.6 adds no migration file. The only schema
+  tooling it adds is the owner-run, test-database-only
+  `tools/apply_v002_tier2_test_database.sql` (its single hard target is
+  `visual_attendance_tier2_test`; no application or production target is
+  named in it). The only migration attempt was on the disposable tier-2
+  database and was refused by privileges
+  before any write (see "Blocked" below); the application database was never
+  touched.
+* **Error contract.** `403 FORBIDDEN` for a non-Admin actor reaching the service
+  (defence in depth behind the route), `400 LAST_ADMIN_PROTECTED`,
+  `SELF_ROLE_CHANGE`, `SELF_DEACTIVATION`, `USER_ALREADY_EXISTS`,
+  `USER_NOT_FOUND`, `INVALID_ROLE`, `PASSWORD_TOO_SHORT`,
+  `ADMIN_ALREADY_EXISTS` (provisioning) and
+  `503 SESSION_REVOCATION_FAILED`; all messages are fixed, and no SQL, path,
+  hash, token or driver text is echoed.
+
+**Tests**
+
+* `tests/test_user_service.py` — service-level behaviour on fakes, including the
+  regressions "a non-Admin can be deactivated when only one active Admin
+  exists", "the last active Admin cannot be deactivated", "the last active
+  Admin cannot be demoted" and "deactivating one of two Admins leaves one".
+* `tests/test_api_user.py` — 28 tests: authentication, `users:manage` (403 for
+  non-Admins), creation, duplicate/invalid input, mass-assignment rejection,
+  role change, deactivation, self-change refusal, no credential leakage,
+  session revocation refusing further use of the deactivated account's token
+  while other sessions stay valid, the sanitized `503
+  SESSION_REVOCATION_FAILED` envelope, plus tests that build the **real**
+  `create_app` and assert the four routes are registered, require authentication
+  on all four, enforce `users:manage`, and work for an Admin (list, create,
+  role change, deactivation).
+* `tests/test_user_provision.py` — 7 offline CLI tests: importability/`--help`,
+  successful provisioning (identity-only output, no password or hash),
+  refusal when an active Admin exists, duplicate identity translated to a safe
+  message, audit-unavailable abort with no user created, sanitized
+  invalid-input failure, and no provisioning route in `APPROVED_ROUTES`.
+* `tests/test_tier2_user_concurrency.py` — 7 real-PostgreSQL scenarios using
+  independent connections, a `threading.Barrier`, and final committed-state
+  assertions: two simultaneous first-Admin provisions, two Admins deactivating
+  each other, two Admins demoting each other, concurrent Admin creation plus
+  demotion, safe non-Admin deactivation and safe non-Admin role change with one
+  active Admin, and the enforced `READ COMMITTED` proven against a
+  `REPEATABLE READ` session default. The suite refuses to touch foreign Admin
+  rows, through a separate test-only `attendance_tier2_cleanup`
+  credential (the runtime role has no `DELETE`). **BLOCKED**: see below.
+* `tests/test_apply_v002_owner_script.py` — static review of the owner
+  script (no database): embedded V002 byte-identical to the migration
+  file, ledger checksums equal to the loader's, one transaction around
+  DDL + ledger + grants, and exactly the least-privilege grant set.
+
+**Blocked / not verified**
+
+* The dedicated PostgreSQL test database (`visual_attendance_tier2_test`) is
+  reachable and passes the tier2 guard, but its schema is still V001
+  (`schema_version` = 1; tables `employee`, `schema_version`,
+  `_phase3_test_guard`). **Verified cause:** the configured
+  `ATTENDANCE_TEST_DATABASE_URL` authenticates as `attendance_tier2_runtime`,
+  which has no `CREATE` on schema `public` and does not own the existing
+  tables, so neither the application nor this suite can apply
+  `migrations/V002__security.sql` there. A real attempt through
+  `src.db_migrate.migrate` with `PsycopgMigrationExecutor` was refused by the
+  server (`InsufficientPrivilege: permission denied for schema public`), rolled
+  back entirely, and left the database unchanged (still version 1).
+* Therefore the seven scenarios in `tests/test_tier2_user_concurrency.py` skip
+  with an explicit `BLOCKED` reason instead of failing with `UndefinedTable`,
+  and the race-safety claim rests on the advisory-lock design plus fake-based
+  tests only. They are reported **BLOCKED**, not passed; no fake-only test is
+  presented as concurrency verification.
+* **Owner runbook** — one guarded, single-transaction script
+  (`tools/apply_v002_tier2_test_database.sql`), because
+  `tools/run_migrations.py` deliberately refuses the dedicated test target and
+  the configured DSN (`attendance_tier2_runtime`) has no `CREATE` on schema
+  `public`:
+
+  1. Owner-side role setup (once; the script never creates roles).
+     `attendance_tier2_runtime` already exists. Create the **separate,
+     test-only** teardown role as an ordinary non-superuser LOGIN role:
+     `CREATE ROLE attendance_tier2_cleanup LOGIN PASSWORD '<owner-chosen>';`
+     and put its DSN in the local, untracked environment as
+     `ATTENDANCE_TIER2_CLEANUP_DATABASE_URL`. It is used only by the tier-2
+     suite's teardown, never by application code.
+  2. Confirm the migration file the script reproduces is unmodified:
+     `sha256sum migrations/V002__security.sql` must print
+     `35bc00cd7a947a9eca31a7502d3a17e0ff55163f1c5222cf8fcb88a6328082d3`
+     (the runner's canonical checksum, so line endings do not matter).
+  3. Run the script as a role with `CREATE` on schema `public` and grant option
+     on it, from the repository root:
+     `psql -v ON_ERROR_STOP=1 --dbname "<owner DSN for visual_attendance_tier2_test>" --file tools/apply_v002_tier2_test_database.sql`
+     Any SQL client works (the script contains no psql meta-commands) but it
+     must be executed as **one** script, never statement by statement.
+     Preconditions: exact database name; cluster identity; no pre-existing
+     V002 object name; ledger exactly `[1]` with the V001 checksum; unchanged
+     guard marker; both roles present, non-superuser and not members of each
+     other; and the executing role's own `CREATE` / `USAGE WITH GRANT OPTION`
+     authority.
+  4. Why one transaction is mandatory: `src.db_migrate`'s contract is that the
+     DDL and its `schema_version` row commit together, with `checksum` =
+     SHA-256 of the file's canonical text and a timezone-aware `applied_at`.
+     Applying the DDL and inserting the ledger row as two steps could leave a
+     committed `app_user` with no ledger row — a state the runner refuses to
+     repair — if the second step failed. (The first draft runbook described
+     two steps; this script replaces it.)
+  5. The verification block refuses to commit unless all of this holds: both
+     tables; all 8 + 7 columns with exact types, nullability and defaults
+     (`session_token_hash` is `character(64)`, `is_active` defaults to `true`,
+     timestamps have no default); both primary keys; the `username_key` UNIQUE
+     constraint; the single `role` CHECK naming all four roles; the
+     `user_session.user_id` foreign key to `app_user(user_id)`; both indexes;
+     ledger rows `[1, 2]` with both checksums; the unchanged four-column
+     `employee` table and its primary key; the unchanged guard marker.
+  6. Privileges (least privilege, all in the same transaction):
+     `SELECT, INSERT, UPDATE` on `app_user` and `user_session` for
+     `attendance_tier2_runtime` — **no `DELETE`** (the application never
+     deletes; deactivation is an `UPDATE`); and `USAGE` plus `DELETE` **only**
+     on those two tables for `attendance_tier2_cleanup`. No ownership, no
+     `TRUNCATE`, no `ALTER`, no DDL privilege for either role. The script
+     asserts that the tables' owner is the executing role before granting, and
+     the verification block fails if either role holds anything beyond its set.
+  7. Server identity: the precondition requires
+     `pg_control_system().system_identifier` to equal
+     `7687968999847354228`, the value captured read-only from the guarded
+     tier-2 target on 2026-11-19 (a cluster fingerprint, not a credential).
+     Limitation: this pins the *cluster*, not the network path — the owner must
+     still confirm the endpoint independently (DSN dbname/host/port, or the
+     client's connection-info command) before running.
+     `inet_server_addr()`/`inet_server_port()` are reported but not enforced,
+     because a legitimate owner session may arrive over another interface or a
+     local socket. If the disposable cluster is deliberately re-initialised,
+     capture the new identifier read-only and update the constant in the same
+     reviewed change.
+  8. Rerun `ATTENDANCE_TIER2_OPT_IN=1 .venv/Scripts/python.exe -m pytest
+     tests/test_tier2_user_concurrency.py -q` and record the result here.
+
+  Verified read-only on the guarded target before writing the script
+  (2026-11-19): the canonical checksum of `migrations/V002__security.sql` is
+  `35bc00cd7a947a9eca31a7502d3a17e0ff55163f1c5222cf8fcb88a6328082d3`, matching
+  the value the loader derives, `tests/test_migration_v002.py` and
+  `MIGRATION_SET_DIGEST`; the ledger holds only `(1, 9e6ac6b5…deac9)`; no
+  `app_user`, `user_session` or V002 index name exists in any schema; and the
+  session reports `current_database() = visual_attendance_tier2_test`,
+  `current_user = attendance_tier2_runtime`, `rolsuper = false`,
+  `has_schema_privilege('public','CREATE') = false`, database owner
+  `postgres`, `system_identifier = 7687968999847354228`, server 18.6. The
+  script's precondition and verification blocks were executed read-only
+  (rolled back) and behaved as intended, and
+  `tests/test_apply_v002_owner_script.py` checks the embedded V002 block
+  byte-for-byte against the migration file. No privileged connection to this
+  target was available to the agent, so the apply itself has **not** been
+  executed.
+
+  Until step 8 passes, P5.6's database concurrency verification remains
+  unproven.
+* No live server, real credentials, frontend, P5.7/P5.8/P5.9 work or production
+  database was exercised.
+
+### 10.2 P5.7–P5.9 (not started)
 
 **P5.7 — Frontend authentication and session integration.** Login and logout
 UI, session retrieval through the existing `/auth/me`, same-origin BFF usage,

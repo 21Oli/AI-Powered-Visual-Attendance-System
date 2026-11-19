@@ -571,7 +571,7 @@ def test_route_is_registered_exactly_once() -> None:
 
 def test_approved_inventory_includes_me() -> None:
     assert ("/auth/me", "GET") in APPROVED_ROUTES
-    assert len(APPROVED_ROUTES) == 11
+    assert len(APPROVED_ROUTES) == 15
 
     service, _, _, _ = build()
     app = _app(service)

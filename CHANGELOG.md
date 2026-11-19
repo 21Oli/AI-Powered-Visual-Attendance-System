@@ -4,6 +4,44 @@ All notable changes to the AI-Powered Visual Attendance System.
 Contains **actual implemented changes only** — future work is not listed
 as done. Format based on Keep a Changelog.
 
+## [Unreleased] — Phase 5, P5.6: user administration and first-Admin provisioning
+
+### Added
+
+* `src/api_user.py` — the four Admin-only user-administration routes under `/api/v1` (`GET /users`, `POST /users`, `PATCH /users/{user_id}/role`, `POST /users/{user_id}/deactivate`), guarded by `users:manage`, with sanitized error codes and credential-free response models. Route registration takes the application's cached service getters; the production builder `build_user_service` mirrors `build_login_service`.
+* `src/user_service.py` — `UserService` for list/create/change-role/deactivate/first-Admin provisioning with hashed passwords, self-change refusal, a mandatory session service (deactivation always revokes the target's sessions) and audit intent/result recording for every mutation.
+* Atomic last-active-Admin protection in `src/user_repository.py`: one shared section (`_begin_admin_invariant_transaction`) pins `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` and takes `pg_advisory_xact_lock` on a fixed key before the invariant check and the write. All four invariant-affecting operations use it: Admin creation (`create` with the Admin role), `provision_first_admin`, `update_role_with_admin_check` and `update_active_with_admin_check`. Ordinary Admin creation can no longer bypass the lock, and the count is read only when the target is an active Admin losing that status. The old "works at every isolation level" claim was removed: correctness is asserted for the enforced `READ COMMITTED` only (a stricter server default is overridden per transaction; a waiter under `REPEATABLE READ` would otherwise decide on a stale snapshot). Documented limits: only cooperating operations are serialised, and no database constraint enforces "at least one active Admin".
+* `src/user_service.py`: a failed session revocation after an applied deactivation is recorded as `DATABASE_OUTCOME_UNKNOWN` and reported as `503 SESSION_REVOCATION_FAILED` instead of a bare 500 or a success; retrying against an already-inactive account still revokes sessions (idempotent, no second audit intent). Any untyped mutation failure is audited uncertain (`DATABASE_OUTCOME_UNKNOWN`) rather than left as an unrecorded intent, and a failed result write keeps the existing `AUDIT_RESULT_UNCERTAIN` contract. Non-Admin actors now raise `ActorNotAdminError` (`403 FORBIDDEN`) instead of the misleading `NO_ACTIVE_ADMIN`, and provisioning an existing Admin raises `AdminAlreadyExistsError` (`ADMIN_ALREADY_EXISTS`) instead of `NO_ACTIVE_ADMIN`.
+* `src/user_provision.py` — operator-only CLI (`python -m src.user_provision`) with prompted username/ID, `getpass` password plus confirmation, no default credentials, no HTTP surface, identity-only output and `source=cli` auditing.
+* `tests/test_api_user.py` (28 tests, including production `create_app` integration for all four routes), `tests/test_user_service.py` (38 tests), `tests/test_user_provision.py` (7 CLI tests) and `tests/test_tier2_user_concurrency.py` (7 real-PostgreSQL scenarios, currently BLOCKED).
+
+### Changed
+
+* `src/api.py` registers the four user routes (route inventory 11 → 15), resolves one application-scoped `UserService` through `_resolve_user_service` (fails closed with `503 AUDIT_UNAVAILABLE` when auditing is restricted) and accepts a `user_service` test seam.
+* `src/user_service.py` no longer pre-checks the last-active-Admin invariant with a paginated `list()` count: that count read at most one page (default 50 users), so it could refuse a safe demotion or allow an unsafe one. The invariant is decided only inside the repository's advisory-lock-guarded `update_role_with_admin_check` / `update_active_with_admin_check`, and `LastAdminProtectionError` is translated to `LastAdminProtectedError`.
+* `tests/test_api.py`, `tests/test_api_me.py` and `tests/test_api_rbac.py` reflect the 15-route inventory; the RBAC matrix still covers the seven employee/attendance routes and now also asserts the four user routes are in the protected set.
+
+### Notes
+
+* No migration was added. `migrations/V002__security.sql` already defines `app_user` and `user_session`; the single attempt to apply it to the disposable tier-2 database was refused by the server (the configured role has no `CREATE` on `public`), rolled back completely and left that database at version 1. The application database was not touched.
+* No frontend, P5.7, P5.8 or P5.9 work; no Git operation was performed.
+* **Blocked**: the real-PostgreSQL concurrency scenarios cannot run because the guarded dedicated test database (`visual_attendance_tier2_test`) is still V001 and its configured DSN authenticates as the least-privilege `attendance_tier2_runtime` role (`CREATE` on `public` denied, existing tables owned by `postgres`). An attempt through the project's `migrate()`/`PsycopgMigrationExecutor` failed with `InsufficientPrivilege` and rolled back; the database is unchanged. They are reported BLOCKED, not passed, and were not replaced by fake-only concurrency tests. The owner runbook (privileged V002 apply, ledger checksum, runtime grants, rerun) is in `docs/PHASE5_IMPLEMENTATION_PLAN.md` §10.1.
+* `tests/test_user_service.py` gained the mandatory audit-path regressions (intent failure prevents the mutation, correlated success, known duplicate as not-applied, unknown database outcome as uncertain, result-write failure as `AUDIT_RESULT_UNCERTAIN`, no password/hash in any audit argument, account target for every action) and session-revocation regressions (target-only revocation, revocation failure not reported as success, retry revokes, non-Admin operations allowed with one active Admin).
+* `tests/test_user_repository.py` gained lock-ordering tests: Admin creation, provisioning, demotion and deactivation all start with `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` then `pg_advisory_xact_lock`; non-Admin creation issues only the insert; provisioning translates duplicate identity.
+* `tests/test_tier2_user_concurrency.py` was rewritten as seven genuine PostgreSQL scenarios (two simultaneous first-Admin provisions; two Admins deactivating each other; two Admins demoting each other; concurrent Admin creation and demotion; safe non-Admin deactivation and role change with one active Admin; enforced `READ COMMITTED` against a `REPEATABLE READ` session default), each using independent connections, a `threading.Barrier` and final committed-state assertions, with synthetic-only cleanup and no schema writes. It remains **BLOCKED**: the guarded test database has no `app_user`/`user_session` schema, so each scenario skips with that exact reason instead of erroring.
+* P5.6 is **implemented and awaiting independent review**; its PostgreSQL concurrency verification is **BLOCKED** and is not claimed as passed.
+
+### Verified
+
+* `.venv/Scripts/python.exe -m pytest -q`: **3958 passed, 40 skipped, exit 0** (332.01 s).
+* `.venv/Scripts/python.exe -m pytest tests/test_user_repository.py -q`: 45 passed; `tests/test_user_service.py`: 38 passed; `tests/test_api_user.py`: 28 passed; `tests/test_user_provision.py`: 7 passed.
+* `.venv/Scripts/python.exe -m pytest tests/test_audit_schema.py tests/test_audit_service.py -q`: 212 passed (vocabulary/allowlist/mutation matrix and a new account-target/correlation test for the four P5.6 actions).
+* `.venv/Scripts/python.exe -m pytest tests/test_session_service.py tests/test_api_auth.py -q`: 66 passed.
+* `.venv/Scripts/python.exe -m compileall -q src tests`: exit 0. No lint/type checker is configured in this project.
+* `.venv/Scripts/python.exe -m src.user_provision --help`: exit 0; `import src.user_provision`: ok.
+* `ATTENDANCE_TIER2_OPT_IN=1 .venv/Scripts/python.exe -m pytest tests/test_tier2_user_concurrency.py -q`: **7 skipped**, each with `BLOCKED: the verified test database has no app_user/user_session schema; ATTENDANCE_TEST_DATABASE_URL authenticates as the least-privilege runtime role, which cannot create them; …`. This is **BLOCKED**, not passed; without the opt-in the same suite skips (`7 skipped`). The project's `migrate()` run against the guarded test database failed with `InsufficientPrivilege` and committed nothing (ledger remained `[1]`).
+* `git diff --check`: clean (LF→CRLF warnings only).
+
 ## [Unreleased] — Phase 5, P5.5.8.3: audit failure and recovery regression
 
 ### Added

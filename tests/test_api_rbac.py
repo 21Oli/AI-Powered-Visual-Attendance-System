@@ -358,8 +358,9 @@ def test_the_only_unprotected_routes_are_health_and_authentication() -> None:
         for path, method in APPROVED_ROUTES
         if path not in {"/health", "/auth/login", "/auth/logout", "/auth/me"}
     }
-    # The seven business templates behind the RBAC guard. Anything else
-    # unprotected would be an accidental authorization bypass.
+    # The eleven business templates behind the RBAC guard: the seven
+    # employee/attendance routes plus the four P5.6 user-administration routes.
+    # Anything else unprotected would be an accidental authorization bypass.
     protected_templates = {
         ("/employees", "POST"),
         ("/employees", "GET"),
@@ -368,9 +369,16 @@ def test_the_only_unprotected_routes_are_health_and_authentication() -> None:
         ("/employees/{employee_id}/deactivate", "POST"),
         ("/attendance", "GET"),
         ("/attendance/{employee_id}/checkout", "POST"),
+        ("/users", "GET"),
+        ("/users", "POST"),
+        ("/users/{user_id}/role", "PATCH"),
+        ("/users/{user_id}/deactivate", "POST"),
     }
     assert business == protected_templates
-    assert len(PROTECTED) == len(protected_templates) == 7
+    # The parameterized authorization matrix below covers the seven
+    # employee/attendance routes; the four user routes are covered by their own
+    # guard (401/403/`users:manage`) tests in ``tests/test_api_user.py``.
+    assert len(PROTECTED) == 7
 
 
 @pytest.mark.parametrize(("method", "path", "body", "permission", "allowed", "denied"), PROTECTED)

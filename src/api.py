@@ -66,6 +66,7 @@ Design rules (unchanged from the foundation step)
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable, Literal
 
 from fastapi import Depends, FastAPI, Request
@@ -105,6 +106,13 @@ from src.api_login import (
 )
 from src.api_logout import LOGOUT_PATH, register_logout_route
 from src.api_me import ME_PATH, current_principal_dependency, register_me_route
+from src.api_user import (
+    USER_DEACTIVATE_PATH,
+    USER_ROLE_PATH,
+    USERS_PATH,
+    build_user_service,
+    register_user_routes,
+)
 from src.api_request_context import (
     REQUEST_ID_HEADER,
     RequestIDMiddleware,
@@ -127,6 +135,7 @@ from src.login_throttle import (
 )
 from src.logging_setup import get_logger
 from src.session_service import SessionService
+from src.user_service import UserService
 
 __all__ = [
     "API_PREFIX",
@@ -190,7 +199,8 @@ _CHECKOUT_AUDIT_REASONS: dict[str, AuditReasonCode] = {
 #: P5.4.5 adds the login endpoint, P5.4.6 the logout endpoint, P5.4.7 the
 #: current-user endpoint and P5.4.10 puts the eight business routes behind the
 #: centralized RBAC guard (health stays anonymous, authentication routes keep
-#: their own contract).
+#: their own contract). P5.6 adds the four Admin-only user-administration
+#: routes (``users:manage``).
 # ---------------------------------------------------------------------------
 
 ApprovedRoute = tuple[str, str]  # (path without prefix, HTTP method)
@@ -200,6 +210,10 @@ APPROVED_ROUTES: tuple[ApprovedRoute, ...] = (
     ("/auth/login", "POST"),
     ("/auth/logout", "POST"),
     ("/auth/me", "GET"),
+    (USERS_PATH, "GET"),
+    (USERS_PATH, "POST"),
+    (USER_ROLE_PATH, "PATCH"),
+    (USER_DEACTIVATE_PATH, "POST"),
     ("/employees", "POST"),
     ("/employees", "GET"),
     ("/employees/{employee_id}", "GET"),
@@ -776,6 +790,53 @@ def _resolve_session_service(
     return sessions
 
 
+def _resolve_user_service(
+    settings: AppSettings,
+    user_service: UserService | None,
+    get_sessions: Callable[[], SessionService],
+    audit_subsystem: AuditSubsystem | None,
+) -> Callable[[], UserService]:
+    """Return a getter that builds the single UserService on first use (P5.6).
+
+    Same contract as ``_resolve_login_service``: the production composition
+    (and psycopg) is imported inside the first request, never during
+    ``create_app``. The service holds the audit service and the session service
+    the app already owns, so a request creates nothing.
+
+    A restricted/absent audit subsystem is a hard failure: the getter raises
+    :class:`AuditUnavailableError`, which the app renders as the existing
+    sanitized ``503 AUDIT_UNAVAILABLE`` without touching a repository.
+    """
+
+    if user_service is not None:
+        return lambda: user_service
+
+    cache: dict[str, UserService] = {}
+    lock = threading.Lock()
+
+    def users() -> UserService:
+        # Sync endpoints run in a thread pool, so the first two requests can
+        # overlap; the lock keeps exactly one application-scoped instance.
+        with lock:
+            if "service" not in cache:
+                audit_service = (
+                    audit_subsystem.service()
+                    if audit_subsystem is not None
+                    else None
+                )
+                if audit_service is None:
+                    raise AuditUnavailableError(
+                        "The audit subsystem is unavailable for user "
+                        "administration."
+                    )
+                cache["service"] = build_user_service(
+                    settings, sessions=get_sessions(), audit=audit_service
+                )
+            return cache["service"]
+
+    return users
+
+
 # ---------------------------------------------------------------------------
 # Application factory
 # ---------------------------------------------------------------------------
@@ -788,6 +849,7 @@ def create_app(
     attendance_service: object | None = None,
     login_service: LoginService | None = None,
     session_service: SessionService | None = None,
+    user_service: UserService | None = None,
     login_throttle: LoginThrottle | None = None,
     principal_resolver: Callable[[Request], AuthenticatedPrincipal] | None = None,
     audit_subsystem: AuditSubsystem | None = None,
@@ -802,7 +864,7 @@ def create_app(
         journal's data directory for the lazily built default services; the
         app itself never reads a DSN or binds a socket.
     employee_service / attendance_service / login_service / session_service /
-    login_throttle / principal_resolver:
+    user_service / login_throttle / principal_resolver:
         Offline-test seams. Production passes none of them; the application
         then owns one shared :class:`LoginThrottle` (P5.4.9) and resolves
         business-route identity from the ``va_session`` cookie.
@@ -844,6 +906,7 @@ def create_app(
         login_service,
         session_service,
         principal_resolver,
+        user_service,
     )
     if audit_subsystem is None:
         if audit_builder is not None:
@@ -854,6 +917,13 @@ def create_app(
             audit_subsystem = AuditSubsystem(
                 builder=production_audit_builder(resolved_settings)
             )
+
+    # P5.6: one application-scoped UserService, built on first use and reused
+    # for every request. It never reads a repository out of the session service:
+    # the builder opens its own repository through the public constructor.
+    get_user = _resolve_user_service(
+        resolved_settings, user_service, get_sessions, audit_subsystem
+    )
 
     def guard(permission: Permission):
         """The single RBAC dependency used by every protected business route."""
@@ -909,6 +979,15 @@ def create_app(
     register_me_route(
         app,
         path=ME_PATH,
+        get_session_service=get_sessions,
+    )
+
+    # -- user administration (P5.6) --------------------------------------
+
+    register_user_routes(
+        app,
+        path=API_PREFIX,
+        get_user_service=get_user,
         get_session_service=get_sessions,
     )
 
