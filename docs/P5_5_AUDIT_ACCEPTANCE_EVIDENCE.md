@@ -62,7 +62,8 @@ Result: **780 passed, 1 skipped in
 Notes:
 
 - `tests/test_audit_concurrency_soak.py` is **5 tests**, added by P5.5.8.4.
-- `tests/test_audit_exclusion.py` is **50 tests**, P5.5.8.2.
+- `tests/test_audit_exclusion.py` is **52 tests**, P5.5.8.2 (recorded as 50 before
+the JSON-parsed value-scanner fix; see §D.2).
 - `tests/test_audit_failure_regression.py` is **18 tests**, P5.5.8.3.
 - The remaining audit-regression coverage inside the suite (P5.5.8.1 re-tie) totals **346 tests**.
 
@@ -101,11 +102,31 @@ is self-consistent as packaged for review.
 | P5.5.7.2 | Manifest schema/integrity accepted (committed `c2871f3`) | — | — |
 | P5.5.7 | Manifest persistence, rotation, recovery, retention and manifest-aware verification implemented, awaiting review | — | — |
 | P5.5.8.1 | P5.5.8 foundational audit regression (re-tied into the 15-file audit suite as part of P5.5.8.3 acceptance evidence) | tests/test_audit_schema.py … (within the 15-file audit suite) | 346 |
-| P5.5.8.2 | Exclusion sweep harness — implemented, awaiting review | tests/test_audit_exclusion.py | 50 |
+| P5.5.8.2 | Exclusion sweep harness — implemented, awaiting review | tests/test_audit_exclusion.py | 52 |
 | P5.5.8.3 | Failure and recovery regression — implemented, awaiting review | tests/test_audit_failure_regression.py | 18 |
 | P5.5.8.4 | Bounded concurrency and rotation soak — implemented, awaiting review | tests/test_audit_concurrency_soak.py | 5 |
 | P5.5.8.5 | Documentation reconciliation — implemented, awaiting review | Non-code: docs/AUDIT_JOURNAL_DESIGN.md §9.11/§12/§13, PHASE5_IMPLEMENTATION_PLAN.md §9.2/§9.7, ARCHITECTURE.md, DEVELOPMENT_STATUS.md, CHANGELOG.md | n/a |
 | P5.5.8.6 | Acceptance evidence pack — prepared, awaiting independent review and owner acceptance | docs/P5_5_AUDIT_ACCEPTANCE_EVIDENCE.md (this file) | n/a |
+
+### D.0 — P5.9 reconciliation note (2026-11-20, appended; table above unchanged)
+
+Section D lists **both** `P5.5.7.1` and `P5.5.7.2` against the same commit
+(`c2871f3`) and the same scope ("manifest schema / integrity"), while
+`docs/PHASE5_IMPLEMENTATION_PLAN.md` §9 tracks that delivered unit only as
+`P5.5.7.2`. The two labels therefore name **one** delivered milestone: `P5.5.7.1`
+is a duplicate identifier, not a second implementation and not a separate
+acceptance. Both rows are preserved as the historical record; the canonical
+identifier from P5.9 onward is **P5.5.7.2**. No acceptance is invented for a
+"P5.5.7.1" deliverable the plan never had, and no earlier accepted/pending
+status in this pack is upgraded by this note.
+
+Also recorded by P5.9, without changing anything above: the audit contract's
+request-ID correlation requirement now holds for the P5.6 user-management
+mutations too. P5.9 found that those four paths wrote a fresh random UUID into
+their `AuditContext` instead of the server-generated request ID, and fixed it in
+`src/user_service.py` / `src/api_user.py` with regression coverage
+(`tests/test_user_audit_request_id.py`). The full backend suite after the fix:
+**4006 passed, 40 skipped**, exit 0.
 
 ### D.1 — How the soak exercises the milestones
 
@@ -113,6 +134,38 @@ is self-consistent as packaged for review.
   failure model is reused by the soak's poison and recovery scenarios).
 - P5.5.8.5 does not have a test file; it is source-vs-document comparison plus
   `git diff --check`.
+
+### D.2 — P5.9 reconciliation: exclusion-sweep test count (appended; table above unchanged)
+
+This pack recorded `tests/test_audit_exclusion.py` as **50 tests**. The file as
+committed (and as present today) collects and passes **52 tests**. The two
+extra tests come from the JSON-parsed value-scanner fix that was made while the
+pack was being assembled, after its test-count lines were written:
+
+- `test_scan_values_detects_a_sentinel_inside_an_escaped_json_string`
+- `test_scan_values_does_not_flag_a_sentinel_missing_from_values`
+
+Nothing else about P5.5.8.2 changed: the harness is still the escape-aware
+value and key scanner over the same seven artefacts, with the same positive
+control, and the review status remains **implemented, awaiting review**.
+
+Re-measured by P5.9 (offline, exit 0):
+
+- `pytest tests/test_audit_exclusion.py -q` → **52 passed**.
+- The 15-file audit suite from §C.1, re-run with today's file sets → **783
+  passed, 1 skipped in 142.72 s, exit 0** (784 collected). §C.1's recorded **780
+  passed, 1 skipped** is preserved as the as-written packaging record and is not
+  restated as today's count. The +2 is the exclusion file (50 → 52, §D.2). The
+  remaining +1 is not attributable from this pack's per-group breakdown, so the
+  re-measured total is reported as measured rather than reconciled by
+  arithmetic.
+
+Historical step records in `CHANGELOG.md` ("50 offline tests") and
+`DEVELOPMENT_STATUS.md` Step 71 ("50 tests") are **left as written**, consistent
+with §F ("past Step records are historical as written"); they are not live
+contract statements. The live claims in
+`docs/PHASE5_IMPLEMENTATION_PLAN.md` §9.7 / §9.9 and
+`docs/AUDIT_JOURNAL_DESIGN.md` §13 now say 52.
 
 ## E — Decisions exercised
 
@@ -174,7 +227,7 @@ The soak and the failure harness exercise, but do not add to the bug list:
 - [x] Audit suite (15 files) passes with the P5.5.8.4 soak included: 780 passed, 1 skipped, exit 0.
 - [x] Full backend suite passes: 3871 passed, 33 skipped, exit 0.
 - [x] `tests/test_audit_concurrency_soak.py` is present and non-empty (5 tests).
-- [x] `tests/test_audit_exclusion.py` is present and non-empty (50 tests).
+- [x] `tests/test_audit_exclusion.py` is present and non-empty (52 tests; see §D.2).
 - [x] `tests/test_audit_failure_regression.py` is present and non-empty (18 tests).
 - [x] Documentation reconciled: exit codes, concurrency model, milestone sub-rows, scope.
 - [x] `git diff --check` clean on the packaged tree.
@@ -188,7 +241,7 @@ unless marked PASS or NOT TESTED.
 
 | # | Item | Status in this pack |
 |---|------|---------------------|
-| I.1 | P5.5.8.2 exclusion sweep harness is correct and complete | PENDING OWNER ACCEPTANCE (50 tests, PASS) |
+| I.1 | P5.5.8.2 exclusion sweep harness is correct and complete | PENDING OWNER ACCEPTANCE (52 tests, PASS) |
 | I.2 | P5.5.8.3 failure and recovery regression is correct and complete | PENDING OWNER ACCEPTANCE (18 tests, PASS) |
 | I.3 | P5.5.8.4 concurrency / rotation soak is correct and within scope | PENDING OWNER ACCEPTANCE (5 tests, PASS) |
 | I.4 | P5.5.8.5 documentation now matches the implemented behaviour | PENDING OWNER ACCEPTANCE (docs only, PASS) |

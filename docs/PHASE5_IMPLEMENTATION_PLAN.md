@@ -14,13 +14,20 @@ persistence (`src/audit_manifest_store.py`), archive/history verification
 (`src/audit_archive.py`), operator rotation, crash recovery and retention
 recording (`src/audit_rotation.py`, `tools/audit_rotate.py`), manifest-aware
 writer startup (`src/audit_writer.py`) and the three-mode read-only verifier
-(`tools/audit_verify.py`). P5.5.8 has not started. **P5.6 (user administration and
+(`tools/audit_verify.py`). **P5.5.8 is implemented and awaiting review** (exclusion
+sweep, failure/recovery regression, bounded concurrency/rotation soak,
+documentation reconciliation and the evidence pack). **P5.6 (user administration and
 first-Admin provisioning) is implemented and awaits independent review**: the
 service/repository invariants, the four Admin-only endpoints, the CLI
 provisioner and the offline test suites exist, but the PostgreSQL concurrency
 suite is **blocked** because the dedicated test database does not contain the
-`app_user` table (migrations were deliberately not executed). Phase 5 is not
-complete.**
+`app_user` table (migrations were deliberately not executed). **P5.7 and P5.8 are
+implemented and committed** (`246a2f6`, `490ca2a`). **P5.9 is implemented and its
+integrated review is complete, awaiting independent review and owner
+acceptance** — one audit-correlation defect was found and fixed, and the
+real-PostgreSQL concurrency verification remains blocked
+(`docs/P5_9_PHASE5_FINAL_ACCEPTANCE.md`). Phase 5 is **not** complete and **not**
+accepted; no milestone's "implemented" status implies acceptance.**
 
 Phase 5 adds operator accounts, sessions and role-based access to the
 attendance system. It is delivered as small, separately reviewable steps. This
@@ -42,7 +49,8 @@ Phase 5 covers:
   and awaiting review);
 * the frontend sign-in flow (P5.7, implemented) and role-aware UI (P5.8,
   implemented and awaiting review);
-* the final Phase 5 security review and acceptance (P5.9, not started).
+* the final Phase 5 security review and acceptance (P5.9, review complete and
+  awaiting owner acceptance).
 
 It does **not** change employee or attendance-journal semantics, does not add an
 audit **table** (P5.5's journal is a separate append-only JSONL file, not a
@@ -60,7 +68,7 @@ relational table), and does not introduce biometric storage of any kind.
 | P5.6 | User administration and secure first-Admin provisioning (§10) | **Implemented, awaiting independent review**; real-PostgreSQL concurrency scenarios **blocked** (test database lacks `app_user`/`user_session`) |
 | P5.7 | Frontend authentication and session integration (§10.2, `docs/P5_7_FRONTEND_AUTHENTICATION.md`) | **Implemented, awaiting review** — login page, session restoration, protected routes, sign-out; offline tests, lint, typecheck and production build green |
 | P5.8 | Role-aware UI and frontend security hardening (§10, `docs/P5_8_ROLE_AWARE_UI_SECURITY.md`) | **Implemented, awaiting review** — mirrored permission model, navigation and action gating, access-denied screen, 401/403/503 handling; offline tests, lint, typecheck and production build green. User-administration and audit screens deliberately not built |
-| P5.9 | Final security regression, integration review and Phase 5 acceptance (§10) | Not started |
+| P5.9 | Final security regression, integration review and Phase 5 acceptance (§10) | **Implemented, awaiting independent review and owner acceptance** — review complete, one audit-correlation defect found and fixed, real-PostgreSQL verification still **BLOCKED**; Phase 5 is **not** accepted (`docs/P5_9_PHASE5_FINAL_ACCEPTANCE.md`) |
 
 Each milestone is gated on owner review of the previous one. No milestone
 starts early, and no milestone may require a live database or secrets without a
@@ -638,7 +646,7 @@ The authoritative per-milestone scope, exclusions and exit criteria are in
 
 | # | Scope | Status |
 | --- | --- | --- |
-| P5.5.8.2 | Exclusion sweep harness (escape-aware value and key scanner) — **implemented, awaiting review**: `tests/test_audit_exclusion.py` | 50 tests; positive control — done |
+| P5.5.8.2 | Exclusion sweep harness (escape-aware value and key scanner) — **implemented, awaiting review**: `tests/test_audit_exclusion.py` | 52 tests; positive control — done |
 | P5.5.8.3 | Failure and recovery regression (runtime poisoning, restricted mode, crash → recover cycles) — **implemented, awaiting review**: `tests/test_audit_failure_regression.py` | 18 tests — done |
 | P5.5.8.4 | Bounded concurrency and rotation soak — **implemented, awaiting review**: `tests/test_audit_concurrency_soak.py` | 5 tests: 20 × 50 appends, 12 rotations, month boundary — done |
 | P5.5.8.5 | Documentation reconciliation — **implemented, awaiting review** | `git diff --check` — done |
@@ -662,7 +670,7 @@ Phase 5 acceptance).
 | P5.5.7.2 | Manifest schema and integrity foundation: exact §9.2 field set, canonical hashing, manifest chain and continuity, archive-reference validation — **accepted**: `src/audit_manifest.py` | P5.5.6 accepted | Manifest file I/O, sealing, archives, rotation, recovery, CLI | Schema/hash/chain/path matrix; no filesystem access — done (163 tests) |
 | P5.5.7 | Retention, archive and operator-controlled rotation; manifest persistence; crash recovery; manifest-aware writer and verifier; runbook — **implemented, awaiting review**: `src/audit_manifest_store.py`, `src/audit_archive.py`, `src/audit_rotation.py`, `src/audit_layout.py`, `src/audit_locking.py`, `tools/audit_rotate.py`, `tools/audit_verify.py` | P5.5.6, P5.5.7.2 | Automatic deletion, automatic rotation, automatic repair | Rotation preserves chain; every crash state requires an explicit command; anchor-only coverage reported honestly — done (190 new tests) |
 | P5.5.8 | Security regression, fault injection, exclusion sweep, docs and acceptance | P5.5.1–P5.5.7 | P5.6 work | Full matrix + review; owner acceptance |
-| P5.5.8.2 | Exclusion sweep harness (escape-aware value and key scanner) — **implemented, awaiting review**: `tests/test_audit_exclusion.py` | P5.5.8.1 | Production code | 50 tests; positive control — done |
+| P5.5.8.2 | Exclusion sweep harness (escape-aware value and key scanner) — **implemented, awaiting review**: `tests/test_audit_exclusion.py` | P5.5.8.1 | Production code | 52 tests; positive control — done |
 | P5.5.8.3 | Failure and recovery regression (runtime poisoning, restricted mode, crash → recover cycles) — **implemented, awaiting review**: `tests/test_audit_failure_regression.py` | P5.5.8.1 | Production code | 18 tests — done |
 | P5.5.8.4 | Bounded concurrency and rotation soak — **implemented, awaiting review**: `tests/test_audit_concurrency_soak.py` | P5.5.8.3 | Multi-process claims | 5 tests — done |
 | P5.5.8.5 | Documentation reconciliation — **implemented, awaiting review** | P5.5.8.4 | Production behaviour | `git diff --check` — done |
@@ -670,8 +678,9 @@ Phase 5 acceptance).
 
 ## 10. P5.6–P5.9 — subsequent milestones
 
-P5.6 is implemented and awaiting independent review. P5.7–P5.9 are not started,
-and none may be pulled forward without a separate owner instruction.
+P5.6–P5.8 are implemented and committed, and P5.9's integrated review is
+complete; **none of them is accepted**, and Phase 6/7 is not started and may not
+be pulled forward without a separate owner instruction.
 
 ### 10.1 P5.6 — User administration and secure first-Admin provisioning (implemented, awaiting review)
 
@@ -1000,9 +1009,34 @@ verification is still BLOCKED) and no audit view (`audit:read` guards no
 endpoint, so a page would be inventing a capability). No live backend, browser
 or deployment was exercised. Details: `docs/P5_8_ROLE_AWARE_UI_SECURITY.md`.
 
-**P5.9 — Final security regression and Phase 5 acceptance.** Full authorization
-matrix regression, authentication and session-lifecycle regression, audit
-integrity and failure-policy tests, user-management security tests, frontend
-integration regression, documentation and known-limitations review, and the
-final owner acceptance. Phase 5 is **not** complete before this milestone is
-accepted.
+**P5.9 — Final security regression and Phase 5 acceptance — review complete,
+awaiting owner acceptance (2026-11-20).** Delivered: an integrated review of
+authentication, backend RBAC, the proxy allowlist, the audit journal and
+rotation, user administration, the admin invariant and database guards, and the
+P5.7/P5.8 frontend layers; the full backend suite (**4006 passed, 40 skipped**),
+the full frontend suite (**614 passed / 42 files**), `compileall`, `eslint`,
+`tsc --noEmit`, `next build` (routes unchanged) and `git diff --check`, all
+exit 0, plus the 15-file audit suite (**783 passed, 1 skipped**) after the
+exclusion-sweep count was reconciled from a recorded 50 to the actual 52 tests;
+and an 18-section acceptance record
+(`docs/P5_9_PHASE5_FINAL_ACCEPTANCE.md`), including a documentation
+reconciliation, a file-change inventory and a Git-restrictions compliance
+section.
+
+One **source defect** was found and fixed (finding F1): the four
+user-administration mutations built their audit context with a fresh
+`uuid4()` instead of the request's server-generated ID, so `user.create`,
+`user.role_change`, `user.deactivate` and `first_admin.provision` records could
+not be correlated with the response's `X-Request-ID` or its logs. `UserService`
+now takes an optional `request_id`, resolves it through the current request
+context and never fabricates one; `src/api_user.py` passes
+`request_id_for(request)`; `tests/test_user_audit_request_id.py` (4 tests) pins
+the behaviour. Findings F2 (user actions reuse `EMPLOYEE_*` reason codes) and F3
+(already-inactive deactivation returns success unaudited) are disclosed rather
+than changed, because both would alter the approved audit event matrix.
+
+**P5.9 did not:** add endpoints, expand the proxy allowlist, execute migrations
+or SQL, create roles, connect to a database, stage/commit Git, or claim live
+browser/camera/deployment verification. Real-PostgreSQL concurrency
+verification for P5.6 remains **BLOCKED** and is recorded as such. Phase 5 is
+**not** accepted; the acceptance decision is the owner's.

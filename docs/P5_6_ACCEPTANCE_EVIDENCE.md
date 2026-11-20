@@ -285,3 +285,45 @@ P5.7 (frontend authentication and session integration) must not begin until:
 3. the owner has explicitly authorized starting P5.7.
 
 No P5.7 or P5.8 implementation was started, and no frontend file was touched.
+
+## 12. P5.9 correction (2026-11-20)
+
+Historical note for the P5.9 final review, appended rather than rewriting the
+sections above ("P5.7 has not been started" and "no frontend file was touched"
+were true when written and are preserved as historical statements).
+
+**Defect found and fixed — audit request-ID correlation.** The four
+user-management mutations in `src/user_service.py` (`create_user`,
+`change_user_role`, `deactivate_user`, `provision_first_admin`) constructed
+their `AuditContext` with `request_id=str(uuid.uuid4())`, a fresh random value,
+instead of the request's server-generated ID. Every other audited path
+(employee create/update/deactivate, attendance checkout, login, logout) uses
+`request_id_for(request)`, and `tests/test_api_audit.py` already pins that
+correlation for employees. The effect was a traceability gap on exactly the
+highest-privilege mutations: their audit records could not be matched to the
+HTTP response (`X-Request-ID`), its structured logs or the request that
+produced them, contradicting plan §9.2 and acceptance criterion 4.
+
+Correction: `UserService` methods take an optional `request_id`, resolved by
+`UserService._audit_request_id` — explicit value first, then the current
+request's ID (`src/api_request_context.current_request_id`), and `None` when
+there is no request (CLI), because inventing a UUID would defeat correlation
+rather than provide it. `src/api_user.py` passes `request_id_for(request)` on
+create, role change and deactivation. Authorization, request models, statuses
+and payloads are unchanged.
+
+Regression coverage: `tests/test_user_audit_request_id.py` — 4 tests (route
+context equals the response's `X-Request-ID`; a client-supplied `X-Request-ID`
+cannot displace it; all four mutations forward the given ID; no ID is fabricated
+outside a request). Focused run: `tests/test_user_audit_request_id.py` +
+`tests/test_user_service.py` + `tests/test_api_user.py` = **70 passed**. Full
+backend suite afterwards: **4006 passed, 40 skipped** (exit 0).
+
+Not changed, and disclosed instead in the P5.9 record: user actions reuse
+`EMPLOYEE_EXISTS` / `EMPLOYEE_NOT_FOUND` reason codes (approved closed
+vocabulary), and the already-inactive deactivation branch returns success
+without an audit record.
+
+**The P5.9 review did not execute any migration, SQL script, role creation or
+grant, and did not connect to any database.** The real-PostgreSQL concurrency
+scenarios in §6.4/§7 remain **BLOCKED** exactly as recorded above.

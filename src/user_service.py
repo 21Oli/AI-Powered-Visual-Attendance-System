@@ -28,11 +28,11 @@ database migration, no login/logout/me and no attendance work.
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
 
+from src.api_request_context import current_request_id
 from src.audit_schema import AuditSource, AuditReasonCode
 from src.audit_service import (
     AuditService,
@@ -232,6 +232,21 @@ class UserService:
     def _now(self) -> datetime:
         return utc_now()
 
+    @staticmethod
+    def _audit_request_id(request_id: str | None) -> str | None:
+        """Resolve the server-generated request ID used for audit correlation.
+
+        An explicit value from the HTTP layer always wins. When the caller is
+        inside a request (the middleware publishes its UUIDv4 in a context
+        variable) that ID is reused, so the audit record matches the response's
+        ``X-Request-ID`` and its structured logs. A CLI invocation or a direct
+        service call has no request, and fabricating a random UUID there would
+        break correlation instead of providing it, so ``None`` is returned.
+        """
+        if request_id is not None:
+            return request_id
+        return current_request_id()
+
     def _require_admin(self, principal: object) -> None:
         """Refuse non-Admin principals (defence in depth behind the route)."""
         role = getattr(principal, "role", None)
@@ -330,6 +345,7 @@ class UserService:
         username: str,
         password: str,
         role: Role,
+        request_id: str | None = None,
     ) -> CreatedUser:
         """Create a new application user as an Admin.
 
@@ -364,7 +380,9 @@ class UserService:
 
         # Begin audit intent before the mutation.
         actor_obj = AuditActor(user_id=getattr(actor, "user_id", ""), role=getattr(actor, "role", Role.ADMIN))
-        context = AuditContext(actor=actor_obj, request_id=str(uuid.uuid4()))
+        context = AuditContext(
+            actor=actor_obj, request_id=self._audit_request_id(request_id)
+        )
         
         try:
             intent = self._audit.begin_user_create(
@@ -404,6 +422,7 @@ class UserService:
         actor: object,
         target_user_id: str,
         new_role: Role,
+        request_id: str | None = None,
     ) -> RoleChangeResult:
         """Change another user's role as an Admin.
 
@@ -424,7 +443,9 @@ class UserService:
 
         # Begin audit intent before the mutation.
         actor_obj = AuditActor(user_id=actor_user_id, role=Role.ADMIN)
-        context = AuditContext(actor=actor_obj, request_id=str(uuid.uuid4()))
+        context = AuditContext(
+            actor=actor_obj, request_id=self._audit_request_id(request_id)
+        )
         
         try:
             intent = self._audit.begin_user_role_change(
@@ -473,6 +494,7 @@ class UserService:
         *,
         actor: object,
         target_user_id: str,
+        request_id: str | None = None,
     ) -> DeactivationResult:
         """Deactivate another user as an Admin.
 
@@ -507,7 +529,9 @@ class UserService:
 
         # Begin audit intent before the mutation.
         actor_obj = AuditActor(user_id=actor_user_id, role=Role.ADMIN)
-        context = AuditContext(actor=actor_obj, request_id=str(uuid.uuid4()))
+        context = AuditContext(
+            actor=actor_obj, request_id=self._audit_request_id(request_id)
+        )
         
         try:
             intent = self._audit.begin_user_deactivate(
@@ -561,6 +585,7 @@ class UserService:
         user_id: str,
         username: str,
         password: str,
+        request_id: str | None = None,
     ) -> CreatedUser:
         """Create the first Admin account (operator-controlled, CLI).
 
@@ -594,7 +619,9 @@ class UserService:
 
         # Begin audit intent before the mutation (CLI source).
         actor_obj = AuditActor(user_id="cli", role=Role.ADMIN)
-        context = AuditContext(actor=actor_obj, request_id=str(uuid.uuid4()))
+        context = AuditContext(
+            actor=actor_obj, request_id=self._audit_request_id(request_id)
+        )
         
         try:
             intent = self._audit.begin_first_admin_provision(

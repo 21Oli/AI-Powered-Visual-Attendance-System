@@ -40,6 +40,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from src.api_auth import AuthenticatedPrincipal, make_session_dependency
+from src.api_request_context import request_id_for
 from src.audit_service import AuditService
 from src.authz import Permission, permission_dependency
 from src.config import AppSettings
@@ -311,6 +312,7 @@ def register_user_routes(
     @app.post(f"{path}{USERS_PATH}")
     def create_user(
         payload: UserCreateRequest,
+        request: Request,
         principal: AuthenticatedPrincipal = Depends(users_guard),
     ) -> JSONResponse:
         """Create a new user (Admin only)."""
@@ -326,6 +328,9 @@ def register_user_routes(
                 username=payload.username,
                 password=payload.password,
                 role=role,
+                # The server-generated request ID, so the audit record
+                # correlates with this response and its logs.
+                request_id=request_id_for(request),
             )
         except UserAdministrationError as exc:
             return _error_response(exc)
@@ -350,6 +355,7 @@ def register_user_routes(
     def change_role(
         payload: RoleChangeRequest,
         user_id: str,
+        request: Request,
         principal: AuthenticatedPrincipal = Depends(users_guard),
     ) -> JSONResponse:
         """Change another user's role (Admin only)."""
@@ -363,6 +369,7 @@ def register_user_routes(
                 actor=principal,
                 target_user_id=user_id,
                 new_role=new_role,
+                request_id=request_id_for(request),
             )
         except UserAdministrationError as exc:
             return _error_response(exc)
@@ -385,6 +392,7 @@ def register_user_routes(
     @app.post(f"{path}{USER_DEACTIVATE_PATH}")
     def deactivate_user(
         user_id: str,
+        request: Request,
         principal: AuthenticatedPrincipal = Depends(users_guard),
     ) -> JSONResponse:
         """Deactivate another user (Admin only)."""
@@ -394,6 +402,7 @@ def register_user_routes(
             result: DeactivationResult = service.deactivate_user(
                 actor=principal,
                 target_user_id=user_id,
+                request_id=request_id_for(request),
             )
         except UserAdministrationError as exc:
             return _error_response(exc)
