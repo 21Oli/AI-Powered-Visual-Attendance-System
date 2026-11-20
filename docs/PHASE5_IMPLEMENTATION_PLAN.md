@@ -799,11 +799,29 @@ and none may be pulled forward without a separate owner instruction.
   active Admin, and the enforced `READ COMMITTED` proven against a
   `REPEATABLE READ` session default. The suite refuses to touch foreign Admin
   rows, through a separate test-only `attendance_tier2_cleanup`
-  credential (the runtime role has no `DELETE`). **BLOCKED**: see below.
-* `tests/test_apply_v002_owner_script.py` — static review of the owner
-  script (no database): embedded V002 byte-identical to the migration
+  credential (the runtime role has no `DELETE`). That credential holds
+  `DELETE` on the two security tables plus column-level `SELECT` on `user_id`
+  only, and it is verified as *effective* privilege (including anything
+  inherited through role membership) together with the database name, the
+  cluster `system_identifier` and the absence of mutual membership. **BLOCKED**:
+  see below.
+* `tests/test_apply_v002_owner_script.py` — 15 static review tests of the
+  owner script (no database): embedded V002 byte-identical to the migration
   file, ledger checksums equal to the loader's, one transaction around
-  DDL + ledger + grants, and exactly the least-privilege grant set.
+  DDL + ledger + grants, exactly the least-privilege grant set, the
+  effective-privilege assertions (`has_table_privilege`/
+  `has_column_privilege` over every catalog column) for both roles, and a
+  regression test that a role name (`grantee`) is never resolved through
+  `pg_get_userbyid()`.
+* `tests/test_cleanup_credential_verification.py` — 19 offline regression tests
+  that drive the real `_require_cleanup_credential()` against a synthetic
+  psycopg-shaped connection: the minimum permission set is accepted and each
+  expansion is rejected (missing `DELETE`, missing `user_id` read, table-level
+  `SELECT`, a read on another column, a `SELECT` inherited through another
+  role, column- and table-level writes, an over-privileged runtime role), and
+  every identity failure is rejected (wrong database, wrong cluster,
+  unreadable or unexecutable `pg_control_system()`, wrong role, superuser,
+  mutual membership).
 
 **Blocked / not verified**
 
@@ -840,16 +858,17 @@ and none may be pulled forward without a separate owner instruction.
      `sha256sum migrations/V002__security.sql` must print
      `35bc00cd7a947a9eca31a7502d3a17e0ff55163f1c5222cf8fcb88a6328082d3`
      (the runner's canonical checksum, so line endings do not matter).
-  3. Run the script as a role with `CREATE` on schema `public` and grant option
-     on it, from the repository root:
+  3. Run the script as a role with `CREATE` on schema `public`, from the
+     repository root (grant option on that schema is needed only if
+     `attendance_tier2_cleanup` does not already hold `USAGE` there; see
+     step 6):
      `psql -v ON_ERROR_STOP=1 --dbname "<owner DSN for visual_attendance_tier2_test>" --file tools/apply_v002_tier2_test_database.sql`
      Any SQL client works (the script contains no psql meta-commands) but it
      must be executed as **one** script, never statement by statement.
      Preconditions: exact database name; cluster identity; no pre-existing
      V002 object name; ledger exactly `[1]` with the V001 checksum; unchanged
      guard marker; both roles present, non-superuser and not members of each
-     other; and the executing role's own `CREATE` / `USAGE WITH GRANT OPTION`
-     authority.
+     other; and the executing role's own `CREATE` authority.
   4. Why one transaction is mandatory: `src.db_migrate`'s contract is that the
      DDL and its `schema_version` row commit together, with `checksum` =
      SHA-256 of the file's canonical text and a timezone-aware `applied_at`.
@@ -868,12 +887,36 @@ and none may be pulled forward without a separate owner instruction.
   6. Privileges (least privilege, all in the same transaction):
      `SELECT, INSERT, UPDATE` on `app_user` and `user_session` for
      `attendance_tier2_runtime` — **no `DELETE`** (the application never
-     deletes; deactivation is an `UPDATE`); and `USAGE` plus `DELETE` **only**
-     on those two tables for `attendance_tier2_cleanup`. No ownership, no
-     `TRUNCATE`, no `ALTER`, no DDL privilege for either role. The script
+     deletes; deactivation is an `UPDATE`) and **no column-level grant at
+     all**; and, for `attendance_tier2_cleanup`, **`DELETE` on those two tables
+     only** plus **column-level `SELECT` on `user_id` only** (the column its
+     `DELETE ... WHERE user_id = ANY(%s)` statements need: no table-level read,
+     no `INSERT`/`UPDATE`, no other column), plus `USAGE` on schema `public`
+     **only when it is not already held** (PostgreSQL grants `USAGE` on
+     `public` to `PUBLIC` by default, and a `GRANT` needs grant option even
+     when the privilege exists, so the script checks first and demands grant
+     option only when a grant is actually required). No ownership, no
+     `TRUNCATE`, no `ALTER`, no DDL privilege for either role.
+     The script
      asserts that the tables' owner is the executing role before granting, and
      the verification block fails if either role holds anything beyond its set.
-  7. Server identity: the precondition requires
+  7. Effective-privilege verification (blocks 5n, 5n-bis, 5o, 5p). The
+     verification does not trust the grant records the script wrote: it asks
+     PostgreSQL, so a privilege inherited through a role membership is
+     included. `has_table_privilege()` is used for `DELETE`/`INSERT`/`UPDATE`;
+     `has_column_privilege()` is used for `SELECT` on **every** column of both
+     tables. That function succeeds when the privilege is held for the whole
+     table *or* granted for that column, so one per-column sweep rejects a
+     table-level `SELECT` grant, a grant on any other column and an inherited
+     read, and its column list comes from `information_schema.columns` (a later
+     migration's columns are covered without editing the script). The same
+     sweep rejects column-level writes for the cleanup role and any
+     column-level grant for the runtime role. Role names are compared **as
+     names**: `grantee` in `information_schema.column_privileges` is already a
+     role name, so it is never passed to `pg_get_userbyid()`, which resolves an
+     OID — doing so is a type error that fails the apply, and
+     `tests/test_apply_v002_owner_script.py` pins the regression.
+  8. Server identity: the precondition requires
      `pg_control_system().system_identifier` to equal
      `7687968999847354228`, the value captured read-only from the guarded
      tier-2 target on 2026-11-19 (a cluster fingerprint, not a credential).
@@ -885,7 +928,18 @@ and none may be pulled forward without a separate owner instruction.
      local socket. If the disposable cluster is deliberately re-initialised,
      capture the new identifier read-only and update the constant in the same
      reviewed change.
-  8. Rerun `ATTENDANCE_TIER2_OPT_IN=1 .venv/Scripts/python.exe -m pytest
+
+     `pg_control_system()` needs `EXECUTE` on the function, which PostgreSQL
+     grants to `PUBLIC` by default: no superuser role and no `pg_monitor`
+     membership is required. Evidence for this cluster: the pinned value was
+     captured through the **non-superuser** `attendance_tier2_runtime` session
+     (read-only verification below), and the suite's cleanup check reads the
+     same function through the cleanup credential. If a hardened cluster has
+     revoked that `EXECUTE`, both paths fail closed with a named blocker
+     (`IDENTITY_UNVERIFIABLE` in the guard; an explicit "cannot read
+     pg_control_system()" failure in the suite) instead of skipping the cluster
+     check: the guard never falls back to comparing database names alone.
+  9. Rerun `ATTENDANCE_TIER2_OPT_IN=1 .venv/Scripts/python.exe -m pytest
      tests/test_tier2_user_concurrency.py -q` and record the result here.
 
   Verified read-only on the guarded target before writing the script

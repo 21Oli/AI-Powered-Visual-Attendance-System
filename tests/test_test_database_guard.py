@@ -58,9 +58,10 @@ class DbIdentity:
 class FakeGuardConnection:
     """Fake connection exposing exactly what the guard may read: read-only
     mode, identity info, the marker table's rows, the migration ledger,
-    and ``current_database()``. Records the order of operations so tests
-    can prove read-only mode precedes every verification query and that
-    the connection is closed on every path."""
+    ``current_database()``, and ``pg_control_system().system_identifier``.
+    Records the order of operations so tests can prove read-only mode
+    precedes every verification query and that the connection is closed on
+    every path."""
 
     def __init__(
         self,
@@ -70,10 +71,12 @@ class FakeGuardConnection:
         port: object = 5432,
         marker_rows: list[tuple[str, object, object]] | None = None,
         ledger_version: int | None = 1,
+        system_identifier: int | None = 7687968999847354228,
         info: DbIdentity | None = None,
         no_info: bool = False,
         no_current_database: bool = False,
         marker_error: Exception | None = None,
+        identifier_error: Exception | None = None,
         read_only_mode: str = "ok",
     ) -> None:
         self.info = None if no_info else DbIdentity(dbname, host, port)
@@ -85,7 +88,9 @@ class FakeGuardConnection:
             else marker_rows
         )
         self.ledger_version = ledger_version
+        self.system_identifier = system_identifier
         self.marker_error = marker_error
+        self.identifier_error = identifier_error
         self.read_only_mode = read_only_mode
         self._read_only = False
         self.read_only_before_first_query: bool | None = None
@@ -123,6 +128,12 @@ class FakeGuardConnection:
             return FakeGuardResult([(row[0], row[1], row[2]) for row in self.marker_rows])  # type: ignore[misc]
         if LEDGER_TABLE in sql:
             return FakeGuardResult([(self.ledger_version,)])
+        if "system_identifier" in sql:
+            if self.identifier_error is not None:
+                raise self.identifier_error
+            if self.system_identifier is None:
+                return FakeGuardResult(None)
+            return FakeGuardResult([(self.system_identifier,)])
         raise AssertionError(f"guard must only issue approved reads: {sql!r}")
 
 
@@ -201,6 +212,7 @@ def test_successful_positive_verification_evidence() -> None:
     opener = FakeOpener(FakeGuardConnection())
     target = verified(opener)
     assert target.dbname == "attendance_test"
+    assert target.system_identifier == 7687968999847354228
     assert target.marker_schema_version == target.ledger_schema_version == 1
     assert target.marker_created_at == MARKER_CREATED_AT
     assert "attendance_test" in opener.opened_dsns[0]
@@ -548,6 +560,76 @@ def test_marker_claims_version_absent_ledger_blocked() -> None:
     assert err.value.reason == GuardBlockedReason.SCHEMA_VERSION_UNREADABLE
 
 
+# -- cluster identity (system_identifier) ------------------------------------
+
+
+def test_system_identifier_captured_in_verified_target() -> None:
+    """The verified target must record the cluster's system_identifier."""
+    opener = FakeOpener(FakeGuardConnection(system_identifier=7687968999847354228))
+    target = verified(opener)
+    assert target.system_identifier == 7687968999847354228
+
+
+def test_system_identifier_unreadable_blocks() -> None:
+    """When pg_control_system().system_identifier cannot be read, the guard
+
+    must refuse rather than assume the cluster identity.
+    """
+    opener = FakeOpener(FakeGuardConnection(system_identifier=None))
+    assert blocked_reason(lambda: verified(opener)) == (
+        GuardBlockedReason.IDENTITY_UNVERIFIABLE
+    )
+
+
+def test_system_identifier_not_an_integer_blocks() -> None:
+    """A non-integer system_identifier (e.g. a boolean from a synthetic
+
+    driver) must be treated as unreadable.
+    """
+    opener = FakeOpener(FakeGuardConnection(system_identifier=True))  # type: ignore[arg-type]
+    assert blocked_reason(lambda: verified(opener)) == (
+        GuardBlockedReason.IDENTITY_UNVERIFIABLE
+    )
+
+
+@pytest.mark.parametrize("malformed", [0, -1, "7687968999847354228", 1.5, None])
+def test_system_identifier_malformed_value_blocks(malformed: object) -> None:
+    """A fingerprint that is not a positive integer is never identity evidence.
+
+    ``system_identifier`` is an unsigned 64-bit value, so zero, negatives,
+    strings and floats are malformed: the guard must refuse rather than carry a
+    value that could never match a real cluster.
+    """
+    opener = FakeOpener(FakeGuardConnection(system_identifier=malformed))  # type: ignore[arg-type]
+    assert blocked_reason(lambda: verified(opener)) == (
+        GuardBlockedReason.IDENTITY_UNVERIFIABLE
+    )
+
+
+def test_system_identifier_query_failure_blocks() -> None:
+    """A role without EXECUTE on pg_control_system() must block, not degrade.
+
+    The identifier is read through the guarded read-only connection; a driver
+    error is unverifiable identity, never permission to skip the check.
+    """
+    opener = FakeOpener(
+        FakeGuardConnection(identifier_error=RuntimeError("permission denied"))
+    )
+    assert blocked_reason(lambda: verified(opener)) == (
+        GuardBlockedReason.IDENTITY_UNVERIFIABLE
+    )
+    assert opener.connection.closed
+
+
+def test_system_identifier_read_after_read_only_is_enforced() -> None:
+    """The cluster read happens on the read-only connection, after the marker."""
+    connection = FakeGuardConnection()
+    verified(FakeOpener(connection))
+    executed = " ".join(connection.executed)
+    assert "pg_control_system()" in executed
+    assert connection.read_only_before_first_query is True
+
+
 # -- destructive-action manifest (check 5, M-5) -------------------------------
 
 
@@ -580,6 +662,7 @@ def test_direct_target_construction_refused() -> None:
             dbname="attendance_test",
             host="127.0.0.1",
             port=5432,
+            system_identifier=7687968999847354228,
             marker_created_at=MARKER_CREATED_AT,
             marker_schema_version=1,
             ledger_schema_version=1,

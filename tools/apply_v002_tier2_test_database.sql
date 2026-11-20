@@ -11,7 +11,8 @@
 -- ATTENDANCE_TEST_DATABASE_URL authenticates as attendance_tier2_runtime,
 -- which has USAGE but no CREATE on schema public and owns none of the
 -- existing objects. Applying this script therefore needs a role with CREATE
--- on schema public and grant option on that schema.
+-- on schema public, and grant option on that schema only when the cleanup
+-- role does not already hold USAGE there (step 4 skips the grant otherwise).
 --
 -- Least privilege
 -- ---------------
@@ -21,9 +22,12 @@
 -- UPDATE), so DELETE is not an application privilege.
 --
 -- Synthetic test rows are removed by a SEPARATE, test-only role,
--- attendance_tier2_cleanup, which gets USAGE on schema public plus DELETE on
--- exactly those two tables and nothing else (no SELECT, INSERT or UPDATE, no
--- other table, no DDL). Its credential is supplied only through
+-- attendance_tier2_cleanup, which gets DELETE on exactly those two tables and
+-- column-level SELECT on user_id only (the column its
+-- DELETE ... WHERE user_id = ANY(%s) statements need). No table-level read, no
+-- INSERT or UPDATE, no other column, no other table, no DDL. Plus
+-- USAGE on schema public only if it does not already hold it. Its credential
+-- is supplied only through
 -- ATTENDANCE_TIER2_CLEANUP_DATABASE_URL to the tier-2 suite's teardown, never
 -- to application code. This script never creates roles: both roles must
 -- already exist as ordinary non-superuser LOGIN roles (the owner creates
@@ -120,10 +124,12 @@ BEGIN
         v_db, v_sysid, current_setting('server_version_num'),
         COALESCE(inet_server_addr()::text, '<local socket>'), inet_server_port();
 
-    -- 0c. Executing authority: never a least-privilege role; must be able to
-    --     create in schema public and to grant USAGE on it (needed for the
-    --     test-only cleanup role). Table grants need ownership, which the
-    --     creator has and which is re-asserted before the GRANT section.
+    -- 0c. Executing authority: never a least-privilege role, and it must be
+    --     able to create in schema public. Table grants need ownership, which
+    --     the creator has and which is re-asserted before the GRANT section.
+    --     Grant option on the schema is required only when the cleanup role
+    --     does not already hold USAGE there; that is decided (and enforced)
+    --     in step 4, next to the grant itself.
     IF current_user IN ('attendance_tier2_runtime', 'attendance_tier2_cleanup') THEN
         RAISE EXCEPTION
             'refusing to run as least-privilege role %; use a migration/owner role',
@@ -133,12 +139,6 @@ BEGIN
     IF NOT has_schema_privilege(current_user, 'public', 'CREATE') THEN
         RAISE EXCEPTION
             'refusing to run: role % lacks CREATE on schema public and cannot create the V002 objects',
-            current_user;
-    END IF;
-
-    IF NOT has_schema_privilege(current_user, 'public', 'USAGE WITH GRANT OPTION') THEN
-        RAISE EXCEPTION
-            'refusing to run: role % cannot grant USAGE on schema public (no grant option); the test-only cleanup role needs it',
             current_user;
     END IF;
 
@@ -369,14 +369,43 @@ VALUES (
 --
 --    attendance_tier2_cleanup — test-only teardown of synthetic T2-UC-* rows
 --    and their sessions. DELETE on exactly those two tables; no read or write
---    privilege, no other table, no DDL.
+--    privilege, no other table, no DDL. USAGE on schema public is granted
+--    only if the role does not already hold it: PostgreSQL grants USAGE on
+--    schema public to PUBLIC by default, so the grant is usually a no-op,
+--    and GRANT requires grant option even when the privilege already
+--    exists. Skipping it keeps the owner from needing grant option it
+--    does not otherwise use.
 -- --------------------------------------------------------------------------
 GRANT SELECT, INSERT, UPDATE ON public.app_user TO attendance_tier2_runtime;
 GRANT SELECT, INSERT, UPDATE ON public.user_session TO attendance_tier2_runtime;
 
-GRANT USAGE ON SCHEMA public TO attendance_tier2_cleanup;
+-- The cleanup role needs the user_id column to drive its DELETEs
+-- (WHERE user_id = ANY(...)). Grant column-level SELECT on user_id only —
+-- no table-level read, no other column, no INSERT/UPDATE.
+GRANT SELECT (user_id) ON public.app_user TO attendance_tier2_cleanup;
+GRANT SELECT (user_id) ON public.user_session TO attendance_tier2_cleanup;
+
 GRANT DELETE ON public.app_user TO attendance_tier2_cleanup;
 GRANT DELETE ON public.user_session TO attendance_tier2_cleanup;
+
+DO $$
+BEGIN
+    IF NOT has_schema_privilege('attendance_tier2_cleanup', 'public', 'USAGE') THEN
+        IF NOT has_schema_privilege(
+                   current_user, 'public', 'USAGE WITH GRANT OPTION'
+               ) THEN
+            RAISE EXCEPTION
+                'refusing to grant: attendance_tier2_cleanup lacks USAGE on schema public and role % has no grant option to grant it',
+                current_user;
+        END IF;
+        EXECUTE 'GRANT USAGE ON SCHEMA public TO attendance_tier2_cleanup';
+        RAISE NOTICE 'granted USAGE on schema public to attendance_tier2_cleanup';
+    ELSE
+        RAISE NOTICE
+            'attendance_tier2_cleanup already holds USAGE on schema public; schema grant skipped';
+    END IF;
+END
+$$;
 
 -- --------------------------------------------------------------------------
 -- 5. Post-apply verification. Any deviation raises and rolls the whole
@@ -664,7 +693,8 @@ BEGIN
         RAISE EXCEPTION 'the Tier-2 guard marker changed during the apply';
     END IF;
 
-    -- 5n. Runtime privileges: SELECT/INSERT/UPDATE present, DELETE absent.
+    -- 5n. Runtime privileges: SELECT/INSERT/UPDATE present, DELETE absent,
+    --     column-level SELECT absent (the runtime role reads via the table).
     SELECT string_agg(t.name || '/' || p.priv, ', ')
       INTO v_bad
       FROM unnest(ARRAY['app_user', 'user_session']) AS t(name)
@@ -688,20 +718,39 @@ BEGIN
             v_bad;
     END IF;
 
-    -- 5o. Cleanup role: DELETE present, SELECT/INSERT/UPDATE absent.
-    SELECT string_agg(t.name || '/' || p.priv, ', ')
+    -- 5n-bis. The runtime role must hold no column-level grant at all: it
+    --     reads through its table-level SELECT, so a column-level record would
+    --     be unintended (and a sign the grant set has drifted).
+    --     information_schema.column_privileges shows each row to its grantor,
+    --     so the executing owner sees the grants it just made. ``grantee`` in
+    --     that view is already a role NAME, never an OID, so it must be
+    --     compared as a name: passing it to pg_get_userbyid() is the same class
+    --     of type error the earlier revision of this script had, and would
+    --     either fail the apply or silently compare nothing.
+    SELECT string_agg(
+               'public.' || c.table_name::text || '.' || c.column_name::text ||
+               '/' || c.privilege_type::text, ', '
+           ORDER BY c.table_name, c.column_name, c.privilege_type)
       INTO v_bad
-      FROM unnest(ARRAY['app_user', 'user_session']) AS t(name)
-      CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE']) AS p(priv)
-     WHERE has_table_privilege(
-               'attendance_tier2_cleanup', 'public.' || t.name, p.priv
-           );
+      FROM information_schema.column_privileges c
+     WHERE c.table_schema = 'public'
+       AND c.table_name IN ('app_user', 'user_session')
+       AND c.grantee = 'attendance_tier2_runtime';
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION
-            'the cleanup role must hold DELETE only; found %', v_bad;
+            'the runtime role must not hold column-level grants; found %',
+            v_bad;
     END IF;
 
-    SELECT string_agg(t.name, ', ')
+    -- 5o. Cleanup role, effective privileges (not only the grant records this
+    --     script wrote): DELETE on both tables and no table-level INSERT or
+    --     UPDATE. Every check goes through PostgreSQL's own privilege
+    --     functions, so a privilege inherited through role membership is
+    --     included. Table-level SELECT is deliberately not tested with
+    --     has_table_privilege() here: that answers the table-level ACL only,
+    --     while the effective read surface is asserted per column in 5p, where
+    --     a table-level grant makes every column readable.
+    SELECT string_agg(t.name || '/DELETE', ', ' ORDER BY t.name)
       INTO v_bad
       FROM unnest(ARRAY['app_user', 'user_session']) AS t(name)
      WHERE NOT has_table_privilege(
@@ -709,6 +758,78 @@ BEGIN
            );
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION 'the cleanup role lacks DELETE on %', v_bad;
+    END IF;
+
+    SELECT string_agg(t.name || '/' || p.priv, ', ' ORDER BY t.name, p.priv)
+      INTO v_bad
+      FROM unnest(ARRAY['app_user', 'user_session']) AS t(name)
+     CROSS JOIN unnest(ARRAY['INSERT', 'UPDATE']) AS p(priv)
+     WHERE has_table_privilege(
+               'attendance_tier2_cleanup', 'public.' || t.name, p.priv
+           );
+    IF v_bad IS NOT NULL THEN
+        RAISE EXCEPTION
+            'the cleanup role must hold no table-level write privilege; found %',
+            v_bad;
+    END IF;
+
+    -- 5p. Cleanup role: effective column-level SELECT on user_id only, in both
+    --     tables. has_column_privilege() succeeds either when the privilege is
+    --     held for the whole table or when it is granted for that column, so
+    --     this single per-column sweep rejects a table-level SELECT grant, a
+    --     grant on any other column, and any SELECT inherited from another
+    --     role. The column list comes from the catalog, so columns added by a
+    --     later migration are covered without editing this block.
+    SELECT string_agg(c.table_name::text || '.' || c.column_name::text, ', '
+                      ORDER BY c.table_name, c.column_name)
+      INTO v_bad
+      FROM information_schema.columns c
+     WHERE c.table_schema = 'public'
+       AND c.table_name IN ('app_user', 'user_session')
+       AND has_column_privilege(
+               'attendance_tier2_cleanup'::name,
+               ('public.' || c.table_name)::text,
+               c.column_name::text,
+               'SELECT'
+           )
+       AND NOT (c.table_name = 'app_user' AND c.column_name = 'user_id')
+       AND NOT (c.table_name = 'user_session' AND c.column_name = 'user_id');
+    IF v_bad IS NOT NULL THEN
+        RAISE EXCEPTION
+            'the cleanup role must only be able to read user_id, but can read %',
+            v_bad;
+    END IF;
+
+    SELECT string_agg(t.name, ', ' ORDER BY t.name)
+      INTO v_bad
+      FROM unnest(ARRAY['app_user', 'user_session']) AS t(name)
+     WHERE NOT has_column_privilege(
+               'attendance_tier2_cleanup', 'public.' || t.name, 'user_id', 'SELECT'
+           );
+    IF v_bad IS NOT NULL THEN
+        RAISE EXCEPTION
+            'the cleanup role lacks column-level SELECT on user_id in %', v_bad;
+    END IF;
+
+    -- The teardown role has no reason to hold column-level writes either.
+    SELECT string_agg(
+               c.table_name::text || '.' || c.column_name::text || '/' || p.priv,
+               ', ' ORDER BY c.table_name, c.column_name, p.priv)
+      INTO v_bad
+      FROM information_schema.columns c
+      CROSS JOIN unnest(ARRAY['INSERT', 'UPDATE']) AS p(priv)
+     WHERE c.table_schema = 'public'
+       AND c.table_name IN ('app_user', 'user_session')
+       AND has_column_privilege(
+               'attendance_tier2_cleanup'::name,
+               ('public.' || c.table_name)::text,
+               c.column_name::text,
+               p.priv
+           );
+    IF v_bad IS NOT NULL THEN
+        RAISE EXCEPTION
+            'the cleanup role must hold no column-level write privilege; found %',
+            v_bad;
     END IF;
 
     IF NOT has_schema_privilege('attendance_tier2_runtime', 'public', 'USAGE') THEN
@@ -719,7 +840,7 @@ BEGIN
     END IF;
 
     RAISE NOTICE
-        'V002 applied and verified: app_user, user_session, ledger rows 1-2, runtime SELECT/INSERT/UPDATE, cleanup DELETE only';
+        'V002 applied and verified: app_user, user_session, ledger rows 1-2, runtime SELECT/INSERT/UPDATE without DELETE, cleanup DELETE plus column-level SELECT on user_id only';
 END
 $$;
 

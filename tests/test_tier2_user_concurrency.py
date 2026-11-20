@@ -61,10 +61,15 @@ only the synthetic ``T2-UC-*`` rows plus their sessions that it created.
 
 Teardown never uses the application credential: the runtime role has no
 ``DELETE`` privilege at all. It uses the separate test-only cleanup credential,
-inspected before the first scenario (same database, distinct role, not a
-superuser, ``DELETE`` only on the two tables), and its deletions are verified
-through the runtime connection — a surviving row fails the test instead of
-being silently left behind.
+inspected before the first scenario (same database, same cluster by
+   ``pg_control_system().system_identifier``, distinct role, not a superuser,
+   ``DELETE`` on both tables and nothing else, plus column-level ``SELECT`` on
+   ``user_id`` in those tables only, all read as *effective* privileges
+   (``has_table_privilege``/``has_column_privilege`` plus the raw column ACLs),
+   so a grant inherited through another role is caught as well), and its
+   deletions are verified through the
+   runtime connection — a surviving row fails the test instead of being silently
+   left behind.
 """
 
 from __future__ import annotations
@@ -99,9 +104,16 @@ TIER2_OPT_IN_ENV: Final[str] = "ATTENDANCE_TIER2_OPT_IN"
 CLEANUP_DSN_ENV: Final[str] = "ATTENDANCE_TIER2_CLEANUP_DATABASE_URL"
 
 #: The dedicated teardown role the owner creates for this suite. It holds
-#: ``DELETE`` on the two security tables and nothing else, so the application
-#: role never needs DELETE.
+#: ``DELETE`` on the two security tables and nothing else, plus column-level
+#: ``SELECT`` on ``user_id`` in those tables only (the column that drives its
+#: ``DELETE ... WHERE user_id = ANY(%s)`` queries), so the application role
+#: never needs DELETE.
 CLEANUP_ROLE: Final[str] = "attendance_tier2_cleanup"
+
+#: The role ``ATTENDANCE_TEST_DATABASE_URL`` authenticates as. The cleanup
+#: credential's *effective* privileges are inspected for both roles, because a
+#: role membership alone would hand one role the other's privileges.
+RUNTIME_ROLE: Final[str] = "attendance_tier2_runtime"
 
 _CLEANUP_BLOCK_REASON: Final[str] = (
     f"BLOCKED: {CLEANUP_DSN_ENV} is not configured; the application/runtime "
@@ -244,22 +256,124 @@ def cleanup_dsn(test_dsn: str, verified_target: VerifiedTestTarget) -> str:
     return value
 
 
+#: Identity of the connection the cleanup credential actually authenticated.
+_CLEANUP_IDENTITY_SQL: Final[str] = (
+    "SELECT current_database(), current_user, current_setting('is_superuser')"
+)
+
+#: Effective table privileges for both Tier-2 roles. ``has_table_privilege``
+#: includes anything inherited through role membership.
+_CLEANUP_TABLE_PRIVILEGES_SQL: Final[str] = (
+    "SELECT r.role_name, t.table_name, p.priv, "
+    "has_table_privilege(r.role_name::name, 'public.' || t.table_name, "
+    "p.priv::text) "
+    "FROM unnest(%s::text[]) AS r(role_name) "
+    "CROSS JOIN unnest(ARRAY['app_user', 'user_session']) AS t(table_name) "
+    "CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) "
+    "AS p(priv)"
+)
+
+#: Effective per-column privileges for *every* column of both tables.
+#: ``has_column_privilege`` answers "held for the whole table, or granted for
+#: this column", which is exactly the least-privilege question here: a
+#: table-level grant appears on every column. The column list comes from the
+#: catalog, so columns added by a later migration are covered automatically.
+_CLEANUP_COLUMN_PRIVILEGES_SQL: Final[str] = (
+    "SELECT r.role_name, c.table_name, c.column_name, p.priv, "
+    "has_column_privilege(r.role_name::name, "
+    "('public.' || c.table_name)::text, c.column_name::text, p.priv::text) "
+    "FROM unnest(%s::text[]) AS r(role_name) "
+    "CROSS JOIN information_schema.columns c "
+    "CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE']) AS p(priv) "
+    "WHERE c.table_schema = 'public' "
+    "AND c.table_name IN ('app_user', 'user_session')"
+)
+
+#: Direct column ACL records, expanded from ``pg_attribute.attacl``.
+#: ``information_schema.column_privileges`` only shows rows where the querying
+#: role is the grantor or the grantee, so it cannot prove what *another* role
+#: holds; ``aclexplode()`` on the raw ACL is not filtered that way. Every column
+#: privilege held by the runtime role would be redundant beside its table-level
+#: grant, so the expected record set for it is empty.
+_CLEANUP_COLUMN_GRANTS_SQL: Final[str] = (
+    "SELECT gr.rolname, c.relname, a.attname, x.privilege_type "
+    "FROM unnest(%s::text[]) AS r(role_name) "
+    "JOIN pg_roles gr ON gr.rolname::text = r.role_name::text "
+    "JOIN pg_class c ON c.oid = ANY(ARRAY['public.app_user'::regclass, "
+    "'public.user_session'::regclass]) "
+    "JOIN pg_attribute a "
+    "ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped "
+    "CROSS JOIN LATERAL aclexplode(a.attacl) AS x "
+    "WHERE x.grantee = gr.oid"
+)
+
+#: Neither Tier-2 role may be a member of the other: membership alone would
+#: hand the application role DELETE, or the teardown role write access.
+_CLEANUP_MEMBERSHIP_SQL: Final[str] = (
+    "SELECT pg_has_role(%s::name, %s::name, 'MEMBER'), "
+    "pg_has_role(%s::name, %s::name, 'MEMBER')"
+)
+
+_CLEANUP_SYSTEM_IDENTIFIER_SQL: Final[str] = (
+    "SELECT system_identifier FROM pg_control_system()"
+)
+
+#: The only columns the teardown role may reach at column level.
+_CLEANUP_COLUMNS: Final[frozenset[tuple[str, str]]] = frozenset(
+    {("app_user", "user_id"), ("user_session", "user_id")}
+)
+
+_SECURITY_TABLES: Final[tuple[str, ...]] = ("app_user", "user_session")
+
+
 def _require_cleanup_credential(dsn: str, target: VerifiedTestTarget) -> None:
-    """Refuse teardown credentials that are not a distinct DELETE-only role."""
+    """Refuse a teardown credential that is not a distinct DELETE-only role.
+
+    Verified against the already-verified Tier-2 target before the suite creates
+    a single row:
+
+    * identity: same database, same cluster (``pg_control_system()
+      .system_identifier``), the expected role, not a superuser;
+    * isolation: neither Tier-2 role is a member of the other;
+    * effective privileges for **both** roles, so a grant inherited through
+      another role is caught: the cleanup role holds ``DELETE`` on the two
+      security tables and can read only ``user_id`` in them; the runtime role
+      holds ``SELECT``/``INSERT``/``UPDATE`` and no ``DELETE``;
+    * the raw column ACLs: the cleanup role's column grants are exactly
+      ``user_id``, and the runtime role holds no column-level grant at all.
+
+    A privilege that cannot be inspected is a failure, never a pass.
+    """
+    roles = [CLEANUP_ROLE, RUNTIME_ROLE]
     connection = open_connection(dsn)
     try:
         connection.autocommit = True
-        identity = connection.execute(
-            "SELECT current_database(), current_user, "
-            "current_setting('is_superuser')"
-        ).fetchone()
-        privilege_rows = connection.execute(
-            "SELECT t.name, p.priv, "
-            "has_table_privilege(current_user, 'public.' || t.name, p.priv) "
-            "FROM unnest(ARRAY['app_user', 'user_session']) AS t(name) "
-            "CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) "
-            "AS p(priv)"
+        identity = connection.execute(_CLEANUP_IDENTITY_SQL).fetchone()
+        table_rows = connection.execute(
+            _CLEANUP_TABLE_PRIVILEGES_SQL, (roles,)
         ).fetchall()
+        column_rows = connection.execute(
+            _CLEANUP_COLUMN_PRIVILEGES_SQL, (roles,)
+        ).fetchall()
+        grant_rows = connection.execute(
+            _CLEANUP_COLUMN_GRANTS_SQL, (roles,)
+        ).fetchall()
+        membership = connection.execute(
+            _CLEANUP_MEMBERSHIP_SQL,
+            (CLEANUP_ROLE, RUNTIME_ROLE, RUNTIME_ROLE, CLEANUP_ROLE),
+        ).fetchone()
+        identifier_unreadable = False
+        try:
+            system_identifier_row = connection.execute(
+                _CLEANUP_SYSTEM_IDENTIFIER_SQL, ()
+            ).fetchone()
+        except Exception:
+            # Fail closed with the exact blocker instead of dropping the cluster
+            # check: a matching database name is not proof of the same cluster.
+            # pg_control_system() needs EXECUTE on the function (PUBLIC by
+            # default) and a hardened cluster may have revoked it.
+            system_identifier_row = None
+            identifier_unreadable = True
     finally:
         connection.close()
 
@@ -284,26 +398,135 @@ def _require_cleanup_credential(dsn: str, target: VerifiedTestTarget) -> None:
     if superuser != "off":
         pytest.fail("the cleanup credential must not be a superuser", pytrace=False)
 
-    granted = {(row[0], row[1]): bool(row[2]) for row in privilege_rows}
-    missing = [
-        f"{table}/DELETE"
-        for table in ("app_user", "user_session")
-        if not granted.get((table, "DELETE"))
-    ]
-    excess = [
-        f"{table}/{privilege}"
-        for table in ("app_user", "user_session")
-        for privilege in ("SELECT", "INSERT", "UPDATE")
-        if granted.get((table, privilege))
-    ]
-    if missing or excess:
+    # Cluster identity: the cleanup credential must target the same cluster as
+    # the verified test target. A matching database name alone is insufficient
+    # (two clusters can both hold a visual_attendance_tier2_test database).
+    if identifier_unreadable or system_identifier_row is None:
         pytest.fail(
-            "the cleanup credential must hold DELETE only "
-            f"(missing: {', '.join(missing) or 'none'}; "
-            f"excess: {', '.join(excess) or 'none'})",
+            "the cleanup credential cannot read pg_control_system()"
+            ".system_identifier, so the cluster identity cannot be proven and "
+            "the guard refuses to fall back to a name-only match. Do not grant "
+            "monitoring or superuser to bypass this: verify with a role that "
+            "may read the function, or record the blocker",
+            pytrace=False,
+        )
+    cleanup_sysid = system_identifier_row[0]
+    if isinstance(cleanup_sysid, bool) or not isinstance(cleanup_sysid, int):
+        pytest.fail(
+            "the cleanup credential's cluster system_identifier is not a usable "
+            "integer",
+            pytrace=False,
+        )
+    if cleanup_sysid != target.system_identifier:
+        pytest.fail(
+            "the cleanup credential targets a different PostgreSQL cluster "
+            "than the verified test target (system_identifier mismatch)",
             pytrace=False,
         )
 
+    if membership is not None and (membership[0] or membership[1]):
+        pytest.fail(
+            f"{CLEANUP_ROLE!r} and {RUNTIME_ROLE!r} must not be members of each "
+            "other; membership alone would hand one role the other's privileges",
+            pytrace=False,
+        )
+
+    granted = {(row[0], row[1], row[2]): bool(row[3]) for row in table_rows}
+    effective = {
+        (row[0], row[1], row[2], row[3]): bool(row[4]) for row in column_rows
+    }
+
+    missing_delete = [
+        f"{table}/DELETE"
+        for table in _SECURITY_TABLES
+        if not granted.get((CLEANUP_ROLE, table, "DELETE"))
+    ]
+    if missing_delete:
+        pytest.fail(
+            "the cleanup credential cannot delete synthetic rows (missing: "
+            f"{', '.join(missing_delete)})",
+            pytrace=False,
+        )
+
+    table_writes = [
+        f"{table}/{privilege}"
+        for table in _SECURITY_TABLES
+        for privilege in ("INSERT", "UPDATE")
+        if granted.get((CLEANUP_ROLE, table, privilege))
+    ]
+    if table_writes:
+        pytest.fail(
+            "the cleanup credential must hold no table-level write privilege "
+            f"(found: {', '.join(table_writes)})",
+            pytrace=False,
+        )
+
+    # Effective column reads: user_id only. A table-level SELECT grant, a grant
+    # on another column, or a SELECT inherited from another role all surface
+    # here as an extra readable column.
+    readable = {
+        (table, column)
+        for (owner, table, column, privilege), held in effective.items()
+        if owner == CLEANUP_ROLE and privilege == "SELECT" and held
+    }
+    if readable != set(_CLEANUP_COLUMNS):
+        unexpected = sorted(readable - set(_CLEANUP_COLUMNS))
+        absent = sorted(set(_CLEANUP_COLUMNS) - readable)
+        unexpected_text = ", ".join(f"{t}.{c}" for t, c in unexpected) or "none"
+        absent_text = ", ".join(f"{t}.{c}" for t, c in absent) or "none"
+        pytest.fail(
+            "the cleanup credential must be able to read user_id in both tables "
+            f"and nothing else (unexpected: {unexpected_text}; "
+            f"missing: {absent_text})",
+            pytrace=False,
+        )
+
+    writable_columns = sorted(
+        f"{table}.{column}/{privilege}"
+        for (owner, table, column, privilege), held in effective.items()
+        if owner == CLEANUP_ROLE and privilege in ("INSERT", "UPDATE") and held
+    )
+    if writable_columns:
+        pytest.fail(
+            "the cleanup credential must hold no column-level write privilege "
+            f"(found: {', '.join(writable_columns)})",
+            pytrace=False,
+        )
+
+    # The runtime role keeps exactly its application privileges.
+    runtime_missing = [
+        f"{table}/{privilege}"
+        for table in _SECURITY_TABLES
+        for privilege in ("SELECT", "INSERT", "UPDATE")
+        if not granted.get((RUNTIME_ROLE, table, privilege))
+    ]
+    if runtime_missing:
+        pytest.fail(
+            "the runtime role is missing required application privileges "
+            f"(missing: {', '.join(runtime_missing)})",
+            pytrace=False,
+        )
+    runtime_delete = [
+        table
+        for table in _SECURITY_TABLES
+        if granted.get((RUNTIME_ROLE, table, "DELETE"))
+    ]
+    if runtime_delete:
+        pytest.fail(
+            "the runtime role must not hold DELETE (found on: "
+            f"{', '.join(runtime_delete)})",
+            pytrace=False,
+        )
+
+    runtime_column_grants = sorted(
+        f"{row[1]}.{row[2]}/{row[3]}" for row in grant_rows if row[0] == RUNTIME_ROLE
+    )
+    if runtime_column_grants:
+        pytest.fail(
+            "the runtime role must hold no column-level grant (found: "
+            f"{', '.join(runtime_column_grants)})",
+            pytrace=False,
+        )
 
 def _require_schema(dsn: str) -> None:
     """Skip with BLOCKED unless both security tables exist (read-only check)."""

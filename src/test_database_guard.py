@@ -106,6 +106,7 @@ _MARKERS_READ_SQL: Final[str] = (
     f"SELECT marker, created_at, schema_version FROM {GUARD_MARKER_TABLE}"
 )
 _CURRENT_DATABASE_SQL: Final[str] = "SELECT current_database()"
+_SYSTEM_IDENTIFIER_SQL: Final[str] = "SELECT system_identifier FROM pg_control_system()"
 _LEDGER_VERSION_SQL: Final[str] = f"SELECT MAX(version) FROM {LEDGER_TABLE}"
 
 #: libpq's documented default port: a DSN that omits the port does not
@@ -185,6 +186,7 @@ class VerifiedTestTarget:
     dbname: str
     host: str
     port: object
+    system_identifier: int
     marker_created_at: datetime
     marker_schema_version: int
     ledger_schema_version: int
@@ -381,6 +383,34 @@ def _read_marker_row(connection: Any) -> tuple[str, tuple[Any, ...] | None]:
     if len(rows) != 1:
         return (_MARKER_AMBIGUOUS, None)
     return (_MARKER_OK, tuple(rows[0]))
+
+
+def _read_system_identifier(connection: Any) -> int | None:
+    """Read the cluster's ``pg_control_system().system_identifier``.
+
+    Returns ``None`` when the value is unavailable for any reason: the query
+    raised (``pg_control_system()`` needs EXECUTE on the function, whatever the
+    cluster's hardened state), the row or column is missing, or the value is
+    malformed. ``system_identifier`` is an unsigned 64-bit cluster fingerprint,
+    so ``0``, a negative number, a boolean, a string or ``None`` are all
+    malformed values and never identity evidence. The caller turns ``None``
+    into a fail-closed ``IDENTITY_UNVERIFIABLE``.
+
+    This is a cluster fingerprint, not a credential: it identifies a cluster
+    and cannot authenticate anything, so carrying it in
+    :class:`VerifiedTestTarget` is safe (no DSN, no secret).
+    """
+    try:
+        result = connection.execute(_SYSTEM_IDENTIFIER_SQL, ())
+        row = result.fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    value = row[0] if len(row) else None
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
 
 
 def _read_ledger_version(connection: Any) -> int | None:
@@ -607,6 +637,14 @@ def verify_test_database(
                 "applied ledger records",
             )
 
+        system_identifier = _read_system_identifier(connection)
+        if system_identifier is None:
+            raise GuardBlocked(
+                GuardBlockedReason.IDENTITY_UNVERIFIABLE,
+                "the cluster system_identifier could not be read from the "
+                "connected target; refusing to verify cluster identity",
+            )
+
         return VerifiedTestTarget(
             dbname=connected_dbname,
             host=(
@@ -617,6 +655,7 @@ def verify_test_database(
             port=(
                 connected_port if connected_port is not None else test_identity[2]
             ),
+            system_identifier=system_identifier,
             marker_created_at=created_at,
             marker_schema_version=marker_schema_version,
             ledger_schema_version=ledger_version,

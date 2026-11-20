@@ -138,6 +138,8 @@ class _FakeGuardConnection:
             return _FakeResult([(self.ledger_version,)])
         if "max(version)" in sql.lower():
             return _FakeResult([(self.ledger_version,)])
+        if "system_identifier" in sql:
+            return _FakeResult([(7687968999847354228,)])
         raise AssertionError(f"guard must only issue approved reads: {sql!r}")
 
     def close(self) -> None:
@@ -208,6 +210,7 @@ def test_verified_target_cannot_be_forged_by_callers() -> None:
             dbname="attendance_test",
             host="127.0.0.1",
             port=5433,
+            system_identifier=7687968999847354228,
             marker_created_at=MARKER_CREATED_AT,
             marker_schema_version=1,
             ledger_schema_version=1,
