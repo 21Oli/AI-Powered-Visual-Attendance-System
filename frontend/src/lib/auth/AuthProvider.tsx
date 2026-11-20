@@ -44,6 +44,7 @@ import {
 } from "../api/auth";
 import { ApiError, toApiError } from "../api/errors";
 import type { AuthUser } from "../api/types";
+import { subscribeToUnauthorized } from "./session-events";
 
 export type AuthStatus = "loading" | "authenticated" | "unauthenticated" | "error";
 
@@ -79,7 +80,15 @@ const INITIAL_STATE: AuthState = {
   notice: null,
 };
 
-const AuthContext = createContext<AuthContextValue | null>(null);
+/**
+ * The auth context object itself.
+ *
+ * Exported for isolation tests, which supply a known identity instead of
+ * mocking `/me`. It is not an authorization authority: reading a value from it
+ * only decides what the UI offers, and the backend still authorizes every
+ * request.
+ */
+export const AuthContext = createContext<AuthContextValue | null>(null);
 
 /**
  * Ask the backend who the session belongs to and translate the answer into a
@@ -145,6 +154,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         requestInFlight.current = false;
       });
   }, [applyState]);
+
+  // A protected data request answered with 401 means the session this page was
+  // using is gone (expired or revoked server-side). The transport cannot reach
+  // React state, so it announces the fact and the provider clears the signed-in
+  // UI; `RequireAuth` then redirects once, with a validated return path.
+  useEffect(
+    () =>
+      subscribeToUnauthorized(() => {
+        applyState({
+          status: "unauthenticated",
+          user: null,
+          error: null,
+          notice: hadSession.current ? "expired" : null,
+        });
+      }),
+    [applyState],
+  );
 
   const signIn = useCallback(async (username: string, password: string) => {
     const user = await loginRequest({ username, password });

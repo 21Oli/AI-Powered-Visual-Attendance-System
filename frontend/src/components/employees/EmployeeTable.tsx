@@ -6,6 +6,8 @@ import styles from "./EmployeeTable.module.css";
 
 export interface EmployeeTableProps {
   employees: readonly Employee[];
+  /** Whether the current role may deactivate; the control is hidden if not. */
+  canDeactivate: boolean;
   onView: (employee: Employee) => void;
   onDeactivate: (employee: Employee) => void;
 }
@@ -24,6 +26,7 @@ export interface EmployeeTableProps {
  */
 export function EmployeeTable({
   employees,
+  canDeactivate,
   onView,
   onDeactivate,
 }: EmployeeTableProps) {
@@ -74,14 +77,16 @@ export function EmployeeTable({
                   >
                     View
                   </Button>
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    onClick={() => onDeactivate(employee)}
-                    disabled={!manageable || !employee.is_active}
-                  >
-                    Deactivate
-                  </Button>
+                  {canDeactivate ? (
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      onClick={() => onDeactivate(employee)}
+                      disabled={!manageable || !employee.is_active}
+                    >
+                      Deactivate
+                    </Button>
+                  ) : null}
                 </div>
               </td>
             </tr>

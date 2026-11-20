@@ -1,7 +1,10 @@
+"use client";
+
 import Link from "next/link";
 import type { RefObject } from "react";
 
-import { NAV_ITEMS, isActivePath } from "../../lib/navigation";
+import { useAuthorization } from "../../lib/auth/useAuthorization";
+import { isActivePath, visibleNavItems } from "../../lib/navigation";
 import { NavIcon } from "../icons/NavIcon";
 import styles from "./MobileNavigation.module.css";
 
@@ -32,6 +35,9 @@ export function MobileNavigation({
   onNavigate,
   closeButtonRef,
 }: MobileNavigationProps) {
+  const { ready, role } = useAuthorization();
+  const items = ready ? visibleNavItems(role) : [];
+
   if (!open) {
     return null;
   }
@@ -68,7 +74,7 @@ export function MobileNavigation({
 
         <nav className={styles.nav} aria-label="Mobile">
           <ul className={styles.list}>
-            {NAV_ITEMS.map((item) => {
+            {items.map((item) => {
               const active = isActivePath(pathname, item.href);
               return (
                 <li key={item.href}>

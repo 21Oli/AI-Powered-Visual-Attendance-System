@@ -4,7 +4,8 @@ import { useRef, useState } from "react";
 import type { FormEvent } from "react";
 
 import { createEmployee } from "../../lib/api/employees";
-import { toApiError } from "../../lib/api/errors";
+import { ACCESS_DENIED_MESSAGE, toApiError } from "../../lib/api/errors";
+import { useAuthorization } from "../../lib/auth/useAuthorization";
 import type { Employee } from "../../lib/api/types";
 import {
   mapCreateEmployeeError,
@@ -42,10 +43,17 @@ export function CreateEmployeeForm({
   const [pending, setPending] = useState(false);
   const idRef = useRef<HTMLInputElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
+  const { can } = useAuthorization();
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (pending) {
+      return;
+    }
+    // The form is only rendered for a permitted role; this keeps a stray submit
+    // from reaching the API if that ever stops being true.
+    if (!can("employees:create")) {
+      setErrors({ form: ACCESS_DENIED_MESSAGE });
       return;
     }
 

@@ -4,8 +4,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { createOverviewSource } from "../../lib/api/data-source";
 import type { DataSourceKind } from "../../lib/api/data-source";
-import { toApiError } from "../../lib/api/errors";
+import { isForbidden, toApiError } from "../../lib/api/errors";
 import type { ApiError } from "../../lib/api/errors";
+import { useAuthorization } from "../../lib/auth/useAuthorization";
 import type {
   AttendanceEvent,
   AttendanceResponse,
@@ -75,6 +76,9 @@ export function AttendanceView({
     DEFAULT_ATTENDANCE_PAGE_SIZE,
   );
   const requestIdRef = useRef(0);
+  // Presentation only: the backend authorizes the check-out itself.
+  const { ready, can } = useAuthorization();
+  const canCheckout = ready && can("attendance:checkout");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -268,18 +272,32 @@ export function AttendanceView({
 
       {attendance.status === "error" ? (
         <div className={styles.errorPanel} role="alert">
-          <p className={styles.errorTitle}>Attendance is unavailable</p>
+          <p className={styles.errorTitle}>
+            {isForbidden(attendance.error)
+              ? "Access denied"
+              : "Attendance is unavailable"}
+          </p>
           <p className={styles.errorText}>{attendance.error.message}</p>
           <p className={styles.errorCode}>
             Reference: <code>{attendance.error.code}</code>
           </p>
-          <Button variant="secondary" size="sm" onClick={reload}>
-            Retry
-          </Button>
+          {/* Repeating a forbidden read cannot succeed; only 5xx/network can. */}
+          {isForbidden(attendance.error) ? null : (
+            <Button variant="secondary" size="sm" onClick={reload}>
+              Retry
+            </Button>
+          )}
         </div>
       ) : null}
 
-      {attendance.status !== "error" ? (
+      {attendance.status !== "error" && !canCheckout ? (
+        <p className={styles.note}>
+          Check-out is available to roles with the operator check-out
+          permission. Your role can read the journal only.
+        </p>
+      ) : null}
+
+      {attendance.status !== "error" && canCheckout ? (
         <AttendanceCheckout
           dataSourceKind={dataSourceKind}
           employeeIds={journalEmployeeIds}

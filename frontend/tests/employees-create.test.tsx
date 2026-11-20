@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CreateEmployeeForm } from "../src/components/employees/CreateEmployeeForm";
+import { withRole } from "./helpers/auth";
 
 const fetchMock = vi.fn<typeof fetch>();
 
@@ -24,7 +25,12 @@ function setup() {
   const onCreated = vi.fn();
   const onCancel = vi.fn();
   const user = userEvent.setup();
-  render(<CreateEmployeeForm onCreated={onCreated} onCancel={onCancel} />);
+  render(
+    withRole(
+      "Admin",
+      <CreateEmployeeForm onCreated={onCreated} onCancel={onCancel} />,
+    ),
+  );
   return { user, onCreated, onCancel };
 }
 

@@ -12,6 +12,7 @@ import type { ApiError } from "../api/errors";
  */
 
 export type CheckoutFailureKind =
+  | "forbidden"
   | "employee_not_found"
   | "employee_inactive"
   | "no_open_session"
@@ -40,6 +41,7 @@ export interface CheckoutFailure {
 }
 
 const MESSAGES: Record<Exclude<CheckoutFailureKind, "other">, string> = {
+  forbidden: "You do not have permission to check out employees.",
   employee_not_found: "That employee no longer exists.",
   employee_inactive: "This employee is inactive and cannot check out.",
   no_open_session: "The journal shows no open session for this employee.",
@@ -55,6 +57,11 @@ const MESSAGES: Record<Exclude<CheckoutFailureKind, "other">, string> = {
 
 /** The documented backend conditions, matched on code **and** status. */
 function knownKind(error: ApiError): CheckoutFailureKind | null {
+  // Authenticated but not permitted: the session is intact and the request
+  // wrote nothing, so this is a business refusal rather than a transport fault.
+  if (error.status === 403) {
+    return "forbidden";
+  }
   if (error.code === "EMPLOYEE_NOT_FOUND" && error.status === 404) {
     return "employee_not_found";
   }

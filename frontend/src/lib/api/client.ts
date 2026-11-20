@@ -1,3 +1,4 @@
+import { notifyUnauthorized } from "../auth/session-events";
 import { ApiError, malformedError, networkError } from "./errors";
 import { parseErrorEnvelope } from "./types";
 
@@ -144,6 +145,11 @@ export async function requestJson<T>(options: RequestOptions<T>): Promise<T> {
   const text = await response.text();
 
   if (!response.ok) {
+    // A refused data request ends the session UI; the auth endpoints
+    // (`direct`) are excluded because their own provider owns the 401 outcome.
+    if (response.status === 401 && options.direct !== true) {
+      notifyUnauthorized();
+    }
     throw httpErrorFrom(response.status, text);
   }
 

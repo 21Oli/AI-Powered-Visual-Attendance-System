@@ -6,16 +6,22 @@ const { pathRef } = vi.hoisted(() => ({ pathRef: { current: "/overview" } }));
 
 vi.mock("next/navigation", () => ({
   usePathname: () => pathRef.current,
+  // The authenticated header renders the user menu, which needs a router.
+  useRouter: () => ({ replace: vi.fn(), push: vi.fn(), refresh: vi.fn() }),
 }));
 
 import { AppShell } from "../src/components/layout/AppShell";
 import { MOBILE_NAVIGATION_ID } from "../src/components/layout/MobileNavigation";
+import { withRole } from "./helpers/auth";
 
 const renderShell = () =>
   render(
-    <AppShell>
-      <h1>Section content</h1>
-    </AppShell>,
+    withRole(
+      "Admin",
+      <AppShell>
+        <h1>Section content</h1>
+      </AppShell>,
+    ),
   );
 
 const trigger = () => screen.getByRole("button", { name: "Open navigation" });

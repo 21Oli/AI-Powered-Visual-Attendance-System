@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { EmployeesView } from "../src/components/employees/EmployeesView";
+import { withRole } from "./helpers/auth";
 
 const fetchMock = vi.fn<typeof fetch>();
 
@@ -55,7 +56,7 @@ describe("employee deactivation", () => {
   it("requires confirmation before calling the API", async () => {
     routeApi(() => Promise.resolve(json(deactivatedEmployee)));
     const user = userEvent.setup();
-    render(<EmployeesView />);
+    render(withRole("Admin", <EmployeesView />));
     await screen.findByText("EMP-1");
 
     await user.click(screen.getByRole("button", { name: "Deactivate" }));
@@ -72,7 +73,7 @@ describe("employee deactivation", () => {
   it("cancelling closes the dialog without deactivating", async () => {
     routeApi(() => Promise.resolve(json(deactivatedEmployee)));
     const user = userEvent.setup();
-    render(<EmployeesView />);
+    render(withRole("Admin", <EmployeesView />));
     await screen.findByText("EMP-1");
 
     await user.click(screen.getByRole("button", { name: "Deactivate" }));
@@ -87,7 +88,7 @@ describe("employee deactivation", () => {
   it("closes on Escape and restores focus to the invoking control", async () => {
     routeApi(() => Promise.resolve(json(deactivatedEmployee)));
     const user = userEvent.setup();
-    render(<EmployeesView />);
+    render(withRole("Admin", <EmployeesView />));
     await screen.findByText("EMP-1");
 
     const trigger = screen.getByRole("button", { name: "Deactivate" });
@@ -113,7 +114,7 @@ describe("employee deactivation", () => {
   it("deactivates once, reports success and refreshes the directory", async () => {
     routeApi(() => Promise.resolve(json(deactivatedEmployee)));
     const user = userEvent.setup();
-    render(<EmployeesView />);
+    render(withRole("Admin", <EmployeesView />));
     await screen.findByText("EMP-1");
 
     await user.click(screen.getByRole("button", { name: "Deactivate" }));
@@ -148,7 +149,7 @@ describe("employee deactivation", () => {
       ),
     );
     const user = userEvent.setup();
-    render(<EmployeesView />);
+    render(withRole("Admin", <EmployeesView />));
     await screen.findByText("EMP-1");
 
     await user.click(screen.getByRole("button", { name: "Deactivate" }));
@@ -171,7 +172,7 @@ describe("employee deactivation", () => {
         }),
       ),
     );
-    render(<EmployeesView />);
+    render(withRole("Admin", <EmployeesView />));
     await screen.findByText("EMP-1");
 
     expect(

@@ -45,3 +45,15 @@
   font-size: var(--text-xs);
   color: var(--color-text-subtle);
 }
+
+.link {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
+.link:hover,
+.link:focus-visible {
+  text-decoration: underline;
+}

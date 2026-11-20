@@ -5,6 +5,9 @@
  * read from `NAV_ITEMS`, so a route can never drift between them.
  */
 
+import { roleHasPermission } from "./authz/permissions";
+import type { Permission } from "./authz/permissions";
+
 export const NAV_ICON_NAMES = [
   "overview",
   "employees",
@@ -21,6 +24,11 @@ export interface NavItem {
   readonly icon: NavIconName;
   /** One-line description of the area, used on the placeholder pages. */
   readonly purpose: string;
+  /**
+   * The permission the area's data requires, mirroring the backend route that
+   * serves it. `null` means "any signed-in role" (the health screen).
+   */
+  readonly permission: Permission | null;
 }
 
 /** Where the root route sends visitors. */
@@ -33,6 +41,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     icon: "overview",
     purpose:
       "One place for workforce activity: employee totals, attendance activity and service availability.",
+    permission: "attendance:read",
   },
   {
     href: "/employees",
@@ -40,6 +49,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     icon: "employees",
     purpose:
       "The employee register: who is enrolled, which records are active, and where names are maintained.",
+    permission: "employees:read",
   },
   {
     href: "/attendance",
@@ -47,6 +57,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     icon: "attendance",
     purpose:
       "The attendance journal: recorded events, incomplete trailing records and operator-authorized check-out.",
+    permission: "attendance:read",
   },
   {
     href: "/system-status",
@@ -54,8 +65,22 @@ export const NAV_ITEMS: readonly NavItem[] = [
     icon: "system-status",
     purpose:
       "Service availability and backend reachability, so an operator can tell a quiet day from an outage.",
+    permission: null,
   },
 ];
+
+/**
+ * The navigation entries to show for `role`.
+ *
+ * Fail-closed: an unresolved or unknown role sees only the entries that need no
+ * permission, which today is the health screen. Hiding an entry never grants
+ * anything — the backend decides access to the area itself.
+ */
+export function visibleNavItems(role: unknown): readonly NavItem[] {
+  return NAV_ITEMS.filter(
+    (item) => item.permission === null || roleHasPermission(role, item.permission),
+  );
+}
 
 /**
  * Whether a navigation item represents the current route.

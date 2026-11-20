@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { toApiError } from "../../lib/api/errors";
+import { ACCESS_DENIED_MESSAGE, isForbidden, toApiError } from "../../lib/api/errors";
 import type { ApiError } from "../../lib/api/errors";
+import { useAuthorization } from "../../lib/auth/useAuthorization";
 import { deactivateEmployee, fetchEmployeePage } from "../../lib/api/employees";
 import type { Employee, EmployeeListResponse } from "../../lib/api/types";
 import { mapEmployeeMutationError } from "../../lib/employees/errors";
@@ -47,6 +48,11 @@ export function EmployeesView() {
   const [deactivatePending, setDeactivatePending] = useState(false);
   const [deactivateError, setDeactivateError] = useState<string | null>(null);
   const requestIdRef = useRef(0);
+  // Presentation only: the backend authorizes every request, so a hidden
+  // control is an affordance decision, never the enforcement.
+  const { can } = useAuthorization();
+  const canCreate = can("employees:create");
+  const canDeactivate = can("employees:deactivate");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -151,6 +157,12 @@ export function EmployeesView() {
     if (target === null || deactivatePending) {
       return;
     }
+    // Defence in depth: the confirmation is only reachable from a permitted
+    // control, and the request is still refused here if that ever changes.
+    if (!canDeactivate) {
+      setDeactivateError(ACCESS_DENIED_MESSAGE);
+      return;
+    }
     setDeactivatePending(true);
     setDeactivateError(null);
     try {
@@ -172,7 +184,7 @@ export function EmployeesView() {
     } finally {
       setDeactivatePending(false);
     }
-  }, [deactivateTarget, deactivatePending, refresh, selectedId]);
+  }, [canDeactivate, deactivateTarget, deactivatePending, refresh, selectedId]);
 
   const employees = list.status === "ready" ? list.page.employees : [];
   const isFirstPage = pageIndex === 0;
@@ -192,14 +204,16 @@ export function EmployeesView() {
           </p>
         </div>
         <div className={styles.headActions}>
-          <Button
-            variant="primary"
-            onClick={() => setShowCreate((open) => !open)}
-            aria-expanded={showCreate}
-            aria-controls="create-employee-panel"
-          >
-            {showCreate ? "Close create form" : "Create employee"}
-          </Button>
+          {canCreate ? (
+            <Button
+              variant="primary"
+              onClick={() => setShowCreate((open) => !open)}
+              aria-expanded={showCreate}
+              aria-controls="create-employee-panel"
+            >
+              {showCreate ? "Close create form" : "Create employee"}
+            </Button>
+          ) : null}
           <Button variant="secondary" onClick={refresh} disabled={pending}>
             Refresh
           </Button>
@@ -215,7 +229,7 @@ export function EmployeesView() {
         </StatusMessage>
       )}
 
-      {showCreate ? (
+      {showCreate && canCreate ? (
         <div id="create-employee-panel">
           <CreateEmployeeForm
             onCreated={handleCreated}
@@ -259,21 +273,29 @@ export function EmployeesView() {
 
         {list.status === "error" ? (
           <div className={styles.errorPanel} role="alert">
-            <p className={styles.errorTitle}>The employee directory is unavailable</p>
+            <p className={styles.errorTitle}>
+              {isForbidden(list.error)
+                ? "Access denied"
+                : "The employee directory is unavailable"}
+            </p>
             <p className={styles.errorText}>{list.error.message}</p>
             <p className={styles.errorCode}>
               Reference: <code>{list.error.code}</code>
             </p>
-            <Button variant="secondary" size="sm" onClick={refresh}>
-              Retry
-            </Button>
+            {/* A forbidden read is not fixed by repeating it, so no retry. */}
+            {isForbidden(list.error) ? null : (
+              <Button variant="secondary" size="sm" onClick={refresh}>
+                Retry
+              </Button>
+            )}
           </div>
         ) : null}
 
         {isEmptyDirectory && isFirstPage ? (
           <p className={styles.empty}>
-            No employees are registered yet. Create the first employee to get
-            started.
+            {canCreate
+              ? "No employees are registered yet. Create the first employee to get started."
+              : "No employees are registered yet."}
           </p>
         ) : null}
 
@@ -292,6 +314,7 @@ export function EmployeesView() {
         {employees.length > 0 ? (
           <EmployeeTable
             employees={employees}
+            canDeactivate={canDeactivate}
             onView={(employee) => setSelectedId(employee.employee_id)}
             onDeactivate={requestDeactivate}
           />

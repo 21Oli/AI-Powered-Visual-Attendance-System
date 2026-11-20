@@ -40,7 +40,8 @@ Phase 5 covers:
 * an append-only audit journal for security events (P5.5, not started);
 * user administration with secure first-Admin provisioning (P5.6, implemented
   and awaiting review);
-* the frontend sign-in flow and role-aware UI (P5.7–P5.8, not started);
+* the frontend sign-in flow (P5.7, implemented) and role-aware UI (P5.8,
+  implemented and awaiting review);
 * the final Phase 5 security review and acceptance (P5.9, not started).
 
 It does **not** change employee or attendance-journal semantics, does not add an
@@ -58,7 +59,7 @@ relational table), and does not introduce biometric storage of any kind.
 | P5.5 | Audit journal and security-event auditing (§9, `docs/AUDIT_JOURNAL_DESIGN.md`) | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer, P5.5.4 service and P5.5.5 route integration **implemented, awaiting review**; P5.5.6 verifier CLI **accepted (committed `87c73e5`)**; P5.5.7.2 manifest schema/integrity **accepted**; P5.5.7 manifest persistence, rotation, recovery, retention and manifest-aware verification **implemented, awaiting review**; P5.5.8 not started |
 | P5.6 | User administration and secure first-Admin provisioning (§10) | **Implemented, awaiting independent review**; real-PostgreSQL concurrency scenarios **blocked** (test database lacks `app_user`/`user_session`) |
 | P5.7 | Frontend authentication and session integration (§10.2, `docs/P5_7_FRONTEND_AUTHENTICATION.md`) | **Implemented, awaiting review** — login page, session restoration, protected routes, sign-out; offline tests, lint, typecheck and production build green |
-| P5.8 | Role-aware UI and frontend security hardening (§10) | Not started |
+| P5.8 | Role-aware UI and frontend security hardening (§10, `docs/P5_8_ROLE_AWARE_UI_SECURITY.md`) | **Implemented, awaiting review** — mirrored permission model, navigation and action gating, access-denied screen, 401/403/503 handling; offline tests, lint, typecheck and production build green. User-administration and audit screens deliberately not built |
 | P5.9 | Final security regression, integration review and Phase 5 acceptance (§10) | Not started |
 
 Each milestone is gated on owner review of the previous one. No milestone
@@ -981,12 +982,23 @@ second cookie was widened. Offline verification: 541 frontend tests pass across
 `tsc --noEmit` clean, `next build` succeeds. No live backend, browser session or production deployment was
 exercised. Details and limitations: `docs/P5_7_FRONTEND_AUTHENTICATION.md`.
 
-**P5.8 — Role-aware UI and frontend security hardening.** Permission-aware
-navigation and actions that reflect the P5.4.10 policy while the backend stays
-the sole authorization authority, session-expiry handling, correct 401 versus
-403 behaviour in the client, security headers and frontend hardening. An audit
-read view for the Auditor role only if and when a P5.5 API design is approved
-(`audit:read` currently guards no endpoint).
+**P5.8 — Role-aware UI and frontend security hardening — implemented, awaiting
+review.** Delivered: one presentation-layer mirror of the P5.4.10 matrix
+(`src/lib/authz/permissions.ts`) with fail-closed lookups for unknown roles and
+permissions, a single `useAuthorization()` entry point, permission-filtered
+navigation (desktop and drawer from the same table), `RequirePermission` page
+guards with one consistent access-denied screen, hidden (not disabled)
+create/rename/deactivate/check-out controls per role with a second check in
+each handler, and a client error policy that separates 401 (clears the session
+UI and redirects once), 403 (session kept, denied message, no retry) and
+503/network (unavailable, explicit retry). Verified offline: 614 frontend tests
+across 42 files pass (71 new, in 4 new files), `eslint .` clean,
+`tsc --noEmit` clean, `next build` succeeds. **Not** delivered, deliberately:
+no user-administration UI (the `/api/v1/users` routes are absent from the proxy
+allowlist, which this milestone froze, and P5.6's PostgreSQL concurrency
+verification is still BLOCKED) and no audit view (`audit:read` guards no
+endpoint, so a page would be inventing a capability). No live backend, browser
+or deployment was exercised. Details: `docs/P5_8_ROLE_AWARE_UI_SECURITY.md`.
 
 **P5.9 — Final security regression and Phase 5 acceptance.** Full authorization
 matrix regression, authentication and session-lifecycle regression, audit

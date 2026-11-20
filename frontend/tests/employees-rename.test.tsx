@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { EmployeeDetail } from "../src/components/employees/EmployeeDetail";
+import { withRole } from "./helpers/auth";
 
 const fetchMock = vi.fn<typeof fetch>();
 
@@ -26,12 +27,15 @@ function setup() {
   const onRequestDeactivate = vi.fn();
   const user = userEvent.setup();
   render(
-    <EmployeeDetail
-      employeeId="EMP-1"
-      onClose={onClose}
-      onRenamed={onRenamed}
-      onRequestDeactivate={onRequestDeactivate}
-    />,
+    withRole(
+      "Admin",
+      <EmployeeDetail
+        employeeId="EMP-1"
+        onClose={onClose}
+        onRenamed={onRenamed}
+        onRequestDeactivate={onRequestDeactivate}
+      />,
+    ),
   );
   return { user, onRenamed, onClose, onRequestDeactivate };
 }

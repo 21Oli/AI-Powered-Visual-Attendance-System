@@ -1,6 +1,9 @@
+"use client";
+
 import Link from "next/link";
 
-import { NAV_ITEMS, isActivePath } from "../../lib/navigation";
+import { useAuthorization } from "../../lib/auth/useAuthorization";
+import { isActivePath, visibleNavItems } from "../../lib/navigation";
 import { NavIcon } from "../icons/NavIcon";
 import styles from "./Sidebar.module.css";
 
@@ -12,6 +15,11 @@ import styles from "./Sidebar.module.css";
  * `aria-current="page"`, not colour alone.
  */
 export function Sidebar({ pathname }: { pathname: string | null }) {
+  const { ready, role } = useAuthorization();
+  // An unresolved identity shows no gated entry at all (fail closed). In the
+  // app this shell only mounts for an authenticated session.
+  const items = ready ? visibleNavItems(role) : [];
+
   return (
     <aside className={styles.sidebar}>
       <div className={styles.brand}>
@@ -24,7 +32,7 @@ export function Sidebar({ pathname }: { pathname: string | null }) {
 
       <nav className={styles.nav} aria-label="Primary">
         <ul className={styles.list}>
-          {NAV_ITEMS.map((item) => {
+          {items.map((item) => {
             const active = isActivePath(pathname, item.href);
             return (
               <li key={item.href}>

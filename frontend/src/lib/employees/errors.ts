@@ -1,3 +1,4 @@
+import { ACCESS_DENIED_MESSAGE, isForbidden } from "../api/errors";
 import type { ApiError } from "../api/errors";
 
 /**
@@ -49,6 +50,9 @@ function mapFields(error: ApiError): EmployeeFormErrors | null {
 }
 
 function genericMessage(error: ApiError): string {
+  if (isForbidden(error)) {
+    return ACCESS_DENIED_MESSAGE;
+  }
   if (error.code === "PROXY_REQUEST_INVALID" || error.status === 413) {
     return "The request was rejected by the dashboard proxy before it reached the service.";
   }

@@ -194,8 +194,10 @@ npm run build       # next build
 ## 6. Security considerations
 
 * **Single authority.** The backend decides who is authenticated and what they
-  may do. The role shown in the header is display data; no client-side
-  authorization decision was added (that is P5.8).
+  may do. The role shown in the header is display data; P5.7 added no
+  client-side authorization decision. P5.8 adds a presentation-only permission
+  mirror for hiding controls — see `docs/P5_8_ROLE_AWARE_UI_SECURITY.md` — which
+  never replaces backend enforcement.
 * **No token in JavaScript.** The session exists only as an HttpOnly cookie; the
   auth state contains identity fields and callbacks, and a test pins that shape.
 * **Error sanitation.** User-facing text is chosen locally from the failure

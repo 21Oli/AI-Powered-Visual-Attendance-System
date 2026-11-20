@@ -4,7 +4,8 @@ import { useRef, useState } from "react";
 
 import { checkoutEmployee } from "../../lib/api/attendance";
 import type { DataSourceKind } from "../../lib/api/data-source";
-import { toApiError } from "../../lib/api/errors";
+import { ACCESS_DENIED_MESSAGE, toApiError } from "../../lib/api/errors";
+import { useAuthorization } from "../../lib/auth/useAuthorization";
 import type { AttendanceEvent, Employee } from "../../lib/api/types";
 import type { CheckoutFailureNotice } from "../../lib/attendance/checkout";
 import {
@@ -78,6 +79,7 @@ export function AttendanceCheckout({
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const pendingRef = useRef<string | null>(null);
+  const { can } = useAuthorization();
 
   const liveData = dataSourceKind === "live";
   const selectedEligibility =
@@ -94,6 +96,13 @@ export function AttendanceCheckout({
   const confirm = async () => {
     const employee = selected;
     if (employee === null || pendingRef.current !== null) {
+      return;
+    }
+    // The panel is only rendered for a permitted role; refuse before the write
+    // if that ever stops being true, rather than letting the service answer.
+    if (!can("attendance:checkout")) {
+      setSelected(null);
+      setOutcome({ kind: "blocked", explanation: ACCESS_DENIED_MESSAGE });
       return;
     }
 

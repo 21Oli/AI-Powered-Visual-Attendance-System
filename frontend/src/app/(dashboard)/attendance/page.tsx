@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 
+import { RequirePermission } from "../../../components/auth/RequirePermission";
 import { AttendanceView } from "../../../components/attendance/AttendanceView";
 import { resolveDataSourceKind } from "../../../lib/api/data-source";
 
@@ -18,5 +19,9 @@ export default function AttendancePage() {
     DASHBOARD_DATA_MODE: process.env.DASHBOARD_DATA_MODE,
   });
 
-  return <AttendanceView dataSourceKind={dataSourceKind} />;
+  return (
+    <RequirePermission permission="attendance:read">
+      <AttendanceView dataSourceKind={dataSourceKind} />
+    </RequirePermission>
+  );
 }

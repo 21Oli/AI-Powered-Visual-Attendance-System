@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { EmployeesView } from "../src/components/employees/EmployeesView";
+import { withRole } from "./helpers/auth";
 
 const fetchMock = vi.fn<typeof fetch>();
 
@@ -72,7 +73,7 @@ describe("employee directory", () => {
   it("shows a loading state before the first page resolves", () => {
     fetchMock.mockReturnValue(new Promise<Response>(() => undefined));
 
-    render(<EmployeesView />);
+    render(withRole("Admin", <EmployeesView />));
 
     expect(
       screen.getByRole("heading", { level: 1, name: "Employees" }),
@@ -83,7 +84,7 @@ describe("employee directory", () => {
   it("shows an empty state without inventing a total", async () => {
     routeList(() => json(page([], null)));
 
-    render(<EmployeesView />);
+    render(withRole("Admin", <EmployeesView />));
 
     expect(
       await screen.findByText(/no employees are registered yet/i),
@@ -111,7 +112,7 @@ describe("employee directory", () => {
       ),
     );
 
-    render(<EmployeesView />);
+    render(withRole("Admin", <EmployeesView />));
 
     const table = await screen.findByRole("table", {
       name: "Employees on this page",
@@ -136,7 +137,7 @@ describe("employee directory", () => {
       ),
     );
 
-    render(<EmployeesView />);
+    render(withRole("Admin", <EmployeesView />));
     await screen.findByRole("table");
 
     const legacy = rowFor("bad%id");
@@ -168,7 +169,7 @@ describe("employee directory", () => {
     });
 
     const user = userEvent.setup();
-    render(<EmployeesView />);
+    render(withRole("Admin", <EmployeesView />));
 
     expect(
       await screen.findByText(/employee directory is unavailable/i),
@@ -189,7 +190,7 @@ describe("employee directory", () => {
     );
 
     const user = userEvent.setup();
-    render(<EmployeesView />);
+    render(withRole("Admin", <EmployeesView />));
     await screen.findByText("EMP-1");
 
     await user.click(screen.getByRole("button", { name: "Next" }));
@@ -213,7 +214,7 @@ describe("employee directory", () => {
   it("disables Previous on the first page", async () => {
     routeList(() => json(page([{ employee_id: "EMP-1" }], null)));
 
-    render(<EmployeesView />);
+    render(withRole("Admin", <EmployeesView />));
     await screen.findByText("EMP-1");
 
     expect(
@@ -232,7 +233,7 @@ describe("employee directory", () => {
     );
 
     const user = userEvent.setup();
-    render(<EmployeesView />);
+    render(withRole("Admin", <EmployeesView />));
     await screen.findByText("EMP-1");
     await user.click(screen.getByRole("button", { name: "Next" }));
     await screen.findByText("EMP-2");
@@ -255,7 +256,7 @@ describe("employee directory", () => {
     );
 
     const user = userEvent.setup();
-    render(<EmployeesView />);
+    render(withRole("Admin", <EmployeesView />));
     await screen.findByText("EMP-1");
 
     await user.click(screen.getByRole("button", { name: "Next" }));
@@ -276,7 +277,7 @@ describe("employee directory", () => {
   it("never presents the page count as a total", async () => {
     routeList(() => json(page([{ employee_id: "EMP-1" }, { employee_id: "EMP-2" }], "EMP-2")));
 
-    render(<EmployeesView />);
+    render(withRole("Admin", <EmployeesView />));
     await screen.findByText("EMP-1");
 
     expect(screen.getByText("Page 1 · 2 on this page")).toBeDefined();
@@ -303,7 +304,7 @@ describe("employee directory", () => {
     });
 
     const user = userEvent.setup();
-    render(<EmployeesView />);
+    render(withRole("Admin", <EmployeesView />));
 
     await user.click(screen.getByRole("button", { name: "Create employee" }));
     await user.type(screen.getByLabelText(/employee id/i), "NEW");

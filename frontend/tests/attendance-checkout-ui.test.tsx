@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AttendanceView } from "../src/components/attendance/AttendanceView";
+import { withRole } from "./helpers/auth";
 import type { AttendanceEvent, Employee } from "../src/lib/api/types";
 import { CHECKOUT_COOLDOWN_SECONDS } from "../src/lib/attendance/checkout";
 
@@ -133,7 +134,7 @@ async function renderAndReady(
 ): Promise<{ user: ReturnType<typeof userEvent.setup>; panel: HTMLElement }> {
   routeJournal(handlers);
   const user = userEvent.setup();
-  render(<AttendanceView dataSourceKind="live" />);
+  render(withRole("Operator", <AttendanceView dataSourceKind="live" />));
   const panel = await screen.findByRole("region", { name: "Operator checkout" });
   await within(panel).findByRole("button", { name: "Check out Ada Fixture" });
   return { user, panel };
@@ -206,7 +207,7 @@ describe("checkout eligibility", () => {
       attendance: () => Promise.resolve(json(attendancePayload(journal))),
       employees: () => Promise.reject(new TypeError("Failed to fetch")),
     });
-    render(<AttendanceView dataSourceKind="live" />);
+    render(withRole("Operator", <AttendanceView dataSourceKind="live" />));
 
     const panel = await screen.findByRole("region", {
       name: "Operator checkout",
@@ -223,7 +224,7 @@ describe("checkout eligibility", () => {
       attendance: () => Promise.resolve(json(attendancePayload(journal))),
       employees: () => pendingEmployees.promise,
     });
-    render(<AttendanceView dataSourceKind="live" />);
+    render(withRole("Operator", <AttendanceView dataSourceKind="live" />));
 
     const panel = await screen.findByRole("region", {
       name: "Operator checkout",
@@ -252,7 +253,7 @@ describe("checkout eligibility", () => {
       employees: () =>
         Promise.resolve(json(employeesPage([employee("bad%id", "Percent Fixture")], null))),
     });
-    render(<AttendanceView dataSourceKind="live" />);
+    render(withRole("Operator", <AttendanceView dataSourceKind="live" />));
 
     const panel = await screen.findByRole("region", { name: "Operator checkout" });
     expect(
@@ -266,7 +267,7 @@ describe("checkout eligibility", () => {
   });
 
   it("disables check-out completely in fixture mode", async () => {
-    render(<AttendanceView dataSourceKind="fixture" />);
+    render(withRole("Operator", <AttendanceView dataSourceKind="fixture" />));
 
     const panel = await screen.findByRole("region", { name: "Operator checkout" });
     expect(
@@ -397,7 +398,7 @@ describe("checkout confirmation", () => {
     });
     const pending = deferred<Response>();
     const user = userEvent.setup();
-    render(<AttendanceView dataSourceKind="live" />);
+    render(withRole("Operator", <AttendanceView dataSourceKind="live" />));
     const panel = await screen.findByRole("region", { name: "Operator checkout" });
 
     await user.click(
@@ -699,7 +700,7 @@ describe("attendance page regressions with checkout present", () => {
       employees: () => Promise.resolve(json(employeesPage(register, null))),
     });
     const user = userEvent.setup();
-    render(<AttendanceView dataSourceKind="live" />);
+    render(withRole("Operator", <AttendanceView dataSourceKind="live" />));
     await screen.findByRole("table", {
       name: "Attendance journal, in append order",
     });

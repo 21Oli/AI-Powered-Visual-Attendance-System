@@ -141,6 +141,14 @@ export function checkoutFailureNotice(
   failure: CheckoutFailure,
 ): CheckoutFailureNotice {
   switch (failure.kind) {
+    case "forbidden":
+      return {
+        title: "Not permitted",
+        detail:
+          "The service refused this check-out for your role, so no event was written. Your session is still active.",
+        refresh: false,
+        verifyJournal: false,
+      };
     case "employee_not_found":
       return {
         title: "Employee not found",

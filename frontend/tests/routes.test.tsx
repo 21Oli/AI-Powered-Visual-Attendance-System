@@ -7,6 +7,7 @@ import OverviewPage from "../src/app/(dashboard)/overview/page";
 import SystemStatusPage from "../src/app/(dashboard)/system-status/page";
 import RootPage from "../src/app/page";
 import { DEFAULT_ROUTE } from "../src/lib/navigation";
+import { withRole } from "./helpers/auth";
 
 const fetchMock = vi.fn<typeof fetch>();
 
@@ -52,7 +53,7 @@ describe("root route", () => {
 
 describe("overview route", () => {
   it("renders the functional dashboard instead of a placeholder", async () => {
-    render(<OverviewPage />);
+    render(withRole("Admin", <OverviewPage />));
 
     expect(screen.getByRole("heading", { level: 1, name: "Overview" })).toBeDefined();
     expect(await screen.findByText("Total employees")).toBeDefined();
@@ -60,14 +61,14 @@ describe("overview route", () => {
   });
 
   it("leaves fixture mode off unless the server opts in", () => {
-    render(<OverviewPage />);
+    render(withRole("Admin", <OverviewPage />));
     expect(screen.queryByRole("note")).toBeNull();
   });
 });
 
 describe("employees route", () => {
   it("renders the employee directory instead of a placeholder", async () => {
-    render(<EmployeesPage />);
+    render(withRole("Admin", <EmployeesPage />));
 
     expect(
       screen.getByRole("heading", { level: 1, name: "Employees" }),
@@ -81,7 +82,7 @@ describe("employees route", () => {
 
 describe("attendance route", () => {
   it("renders the read-only journal instead of a placeholder", async () => {
-    render(<AttendancePage />);
+    render(withRole("Admin", <AttendancePage />));
 
     expect(
       screen.getByRole("heading", { level: 1, name: "Attendance" }),

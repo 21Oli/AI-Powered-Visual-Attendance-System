@@ -3,8 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
-import { toApiError } from "../../lib/api/errors";
+import { ACCESS_DENIED_MESSAGE, toApiError } from "../../lib/api/errors";
 import type { ApiError } from "../../lib/api/errors";
+import { useAuthorization } from "../../lib/auth/useAuthorization";
 import { fetchEmployeeById, renameEmployee } from "../../lib/api/employees";
 import type { Employee } from "../../lib/api/types";
 import {
@@ -49,6 +50,9 @@ export function EmployeeDetail({
   const [message, setMessage] = useState<string | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
+  const { can } = useAuthorization();
+  const canUpdate = can("employees:update");
+  const canDeactivate = can("employees:deactivate");
 
   useEffect(() => {
     headingRef.current?.focus({ preventScroll: true });
@@ -77,6 +81,10 @@ export function EmployeeDetail({
   const submitRename = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (pending || state.status !== "ready") {
+      return;
+    }
+    if (!canUpdate) {
+      setErrors({ form: ACCESS_DENIED_MESSAGE });
       return;
     }
 
@@ -163,39 +171,52 @@ export function EmployeeDetail({
             <StatusMessage tone="success">{message}</StatusMessage>
           )}
 
-          <form className={styles.rename} onSubmit={submitRename} noValidate>
-            <h3 className={styles.subtitle}>Rename</h3>
-            {errors.form === undefined ? null : (
-              <StatusMessage tone="error">{errors.form}</StatusMessage>
-            )}
-            <TextField
-              id="employee-rename"
-              label="Full name"
-              value={name}
-              onChange={setName}
-              inputRef={nameRef}
-              required
-              disabled={pending}
-              autoComplete="off"
-              error={errors.fullName ?? null}
-            />
-            <div className={styles.actions}>
-              <Button type="submit" variant="primary" disabled={pending}>
-                {pending ? "Saving…" : "Save name"}
-              </Button>
-              <Button
-                variant="danger"
-                onClick={() => onRequestDeactivate(state.employee)}
-                disabled={pending || !state.employee.is_active}
-              >
-                Deactivate employee
-              </Button>
-            </div>
+          {canUpdate || canDeactivate ? (
+            <form className={styles.rename} onSubmit={submitRename} noValidate>
+              <h3 className={styles.subtitle}>Rename</h3>
+              {errors.form === undefined ? null : (
+                <StatusMessage tone="error">{errors.form}</StatusMessage>
+              )}
+              {canUpdate ? (
+                <TextField
+                  id="employee-rename"
+                  label="Full name"
+                  value={name}
+                  onChange={setName}
+                  inputRef={nameRef}
+                  required
+                  disabled={pending}
+                  autoComplete="off"
+                  error={errors.fullName ?? null}
+                />
+              ) : null}
+              <div className={styles.actions}>
+                {canUpdate ? (
+                  <Button type="submit" variant="primary" disabled={pending}>
+                    {pending ? "Saving…" : "Save name"}
+                  </Button>
+                ) : null}
+                {canDeactivate ? (
+                  <Button
+                    variant="danger"
+                    onClick={() => onRequestDeactivate(state.employee)}
+                    disabled={pending || !state.employee.is_active}
+                  >
+                    Deactivate employee
+                  </Button>
+                ) : null}
+              </div>
+              <p className={styles.note}>
+                Only the name can be changed. Employee ID, status and creation
+                date are managed by the service, and deactivation has no undo
+                endpoint.
+              </p>
+            </form>
+          ) : (
             <p className={styles.note}>
-              Only the name can be changed. Employee ID, status and creation date
-              are managed by the service, and deactivation has no undo endpoint.
+              Your role can view this record but not change it.
             </p>
-          </form>
+          )}
         </>
       ) : null}
     </section>
