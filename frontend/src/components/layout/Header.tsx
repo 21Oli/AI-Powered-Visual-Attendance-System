@@ -1,5 +1,6 @@
 import type { RefObject } from "react";
 
+import { UserMenu } from "../auth/UserMenu";
 import { ThemeToggle } from "../ui/ThemeToggle";
 import styles from "./Header.module.css";
 
@@ -45,6 +46,7 @@ export function Header({
       <p className={styles.section}>{sectionLabel}</p>
 
       <div className={styles.actions}>
+        <UserMenu />
         <ThemeToggle />
       </div>
     </header>

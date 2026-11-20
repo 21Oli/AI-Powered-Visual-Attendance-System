@@ -1,4 +1,4 @@
-import type { RefObject } from "react";
+import type { ReactNode, RefObject } from "react";
 
 import styles from "./TextField.module.css";
 
@@ -7,6 +7,10 @@ export interface TextFieldProps {
   label: string;
   value: string;
   onChange: (value: string) => void;
+  /** `password` for secret input; defaults to `text`. */
+  type?: "text" | "password";
+  /** Optional control rendered beside the input (e.g. show/hide password). */
+  adornment?: ReactNode;
   hint?: string;
   error?: string | null;
   required?: boolean;
@@ -28,6 +32,8 @@ export function TextField({
   label,
   value,
   onChange,
+  type = "text",
+  adornment,
   hint,
   error,
   required = false,
@@ -61,21 +67,28 @@ export function TextField({
         </p>
       )}
 
-      <input
-        ref={inputRef}
-        id={id}
-        name={id}
-        type="text"
-        className={error == null ? styles.input : `${styles.input} ${styles.inputInvalid}`}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        aria-invalid={error == null ? undefined : true}
-        aria-describedby={describedBy}
-        aria-required={required ? true : undefined}
-        disabled={disabled}
-        maxLength={maxLength}
-        autoComplete={autoComplete}
-      />
+      <div className={styles.inputRow}>
+        <input
+          ref={inputRef}
+          id={id}
+          name={id}
+          type={type}
+          className={
+            error == null ? styles.input : `${styles.input} ${styles.inputInvalid}`
+          }
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          aria-invalid={error == null ? undefined : true}
+          aria-describedby={describedBy}
+          aria-required={required ? true : undefined}
+          disabled={disabled}
+          maxLength={maxLength}
+          autoComplete={autoComplete}
+        />
+        {adornment === undefined ? null : (
+          <div className={styles.adornment}>{adornment}</div>
+        )}
+      </div>
 
       {error == null ? null : (
         <p className={styles.error} id={errorId} role="alert">

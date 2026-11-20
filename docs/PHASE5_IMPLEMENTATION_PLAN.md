@@ -57,7 +57,7 @@ relational table), and does not introduce biometric storage of any kind.
 | P5.4 | Authentication API: session service integration, login/logout, `/auth/me`, BFF, login throttling, backend RBAC (sub-milestones P5.4.1–P5.4.10, §8) | Completed offline through P5.4.10 and accepted (committed in `b0583df`) |
 | P5.5 | Audit journal and security-event auditing (§9, `docs/AUDIT_JOURNAL_DESIGN.md`) | P5.5.1 design approved; P5.5.2 primitives, P5.5.3 writer, P5.5.4 service and P5.5.5 route integration **implemented, awaiting review**; P5.5.6 verifier CLI **accepted (committed `87c73e5`)**; P5.5.7.2 manifest schema/integrity **accepted**; P5.5.7 manifest persistence, rotation, recovery, retention and manifest-aware verification **implemented, awaiting review**; P5.5.8 not started |
 | P5.6 | User administration and secure first-Admin provisioning (§10) | **Implemented, awaiting independent review**; real-PostgreSQL concurrency scenarios **blocked** (test database lacks `app_user`/`user_session`) |
-| P5.7 | Frontend authentication and session integration (§10) | Not started |
+| P5.7 | Frontend authentication and session integration (§10.2, `docs/P5_7_FRONTEND_AUTHENTICATION.md`) | **Implemented, awaiting review** — login page, session restoration, protected routes, sign-out; offline tests, lint, typecheck and production build green |
 | P5.8 | Role-aware UI and frontend security hardening (§10) | Not started |
 | P5.9 | Final security regression, integration review and Phase 5 acceptance (§10) | Not started |
 
@@ -964,13 +964,22 @@ and none may be pulled forward without a separate owner instruction.
 * No live server, real credentials, frontend, P5.7/P5.8/P5.9 work or production
   database was exercised.
 
-### 10.2 P5.7–P5.9 (not started)
+### 10.2 P5.7–P5.9
 
-**P5.7 — Frontend authentication and session integration.** Login and logout
-UI, session retrieval through the existing `/auth/me`, same-origin BFF usage,
-cookie-based session handling (HttpOnly, never readable by JavaScript),
-authentication-required states and redirects. No token storage in JavaScript
-and no role-aware UI yet.
+**P5.7 — Frontend authentication and session integration — implemented,
+awaiting review** (authorized by the owner on 2026-11-20 after accepting P5.6
+with its PostgreSQL concurrency verification recorded as BLOCKED). Delivered:
+the `/login` page, a single auth state model (`loading` / `authenticated` /
+`unauthenticated` / `error`) with one `/me` request per page load, session
+restoration after refresh, a client-side guard on the `(dashboard)` route group,
+safe return-path validation, sign-out from the shell header, and sanitized
+failure text. The guard is client-side because the session cookie is
+`Path=/api/v1`, so the browser never sends it to a dashboard route — middleware
+or a server component could not see it, and neither the cookie path nor a
+second cookie was widened. Offline verification: 541 frontend tests pass across
+38 files (39 of them new, in 5 new test files), `eslint .` clean,
+`tsc --noEmit` clean, `next build` succeeds. No live backend, browser session or production deployment was
+exercised. Details and limitations: `docs/P5_7_FRONTEND_AUTHENTICATION.md`.
 
 **P5.8 — Role-aware UI and frontend security hardening.** Permission-aware
 navigation and actions that reflect the P5.4.10 policy while the backend stays

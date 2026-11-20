@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 
+import { AuthProvider } from "../lib/auth/AuthProvider";
 import { THEME_INIT_SCRIPT } from "../lib/theme";
 import "./globals.css";
 
@@ -31,7 +32,16 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         */}
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
       </head>
-      <body>{children}</body>
+      <body>
+        {/*
+          One authentication provider for the whole tree. It owns the single
+          `/api/v1/auth/me` call and the shared loading/authenticated/
+          unauthenticated/error state, so the login page and the dashboard guard
+          can never disagree about the session. It holds no token: the session
+          is the backend's HttpOnly cookie.
+        */}
+        <AuthProvider>{children}</AuthProvider>
+      </body>
     </html>
   );
 }
